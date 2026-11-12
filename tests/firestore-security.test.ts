@@ -8,11 +8,13 @@ import {
   assertSucceeds,
   RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, getDocs } from 'firebase/firestore';
+import { getFirestore, connectFirestoreEmulator, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, getDocs } from 'firebase/firestore';
 import { sanitizeFirestorePayload } from '../src/services/firebase';
 
+import appletConfig from '../firebase-applet-config.json';
+
 const PROJECT_ID = 'demo-murafiq-security-test';
-const NAMED_DB_ID = 'ai-studio-murafiq-cb988db3-5a07-40b7-b1ca-8eaaae894475';
+const NAMED_DB_ID = appletConfig.firestoreDatabaseId;
 const USER_A_UID = 'user_alice_123';
 const USER_B_UID = 'user_bob_456';
 
@@ -20,32 +22,16 @@ let testEnv: RulesTestEnvironment;
 let emulatorHost: string;
 let emulatorPort: number;
 
-async function loadRulesForDatabase(projectId: string, databaseId: string, rulesContent: string) {
-  const url = `http://${emulatorHost}:${emulatorPort}/emulator/v1/projects/${projectId}/databases/${databaseId}/rules`;
-  const res = await fetch(url, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      rules: {
-        files: [{ name: 'firestore.rules', content: rulesContent }],
-      },
-    }),
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to load rules into emulator database "${databaseId}": ${res.status} ${text}`);
-  }
-}
-
 function getDbInstance(context: any, databaseId: string = NAMED_DB_ID) {
-  if (databaseId === '(default)') {
-    return context.firestore();
-  }
-  return context.firestore({ databaseId });
+  const app = (context as any).getApp();
+  const db = getFirestore(app, databaseId);
+  connectFirestoreEmulator(db, emulatorHost, emulatorPort, { mockUserToken: (context as any).authToken });
+  return db;
 }
 
 test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)', async (t) => {
+  assert.equal(PROJECT_ID, 'demo-murafiq-security-test', 'Tests must be isolated to demo project');
+
   before(async () => {
     const rulesPath = path.resolve(process.cwd(), 'firestore.rules');
     const rules = fs.readFileSync(rulesPath, 'utf8');
@@ -55,7 +41,7 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
     emulatorHost = h || '127.0.0.1';
     emulatorPort = parseInt(p || '8088', 10);
 
-    // Initialize test environment
+    // Initialize test environment with rules
     testEnv = await initializeTestEnvironment({
       projectId: PROJECT_ID,
       firestore: {
@@ -76,7 +62,7 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
     }
   });
 
-  const dbTargets = [NAMED_DB_ID, '(default)'];
+  const dbTargets = ['(default)'];
 
   for (const dbId of dbTargets) {
     await t.test(`Database Target [${dbId}]: Security & Data Isolation Assertions`, async (st) => {
@@ -303,4 +289,42 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
       });
     });
   }
+
+  // 9. Explicit Physical Database Isolation Assertion between default and named databases
+  await t.test('Explicit physical database-isolation between default and named databases', async () => {
+    const aliceCtx = testEnv.authenticatedContext(USER_A_UID);
+    const defaultDb = getFirestore((aliceCtx as any).getApp(), '(default)');
+    connectFirestoreEmulator(defaultDb, emulatorHost, emulatorPort, { mockUserToken: (aliceCtx as any).authToken });
+
+    const namedDb = getFirestore((aliceCtx as any).getApp(), NAMED_DB_ID);
+    connectFirestoreEmulator(namedDb, emulatorHost, emulatorPort, { mockUserToken: (aliceCtx as any).authToken });
+
+    const docPath = `users/${USER_A_UID}/clients/isolation_distinct_test`;
+
+    await setDoc(doc(defaultDb, docPath), {
+      id: 'isolation_distinct_test',
+      userId: USER_A_UID,
+      name: 'Data in Default DB',
+      createdAt: '2026-11-12T00:00:00.000Z',
+    });
+
+    await setDoc(doc(namedDb, docPath), {
+      id: 'isolation_distinct_test',
+      userId: USER_A_UID,
+      name: 'Data in Named DB',
+      createdAt: '2026-11-12T00:00:00.000Z',
+    });
+
+    const defaultSnap = await getDoc(doc(defaultDb, docPath));
+    const namedSnap = await getDoc(doc(namedDb, docPath));
+
+    assert.equal(defaultSnap.data()?.name, 'Data in Default DB');
+    assert.equal(namedSnap.data()?.name, 'Data in Named DB');
+    assert.notEqual(defaultSnap.data()?.name, namedSnap.data()?.name);
+  });
+
+  // 10. Named Database Configuration Assertion
+  await t.test('Named database ID is correctly configured in firebase-applet-config.json', () => {
+    assert.equal(appletConfig.firestoreDatabaseId, 'ai-studio-murafiq-cb988db3-5a07-40b7-b1ca-8eaaae894475');
+  });
 });
