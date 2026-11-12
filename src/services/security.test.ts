@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getAuthenticatedUid, getUserCollectionPath, auth } from './firebase';
+import { getAuthenticatedUid, getUserCollectionPath, auth, sanitizeFirestorePayload } from './firebase';
 import { Client, Meeting, ActionItem, Note } from '../types';
 import { computeAggregatedSyncState, canSafelySignOut, CollectionSyncStatus, CollectionKey } from '../utils/syncLogic';
 
@@ -205,6 +205,34 @@ test('computeAggregatedSyncState marks synced ONLY when all four collections are
   assert.equal(state, 'synced');
 });
 
+// P1 Task 002 Safe Serialization Tests
+test('sanitizeFirestorePayload strips undefined keys while preserving valid falsy values (false, 0, "")', () => {
+  const input = {
+    id: 't-123',
+    clientId: 'c-456',
+    meetingId: undefined,
+    title: 'مهمة بدون اجتماع',
+    description: '',
+    dueDate: undefined,
+    priority: 'high',
+    status: 'pending',
+    isCompleted: false,
+    duration: 0,
+    nested: {
+      valid: true,
+      invalid: undefined,
+    },
+  };
+
+  const clean = sanitizeFirestorePayload(input);
+
+  assert.equal('meetingId' in clean, false);
+  assert.equal(clean.description, '');
+  assert.equal(clean.isCompleted, false);
+  assert.equal(clean.duration, 0);
+  assert.equal(clean.nested.valid, true);
+});
+
 // P1 Task 002-Fix: Safe Sign-Out Guard Tests
 test('canSafelySignOut prevents signing out with unacknowledged local writes', () => {
   const dirtyStatuses: Record<CollectionKey, CollectionSyncStatus> = {
@@ -229,3 +257,4 @@ test('canSafelySignOut prevents signing out with unacknowledged local writes', (
   assert.equal(checkClean.safe, true);
   assert.deepEqual(checkClean.pendingCollections, []);
 });
+

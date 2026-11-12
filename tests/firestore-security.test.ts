@@ -9,36 +9,29 @@ import {
   RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
 import { doc, getDoc, setDoc, updateDoc, deleteDoc, collection, getDocs } from 'firebase/firestore';
+import { sanitizeFirestorePayload } from '../src/services/firebase';
 
 const PROJECT_ID = 'demo-murafiq-security-test';
+const NAMED_DB_ID = 'ai-studio-murafiq-cb988db3-5a07-40b7-b1ca-8eaaae894475';
 const USER_A_UID = 'user_alice_123';
 const USER_B_UID = 'user_bob_456';
 
 let testEnv: RulesTestEnvironment;
 
-// Only execute when emulator host is available
-const isEmulatorConfigured = Boolean(
-  process.env.FIRESTORE_EMULATOR_HOST || process.env.FIREBASE_EMULATOR_HUB
-);
-
-test('Firestore Security Rules Test Suite (@firebase/rules-unit-testing)', async (t) => {
-  if (!isEmulatorConfigured) {
-    t.skip(
-      'Firestore Emulator is not running in this environment (Java not installed). Recorded blocker for offline CI/local execution.'
-    );
-    return;
-  }
-
+test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)', async (t) => {
   before(async () => {
     const rulesPath = path.resolve(process.cwd(), 'firestore.rules');
     const rules = fs.readFileSync(rulesPath, 'utf8');
+
+    const emulatorHost = process.env.FIRESTORE_EMULATOR_HOST || '127.0.0.1:8085';
+    const [host, portStr] = emulatorHost.split(':');
 
     testEnv = await initializeTestEnvironment({
       projectId: PROJECT_ID,
       firestore: {
         rules,
-        host: process.env.FIRESTORE_EMULATOR_HOST?.split(':')[0] || '127.0.0.1',
-        port: parseInt(process.env.FIRESTORE_EMULATOR_HOST?.split(':')[1] || '8080', 10),
+        host: host || '127.0.0.1',
+        port: parseInt(portStr || '8085', 10),
       },
     });
   });
@@ -79,15 +72,18 @@ test('Firestore Security Rules Test Suite (@firebase/rules-unit-testing)', async
     // Clients
     const clientRef = doc(aliceDb, `users/${USER_A_UID}/clients/client_1`);
     await assertSucceeds(
-      setDoc(clientRef, {
-        id: 'client_1',
-        userId: USER_A_UID,
-        name: 'شركة الأفق للاستشارات',
-        company: 'الأفق',
-        phone: '+966500000000',
-        createdAt: '2026-11-12T00:00:00.000Z',
-        updatedAt: '2026-11-12T00:00:00.000Z',
-      })
+      setDoc(
+        clientRef,
+        sanitizeFirestorePayload({
+          id: 'client_1',
+          userId: USER_A_UID,
+          name: 'شركة الأفق للاستشارات',
+          company: 'الأفق',
+          phone: '+966500000000',
+          createdAt: '2026-11-12T00:00:00.000Z',
+          updatedAt: '2026-11-12T00:00:00.000Z',
+        })
+      )
     );
     await assertSucceeds(getDoc(clientRef));
     await assertSucceeds(updateDoc(clientRef, { name: 'شركة الأفق المحدثة' }));
@@ -96,55 +92,101 @@ test('Firestore Security Rules Test Suite (@firebase/rules-unit-testing)', async
     // Meetings
     const meetingRef = doc(aliceDb, `users/${USER_A_UID}/meetings/meet_1`);
     await assertSucceeds(
-      setDoc(meetingRef, {
-        id: 'meet_1',
-        userId: USER_A_UID,
-        clientId: 'client_1',
-        title: 'جلسة مراجعة العقد السنوي',
-        dateTime: '2026-11-15T10:00:00.000Z',
-        type: 'in_person',
-        status: 'confirmed',
-        notes: 'مناقشة بنود الدفع والجدول الزمني.',
-        createdAt: '2026-11-12T00:00:00.000Z',
-      })
+      setDoc(
+        meetingRef,
+        sanitizeFirestorePayload({
+          id: 'meet_1',
+          userId: USER_A_UID,
+          clientId: 'client_1',
+          title: 'جلسة مراجعة العقد السنوي',
+          dateTime: '2026-11-15T10:00:00.000Z',
+          type: 'in_person',
+          status: 'confirmed',
+          notes: 'مناقشة بنود الدفع والجدول الزمني.',
+          duration: 0, // Falsy duration preserved
+          isFollowUpScheduled: false, // Falsy boolean preserved
+          createdAt: '2026-11-12T00:00:00.000Z',
+        })
+      )
     );
     await assertSucceeds(getDoc(meetingRef));
     await assertSucceeds(deleteDoc(meetingRef));
 
-    // Tasks
-    const taskRef = doc(aliceDb, `users/${USER_A_UID}/tasks/task_1`);
-    await assertSucceeds(
-      setDoc(taskRef, {
-        id: 'task_1',
-        userId: USER_A_UID,
-        clientId: 'client_1',
-        title: 'إرسال العرض المالي المعدل',
-        priority: 'high',
-        status: 'pending',
-        createdAt: '2026-11-12T00:00:00.000Z',
-      })
-    );
-    await assertSucceeds(getDoc(taskRef));
-    await assertSucceeds(deleteDoc(taskRef));
-
     // Notes
     const noteRef = doc(aliceDb, `users/${USER_A_UID}/notes/note_1`);
     await assertSucceeds(
-      setDoc(noteRef, {
-        id: 'note_1',
-        userId: USER_A_UID,
-        title: 'ملاحظة سرية عن المفاوضات',
-        content: 'العميل يفضل التوقيع قبل نهاية الربع الحالي.',
-        isPinned: true,
-        createdAt: '2026-11-12T00:00:00.000Z',
-      })
+      setDoc(
+        noteRef,
+        sanitizeFirestorePayload({
+          id: 'note_1',
+          userId: USER_A_UID,
+          title: 'ملاحظة سرية عن المفاوضات',
+          content: 'العميل يفضل التوقيع قبل نهاية الربع الحالي.',
+          isPinned: false, // Falsy boolean preserved
+          createdAt: '2026-11-12T00:00:00.000Z',
+        })
+      )
     );
     await assertSucceeds(getDoc(noteRef));
     await assertSucceeds(deleteDoc(noteRef));
   });
 
-  // 3. User B cannot read, list, create, update, or delete User A's records
-  await t.test("3. User B cannot read, list, create, update, or delete User A's records", async () => {
+  // 3. Serialization & Optional Fields Validation (Requirement C)
+  await t.test('3. Serialization of optional fields (Task creation with and without meetingId and dueDate)', async () => {
+    const aliceDb = testEnv.authenticatedContext(USER_A_UID).firestore();
+
+    // Task 1: Created WITHOUT optional meetingId and WITHOUT dueDate (values undefined in raw object)
+    const rawTaskWithoutOptionals = {
+      id: 'task_no_opts',
+      clientId: 'client_1',
+      meetingId: undefined,
+      title: 'مهمة مستقلة بدون اجتماع ولا تاريخ استحقاق',
+      description: undefined,
+      dueDate: undefined,
+      priority: 'high',
+      status: 'pending',
+      createdAt: '2026-11-12T00:00:00.000Z',
+    };
+
+    const taskRef1 = doc(aliceDb, `users/${USER_A_UID}/tasks/task_no_opts`);
+    const cleanPayload1 = sanitizeFirestorePayload({ ...rawTaskWithoutOptionals, userId: USER_A_UID });
+
+    // Verify undefined keys were completely stripped from payload
+    assert.equal('meetingId' in cleanPayload1, false);
+    assert.equal('dueDate' in cleanPayload1, false);
+    assert.equal('description' in cleanPayload1, false);
+
+    // Verify Firestore setDoc succeeds without undefined error and passes Security Rules
+    await assertSucceeds(setDoc(taskRef1, cleanPayload1));
+    const snap1 = await getDoc(taskRef1);
+    assert.equal(snap1.exists(), true);
+
+    // Task 2: Created WITH optional meetingId and WITH dueDate
+    const rawTaskWithOptionals = {
+      id: 'task_with_opts',
+      clientId: 'client_1',
+      meetingId: 'meet_1',
+      title: 'مهمة مرتبطة باجتماع وتاريخ محدد',
+      description: 'تفاصيل التسليم النهائي للمشروع',
+      dueDate: '2026-11-20',
+      priority: 'urgent',
+      status: 'pending',
+      createdAt: '2026-11-12T00:00:00.000Z',
+    };
+
+    const taskRef2 = doc(aliceDb, `users/${USER_A_UID}/tasks/task_with_opts`);
+    const cleanPayload2 = sanitizeFirestorePayload({ ...rawTaskWithOptionals, userId: USER_A_UID });
+
+    assert.equal(cleanPayload2.meetingId, 'meet_1');
+    assert.equal(cleanPayload2.dueDate, '2026-11-20');
+
+    await assertSucceeds(setDoc(taskRef2, cleanPayload2));
+    const snap2 = await getDoc(taskRef2);
+    assert.equal(snap2.exists(), true);
+  });
+
+  // 4. User B cannot read, list, create, update, or delete User A's records
+  await t.test("4. User B cannot read, list, create, update, or delete User A's records", async () => {
     // Seed record as User A
     const aliceDb = testEnv.authenticatedContext(USER_A_UID).firestore();
     const aliceClientRef = doc(aliceDb, `users/${USER_A_UID}/clients/secret_c1`);
@@ -176,8 +218,8 @@ test('Firestore Security Rules Test Suite (@firebase/rules-unit-testing)', async
     );
   });
 
-  // 4. Invalid document IDs and malformed records are rejected
-  await t.test('4. Invalid document IDs and malformed records are rejected', async () => {
+  // 5. Invalid document IDs and malformed records are rejected
+  await t.test('5. Invalid document IDs and malformed records are rejected', async () => {
     const aliceDb = testEnv.authenticatedContext(USER_A_UID).firestore();
 
     // Mismatched ID (doc id != data.id)
@@ -214,8 +256,8 @@ test('Firestore Security Rules Test Suite (@firebase/rules-unit-testing)', async
     );
   });
 
-  // 5. Documents with forged userId values are rejected
-  await t.test('5. Documents with forged userId values are rejected', async () => {
+  // 6. Documents with forged userId values are rejected
+  await t.test('6. Documents with forged userId values are rejected', async () => {
     const aliceDb = testEnv.authenticatedContext(USER_A_UID).firestore();
 
     const forgedClientRef = doc(aliceDb, `users/${USER_A_UID}/clients/c_forged`);
@@ -229,8 +271,8 @@ test('Firestore Security Rules Test Suite (@firebase/rules-unit-testing)', async
     );
   });
 
-  // 6. Legacy root collections remain completely inaccessible
-  await t.test('6. Legacy root collections remain inaccessible', async () => {
+  // 7. Legacy root collections remain completely inaccessible
+  await t.test('7. Legacy root collections remain inaccessible', async () => {
     const aliceDb = testEnv.authenticatedContext(USER_A_UID).firestore();
 
     await assertFails(getDoc(doc(aliceDb, 'clients/legacy_1')));
@@ -240,8 +282,8 @@ test('Firestore Security Rules Test Suite (@firebase/rules-unit-testing)', async
     await assertFails(getDoc(doc(aliceDb, 'test/connection')));
   });
 
-  // 7. Empty collections handled without sample-data insertion
-  await t.test('7. Empty collections return empty lists without sample-data insertion', async () => {
+  // 8. Empty collections handled without sample-data insertion
+  await t.test('8. Empty collections return empty lists without sample-data insertion', async () => {
     const aliceDb = testEnv.authenticatedContext(USER_A_UID).firestore();
 
     const clientsSnap = await assertSucceeds(getDocs(collection(aliceDb, `users/${USER_A_UID}/clients`)));

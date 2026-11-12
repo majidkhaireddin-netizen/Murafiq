@@ -278,17 +278,42 @@ export function subscribeNotes(
   );
 }
 
+/**
+ * Recursively removes keys with `undefined` values from payloads before sending to Firestore,
+ * while preserving valid falsy values (false, 0, "") and required properties.
+ */
+export function sanitizeFirestorePayload<T extends Record<string, any>>(obj: T): Record<string, any> {
+  const result: Record<string, any> = {};
+  for (const [key, val] of Object.entries(obj)) {
+    if (val !== undefined) {
+      if (Array.isArray(val)) {
+        result[key] = val.map((item) =>
+          typeof item === 'object' && item !== null && !(item instanceof Date)
+            ? sanitizeFirestorePayload(item)
+            : item
+        );
+      } else if (typeof val === 'object' && val !== null && !(val instanceof Date)) {
+        result[key] = sanitizeFirestorePayload(val);
+      } else {
+        result[key] = val;
+      }
+    }
+  }
+  return result;
+}
+
 // User-Scoped Protected Mutations
 export async function saveClient(client: Client): Promise<void> {
   const uid = getAuthenticatedUid();
   const path = `users/${uid}/clients/${client.id}`;
   try {
-    const payload: Client = {
+    const rawPayload: Client = {
       ...client,
       userId: uid,
       createdAt: client.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
+    const payload = sanitizeFirestorePayload(rawPayload);
     await setDoc(doc(db, 'users', uid, 'clients', client.id), payload);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
@@ -309,12 +334,13 @@ export async function saveMeeting(meeting: Meeting): Promise<void> {
   const uid = getAuthenticatedUid();
   const path = `users/${uid}/meetings/${meeting.id}`;
   try {
-    const payload: Meeting = {
+    const rawPayload: Meeting = {
       ...meeting,
       userId: uid,
       createdAt: meeting.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
+    const payload = sanitizeFirestorePayload(rawPayload);
     await setDoc(doc(db, 'users', uid, 'meetings', meeting.id), payload);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
@@ -335,11 +361,12 @@ export async function saveTask(task: ActionItem): Promise<void> {
   const uid = getAuthenticatedUid();
   const path = `users/${uid}/tasks/${task.id}`;
   try {
-    const payload: ActionItem = {
+    const rawPayload: ActionItem = {
       ...task,
       userId: uid,
       createdAt: task.createdAt || new Date().toISOString(),
     };
+    const payload = sanitizeFirestorePayload(rawPayload);
     await setDoc(doc(db, 'users', uid, 'tasks', task.id), payload);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
@@ -360,11 +387,12 @@ export async function saveNote(note: Note): Promise<void> {
   const uid = getAuthenticatedUid();
   const path = `users/${uid}/notes/${note.id}`;
   try {
-    const payload: Note = {
+    const rawPayload: Note = {
       ...note,
       userId: uid,
       createdAt: note.createdAt || new Date().toISOString(),
     };
+    const payload = sanitizeFirestorePayload(rawPayload);
     await setDoc(doc(db, 'users', uid, 'notes', note.id), payload);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
