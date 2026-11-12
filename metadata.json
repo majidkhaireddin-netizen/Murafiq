@@ -1,0 +1,6 @@
+{
+  "name": "مرافق — Murafiq",
+  "description": "تطبيق ذكي خفيف لإدارة علاقات العملاء واللقاءات والمهام للمستقلين وأصحاب المكاتب الصغيرة — عربي أولاً وأوفلاين أولاً.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

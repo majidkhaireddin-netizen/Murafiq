@@ -1,0 +1,113 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Default-Deny Catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Hardened Global Helpers
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Connection testing doc
+    match /test/{docId} {
+      allow read: if true;
+    }
+
+    // Validation Blueprint: Client
+    function isValidClient(data) {
+      return data.id is string && data.id.size() <= 128
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 150
+        && (!('company' in data) || (data.company is string && data.company.size() <= 150))
+        && (!('phone' in data) || (data.phone is string && data.phone.size() <= 50))
+        && (!('email' in data) || (data.email is string && data.email.size() <= 150))
+        && (!('notes' in data) || (data.notes is string && data.notes.size() <= 2000))
+        && (!('color' in data) || (data.color is string && data.color.size() <= 20))
+        && (!('isFavorite' in data) || data.isFavorite is bool);
+    }
+
+    // Validation Blueprint: Meeting
+    function isValidMeeting(data) {
+      return data.id is string && data.id.size() <= 128
+        && data.clientId is string && data.clientId.size() <= 128
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 200
+        && data.dateTime is string && data.dateTime.size() <= 50
+        && data.type in ['in_person', 'phone', 'video', 'chat']
+        && data.status in ['draft', 'confirmed', 'completed']
+        && (!('duration' in data) || data.duration is number)
+        && (!('location' in data) || (data.location is string && data.location.size() <= 200))
+        && (!('notes' in data) || (data.notes is string && data.notes.size() <= 10000));
+    }
+
+    // Validation Blueprint: Task
+    function isValidTask(data) {
+      return data.id is string && data.id.size() <= 128
+        && data.clientId is string && data.clientId.size() <= 128
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 250
+        && data.priority in ['urgent', 'high', 'medium', 'low']
+        && data.status in ['pending', 'in_progress', 'completed', 'cancelled']
+        && (!('description' in data) || (data.description is string && data.description.size() <= 2000))
+        && (!('dueDate' in data) || (data.dueDate is string && data.dueDate.size() <= 50));
+    }
+
+    // Validation Blueprint: Note
+    function isValidNote(data) {
+      return data.id is string && data.id.size() <= 128
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 200
+        && data.content is string && data.content.size() <= 5000
+        && (!('isPinned' in data) || data.isPinned is bool);
+    }
+
+    // Match Collection: Clients
+    match /clients/{clientId} {
+      allow get: if isValidId(clientId);
+      allow list: if true;
+      allow create: if isValidId(clientId) && isValidClient(incoming());
+      allow update: if isValidId(clientId) && isValidClient(incoming());
+      allow delete: if isValidId(clientId);
+    }
+
+    // Match Collection: Meetings
+    match /meetings/{meetingId} {
+      allow get: if isValidId(meetingId);
+      allow list: if true;
+      allow create: if isValidId(meetingId) && isValidMeeting(incoming());
+      allow update: if isValidId(meetingId) && isValidMeeting(incoming());
+      allow delete: if isValidId(meetingId);
+    }
+
+    // Match Collection: Tasks
+    match /tasks/{taskId} {
+      allow get: if isValidId(taskId);
+      allow list: if true;
+      allow create: if isValidId(taskId) && isValidTask(incoming());
+      allow update: if isValidId(taskId) && isValidTask(incoming());
+      allow delete: if isValidId(taskId);
+    }
+
+    // Match Collection: Notes
+    match /notes/{noteId} {
+      allow get: if isValidId(noteId);
+      allow list: if true;
+      allow create: if isValidId(noteId) && isValidNote(incoming());
+      allow update: if isValidId(noteId) && isValidNote(incoming());
+      allow delete: if isValidId(noteId);
+    }
+  }
+}

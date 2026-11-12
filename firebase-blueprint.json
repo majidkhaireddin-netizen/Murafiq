@@ -1,0 +1,103 @@
+{
+  "entities": {
+    "Client": {
+      "title": "Client",
+      "description": "A client or business contact in Murafiq CRM.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 150 },
+        "company": { "type": "string", "maxLength": 150 },
+        "phone": { "type": "string", "maxLength": 50 },
+        "email": { "type": "string", "maxLength": 150 },
+        "notes": { "type": "string", "maxLength": 2000 },
+        "avatarPath": { "type": "string", "maxLength": 500 },
+        "color": { "type": "string", "maxLength": 20 },
+        "isFavorite": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "name", "createdAt"]
+    },
+    "Meeting": {
+      "title": "Meeting",
+      "description": "A client meeting with preparation notes, minutes, and attached photos.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "clientId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 200 },
+        "dateTime": { "type": "string", "maxLength": 50 },
+        "duration": { "type": "number" },
+        "type": { "type": "string", "enum": ["in_person", "phone", "video", "chat"] },
+        "location": { "type": "string", "maxLength": 200 },
+        "notes": { "type": "string", "maxLength": 10000 },
+        "status": { "type": "string", "enum": ["draft", "confirmed", "completed"] },
+        "photoPaths": { "type": "array" },
+        "isFollowUpScheduled": { "type": "boolean" },
+        "attendees": { "type": "array" },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "clientId", "title", "dateTime", "type", "status", "createdAt"]
+    },
+    "Task": {
+      "title": "Task",
+      "description": "An action item or follow-up commitment linked to a client and/or meeting.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "clientId": { "type": "string", "maxLength": 128 },
+        "meetingId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 250 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "dueDate": { "type": "string", "maxLength": 50 },
+        "priority": { "type": "string", "enum": ["urgent", "high", "medium", "low"] },
+        "status": { "type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"] },
+        "reminderDate": { "type": "string", "maxLength": 50 },
+        "completedAt": { "type": "string", "maxLength": 50 },
+        "provenance": { "type": "string", "enum": ["source", "ai_suggested", "approved", "uncertain"] },
+        "createdAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "clientId", "title", "priority", "status", "createdAt"]
+    },
+    "Note": {
+      "title": "Note",
+      "description": "A general note or checklist with tags and color categorization.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "clientId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 200 },
+        "content": { "type": "string", "maxLength": 5000 },
+        "tags": { "type": "array" },
+        "isPinned": { "type": "boolean" },
+        "color": { "type": "string", "maxLength": 30 },
+        "createdAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "title", "content", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/clients/{clientId}": {
+      "schema": { "$ref": "entities/Client" },
+      "description": "Stores user clients and business contacts"
+    },
+    "/meetings/{meetingId}": {
+      "schema": { "$ref": "entities/Meeting" },
+      "description": "Stores meetings, agendas, minutes, and photos"
+    },
+    "/tasks/{taskId}": {
+      "schema": { "$ref": "entities/Task" },
+      "description": "Stores actionable follow-up items and commitments"
+    },
+    "/notes/{noteId}": {
+      "schema": { "$ref": "entities/Note" },
+      "description": "Stores general reference notes and checklists"
+    }
+  }
+}
