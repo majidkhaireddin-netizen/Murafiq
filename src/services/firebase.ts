@@ -9,6 +9,10 @@ import {
 } from 'firebase/auth';
 import {
   getFirestore,
+  initializeFirestore,
+  memoryLocalCache,
+  persistentLocalCache,
+  persistentMultipleTabManager,
   doc,
   collection,
   getDocFromServer,
@@ -25,8 +29,46 @@ import { Client, Meeting, ActionItem, Note } from '../types';
 // Initialize Firebase App
 const app = initializeApp(firebaseConfig);
 
-// Initialize Firestore with custom databaseId
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+let memoryLocalStorage: Record<string, string> = {};
+
+/**
+ * Check whether persistent offline storage (IndexedDB) is enabled by the user.
+ * Default: false (memory-only cache for shared/untrusted devices).
+ */
+export function isPersistentStorageEnabled(): boolean {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      return window.localStorage.getItem('murafiq_persist_offline') === 'true';
+    }
+  } catch {}
+  return memoryLocalStorage['murafiq_persist_offline'] === 'true';
+}
+
+/**
+ * Enable or disable persistent offline storage.
+ */
+export function setPersistentStorageEnabled(enabled: boolean): void {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem('murafiq_persist_offline', enabled ? 'true' : 'false');
+      return;
+    }
+  } catch {}
+  memoryLocalStorage['murafiq_persist_offline'] = enabled ? 'true' : 'false';
+}
+
+// Initialize Firestore with memory or persistent cache
+let dbInstance: any;
+try {
+  const localCache = isPersistentStorageEnabled()
+    ? persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+    : memoryLocalCache();
+  dbInstance = initializeFirestore(app, { localCache }, firebaseConfig.firestoreDatabaseId);
+} catch {
+  dbInstance = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+}
+
+export const db = dbInstance;
 
 // Initialize Auth
 export const auth = getAuth(app);
