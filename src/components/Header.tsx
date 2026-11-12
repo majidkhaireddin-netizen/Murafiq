@@ -12,7 +12,10 @@ import {
   XCircle,
   HelpCircle,
   Languages,
+  LogOut,
+  User as UserIcon,
 } from 'lucide-react';
+import { User } from 'firebase/auth';
 
 interface HeaderProps {
   syncState: SyncState;
@@ -26,6 +29,8 @@ interface HeaderProps {
   onOpenSettings: () => void;
   conflictCount?: number;
   onOpenConflictModal?: () => void;
+  currentUser?: User | null;
+  onLogOut?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -40,6 +45,8 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenSettings,
   conflictCount = 0,
   onOpenConflictModal,
+  currentUser,
+  onLogOut,
 }) => {
   const [showSyncPopover, setShowSyncPopover] = useState(false);
 
@@ -186,12 +193,12 @@ export const Header: React.FC<HeaderProps> = ({
             <Search className="w-4 h-4" />
           </button>
 
-          {/* Biometric Security Lock */}
+          {/* Biometric Security Lock (Clearly labeled as Demo Screen Lock per Requirement 7) */}
           <button
             onClick={onTriggerLock}
             className="p-1.5 text-stone-600 hover:text-amber-700 hover:bg-amber-50 rounded-lg transition-colors"
-            title={language === 'ar' ? 'قفل الأمان الحيوي' : 'Biometric App Lock'}
-            aria-label="Lock App"
+            title={language === 'ar' ? 'قفل شاشة تجريبي (عرض توضيحي)' : 'Demo Screen Lock (Demonstration only)'}
+            aria-label="Demo Lock"
           >
             <Lock className="w-4 h-4" />
           </button>
@@ -234,6 +241,38 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <HelpCircle className="w-4 h-4" />
           </button>
+
+          {/* Authenticated User & Logout */}
+          {currentUser && (
+            <div className="flex items-center gap-1.5 ps-1 border-s border-stone-200">
+              {currentUser.photoURL ? (
+                <img
+                  src={currentUser.photoURL}
+                  alt={currentUser.displayName || 'User'}
+                  className="w-6 h-6 rounded-full border border-stone-300 object-cover"
+                  referrerPolicy="no-referrer"
+                  title={currentUser.email || currentUser.displayName || ''}
+                />
+              ) : (
+                <div
+                  className="w-6 h-6 rounded-full bg-emerald-700 text-white flex items-center justify-center text-[10px] font-bold"
+                  title={currentUser.email || currentUser.displayName || ''}
+                >
+                  {(currentUser.displayName || currentUser.email || 'م').charAt(0).toUpperCase()}
+                </div>
+              )}
+              {onLogOut && (
+                <button
+                  onClick={onLogOut}
+                  className="p-1.5 text-stone-500 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
+                  title={language === 'ar' ? 'تسجيل الخروج' : 'Sign out'}
+                  aria-label="Sign out"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </header>

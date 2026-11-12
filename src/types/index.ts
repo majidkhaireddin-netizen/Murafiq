@@ -12,6 +12,7 @@ export type ProvenanceType = 'source' | 'ai_suggested' | 'approved' | 'uncertain
 
 export interface Client {
   id: string;
+  userId?: string;
   name: string;
   company?: string;
   phone?: string;
@@ -26,6 +27,7 @@ export interface Client {
 
 export interface Meeting {
   id: string;
+  userId?: string;
   clientId: string;
   title: string;
   dateTime: string; // ISO format
@@ -43,6 +45,7 @@ export interface Meeting {
 
 export interface ActionItem {
   id: string;
+  userId?: string;
   meetingId?: string;
   clientId: string;
   title: string;
@@ -58,6 +61,7 @@ export interface ActionItem {
 
 export interface Note {
   id: string;
+  userId?: string;
   clientId?: string;
   title: string;
   content: string;

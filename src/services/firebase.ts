@@ -1,5 +1,12 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
+import {
+  getAuth,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut,
+  onAuthStateChanged,
+  User,
+} from 'firebase/auth';
 import {
   getFirestore,
   doc,
@@ -9,7 +16,8 @@ import {
   setDoc,
   deleteDoc,
   writeBatch,
-  getDocs,
+  DocumentData,
+  SnapshotMetadata,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { Client, Meeting, ActionItem, Note } from '../types';
@@ -72,6 +80,87 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
 }
 
 /**
+ * Ensures caller is authenticated and returns the current user's UID.
+ * Caller cannot supply an arbitrary UID to bypass authentication identity.
+ */
+export function getAuthenticatedUid(): string {
+  const user = auth.currentUser;
+  if (!user || !user.uid) {
+    throw new Error('Authentication required: No authenticated user session found.');
+  }
+  return user.uid;
+}
+
+/**
+ * Returns user-scoped collection path.
+ * Enforces /users/{uid}/{subcollection} structure.
+ */
+export function getUserCollectionPath(subcollection: 'clients' | 'meetings' | 'tasks' | 'notes'): string {
+  const uid = getAuthenticatedUid();
+  return `users/${uid}/${subcollection}`;
+}
+
+/**
+ * Sign in with Google using browser popup
+ */
+export async function signInWithGoogle(): Promise<User> {
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: 'select_account' });
+  try {
+    const result = await signInWithPopup(auth, provider);
+    // Optionally ensure user profile document exists
+    if (result.user) {
+      const userRef = doc(db, 'users', result.user.uid);
+      await setDoc(
+        userRef,
+        {
+          uid: result.user.uid,
+          email: result.user.email || '',
+          displayName: result.user.displayName || '',
+          photoURL: result.user.photoURL || '',
+          lastLoginAt: new Date().toISOString(),
+        },
+        { merge: true }
+      ).catch((err) => {
+        // Non-fatal if user document creation fails offline
+        console.warn('Could not write user profile doc:', err);
+      });
+    }
+    return result.user;
+  } catch (error: any) {
+    let friendlyMessage = 'فشل تسجيل الدخول بواسطة Google. يُرجى المحاولة مرة أخرى.';
+    if (error?.code === 'auth/popup-closed-by-user') {
+      friendlyMessage = 'تم إغلاق نافذة تسجيل الدخول من قِبل المستخدم قبل إتمام العملية.';
+    } else if (error?.code === 'auth/popup-blocked') {
+      friendlyMessage = 'حظر المتصفح النافذة المنبثقة. يُرجى السماح بالنوافذ المنبثقة لموقع التطبيق والمحاولة مجدداً.';
+    } else if (error?.code === 'auth/unauthorized-domain') {
+      friendlyMessage = 'نطاق التطبيق غير مصرح به في إعدادات Firebase Authentication. يُرجى إضافة نطاق التطبيق إلى Authorized Domains في Firebase Console.';
+    } else if (error?.code === 'auth/network-request-failed') {
+      friendlyMessage = 'تعذر الاتصال بخدمة المصادقة. تحقق من اتصالك بشبكة الإنترنت.';
+    } else if (error?.message) {
+      friendlyMessage = `خطأ في المصادقة: ${error.message}`;
+    }
+    const enrichedError = new Error(friendlyMessage);
+    (enrichedError as any).code = error?.code;
+    throw enrichedError;
+  }
+}
+
+/**
+ * Sign out current authenticated user
+ */
+export async function logOut(): Promise<void> {
+  await signOut(auth);
+}
+
+/**
+ * Subscribe to authentication state changes
+ */
+export function subscribeAuthState(callback: (user: User | null) => void) {
+  return onAuthStateChanged(auth, callback);
+}
+
+/**
  * Validate Connection to Firestore on boot
  */
 export async function testConnection(): Promise<boolean> {
@@ -88,183 +177,201 @@ export async function testConnection(): Promise<boolean> {
   }
 }
 
-// Subscriptions
+export interface SyncMetadata {
+  fromCache: boolean;
+  hasPendingWrites: boolean;
+}
+
+// User-Scoped Subscriptions
 export function subscribeClients(
-  onData: (clients: Client[]) => void,
+  onData: (clients: Client[], metadata: SyncMetadata) => void,
   onError?: (err: Error) => void
 ) {
-  const colRef = collection(db, 'clients');
+  const uid = getAuthenticatedUid();
+  const colRef = collection(db, 'users', uid, 'clients');
   return onSnapshot(
     colRef,
+    { includeMetadataChanges: true },
     (snapshot) => {
       const items: Client[] = [];
       snapshot.forEach((d) => items.push(d.data() as Client));
-      onData(items);
+      onData(items, {
+        fromCache: snapshot.metadata.fromCache,
+        hasPendingWrites: snapshot.metadata.hasPendingWrites,
+      });
     },
     (error) => {
       if (onError) onError(error);
-      handleFirestoreError(error, OperationType.LIST, 'clients');
+      handleFirestoreError(error, OperationType.LIST, `users/${uid}/clients`);
     }
   );
 }
 
 export function subscribeMeetings(
-  onData: (meetings: Meeting[]) => void,
+  onData: (meetings: Meeting[], metadata: SyncMetadata) => void,
   onError?: (err: Error) => void
 ) {
-  const colRef = collection(db, 'meetings');
+  const uid = getAuthenticatedUid();
+  const colRef = collection(db, 'users', uid, 'meetings');
   return onSnapshot(
     colRef,
+    { includeMetadataChanges: true },
     (snapshot) => {
       const items: Meeting[] = [];
       snapshot.forEach((d) => items.push(d.data() as Meeting));
-      onData(items);
+      onData(items, {
+        fromCache: snapshot.metadata.fromCache,
+        hasPendingWrites: snapshot.metadata.hasPendingWrites,
+      });
     },
     (error) => {
       if (onError) onError(error);
-      handleFirestoreError(error, OperationType.LIST, 'meetings');
+      handleFirestoreError(error, OperationType.LIST, `users/${uid}/meetings`);
     }
   );
 }
 
 export function subscribeTasks(
-  onData: (tasks: ActionItem[]) => void,
+  onData: (tasks: ActionItem[], metadata: SyncMetadata) => void,
   onError?: (err: Error) => void
 ) {
-  const colRef = collection(db, 'tasks');
+  const uid = getAuthenticatedUid();
+  const colRef = collection(db, 'users', uid, 'tasks');
   return onSnapshot(
     colRef,
+    { includeMetadataChanges: true },
     (snapshot) => {
       const items: ActionItem[] = [];
       snapshot.forEach((d) => items.push(d.data() as ActionItem));
-      onData(items);
+      onData(items, {
+        fromCache: snapshot.metadata.fromCache,
+        hasPendingWrites: snapshot.metadata.hasPendingWrites,
+      });
     },
     (error) => {
       if (onError) onError(error);
-      handleFirestoreError(error, OperationType.LIST, 'tasks');
+      handleFirestoreError(error, OperationType.LIST, `users/${uid}/tasks`);
     }
   );
 }
 
 export function subscribeNotes(
-  onData: (notes: Note[]) => void,
+  onData: (notes: Note[], metadata: SyncMetadata) => void,
   onError?: (err: Error) => void
 ) {
-  const colRef = collection(db, 'notes');
+  const uid = getAuthenticatedUid();
+  const colRef = collection(db, 'users', uid, 'notes');
   return onSnapshot(
     colRef,
+    { includeMetadataChanges: true },
     (snapshot) => {
       const items: Note[] = [];
       snapshot.forEach((d) => items.push(d.data() as Note));
-      onData(items);
+      onData(items, {
+        fromCache: snapshot.metadata.fromCache,
+        hasPendingWrites: snapshot.metadata.hasPendingWrites,
+      });
     },
     (error) => {
       if (onError) onError(error);
-      handleFirestoreError(error, OperationType.LIST, 'notes');
+      handleFirestoreError(error, OperationType.LIST, `users/${uid}/notes`);
     }
   );
 }
 
-// Mutations
+// User-Scoped Protected Mutations
 export async function saveClient(client: Client): Promise<void> {
-  const path = `clients/${client.id}`;
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/clients/${client.id}`;
   try {
-    await setDoc(doc(db, 'clients', client.id), client);
+    const payload: Client = {
+      ...client,
+      userId: uid,
+    };
+    await setDoc(doc(db, 'users', uid, 'clients', client.id), payload);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
 }
 
 export async function deleteClient(clientId: string): Promise<void> {
-  const path = `clients/${clientId}`;
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/clients/${clientId}`;
   try {
-    await deleteDoc(doc(db, 'clients', clientId));
+    await deleteDoc(doc(db, 'users', uid, 'clients', clientId));
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);
   }
 }
 
 export async function saveMeeting(meeting: Meeting): Promise<void> {
-  const path = `meetings/${meeting.id}`;
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/meetings/${meeting.id}`;
   try {
-    await setDoc(doc(db, 'meetings', meeting.id), meeting);
+    const payload: Meeting = {
+      ...meeting,
+      userId: uid,
+    };
+    await setDoc(doc(db, 'users', uid, 'meetings', meeting.id), payload);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
 }
 
 export async function deleteMeeting(meetingId: string): Promise<void> {
-  const path = `meetings/${meetingId}`;
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/meetings/${meetingId}`;
   try {
-    await deleteDoc(doc(db, 'meetings', meetingId));
+    await deleteDoc(doc(db, 'users', uid, 'meetings', meetingId));
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);
   }
 }
 
 export async function saveTask(task: ActionItem): Promise<void> {
-  const path = `tasks/${task.id}`;
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/tasks/${task.id}`;
   try {
-    await setDoc(doc(db, 'tasks', task.id), task);
+    const payload: ActionItem = {
+      ...task,
+      userId: uid,
+    };
+    await setDoc(doc(db, 'users', uid, 'tasks', task.id), payload);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
 }
 
 export async function deleteTask(taskId: string): Promise<void> {
-  const path = `tasks/${taskId}`;
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/tasks/${taskId}`;
   try {
-    await deleteDoc(doc(db, 'tasks', taskId));
+    await deleteDoc(doc(db, 'users', uid, 'tasks', taskId));
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);
   }
 }
 
 export async function saveNote(note: Note): Promise<void> {
-  const path = `notes/${note.id}`;
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/notes/${note.id}`;
   try {
-    await setDoc(doc(db, 'notes', note.id), note);
+    const payload: Note = {
+      ...note,
+      userId: uid,
+    };
+    await setDoc(doc(db, 'users', uid, 'notes', note.id), payload);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
 }
 
 export async function deleteNote(noteId: string): Promise<void> {
-  const path = `notes/${noteId}`;
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/notes/${noteId}`;
   try {
-    await deleteDoc(doc(db, 'notes', noteId));
+    await deleteDoc(doc(db, 'users', uid, 'notes', noteId));
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);
-  }
-}
-
-/**
- * Seed initial sample data to Firestore in a batch write
- */
-export async function seedInitialData(
-  clients: Client[],
-  meetings: Meeting[],
-  tasks: ActionItem[],
-  notes: Note[]
-): Promise<void> {
-  const batch = writeBatch(db);
-
-  clients.forEach((c) => {
-    batch.set(doc(db, 'clients', c.id), c);
-  });
-  meetings.forEach((m) => {
-    batch.set(doc(db, 'meetings', m.id), m);
-  });
-  tasks.forEach((t) => {
-    batch.set(doc(db, 'tasks', t.id), t);
-  });
-  notes.forEach((n) => {
-    batch.set(doc(db, 'notes', n.id), n);
-  });
-
-  try {
-    await batch.commit();
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, 'batch_seed');
   }
 }

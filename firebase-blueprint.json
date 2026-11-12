@@ -83,21 +83,21 @@
     }
   },
   "firestore": {
-    "/clients/{clientId}": {
+    "/users/{userId}/clients/{clientId}": {
       "schema": { "$ref": "entities/Client" },
-      "description": "Stores user clients and business contacts"
+      "description": "Stores user-isolated clients and business contacts"
     },
-    "/meetings/{meetingId}": {
+    "/users/{userId}/meetings/{meetingId}": {
       "schema": { "$ref": "entities/Meeting" },
-      "description": "Stores meetings, agendas, minutes, and photos"
+      "description": "Stores user-isolated meetings, agendas, minutes, and photos"
     },
-    "/tasks/{taskId}": {
+    "/users/{userId}/tasks/{taskId}": {
       "schema": { "$ref": "entities/Task" },
-      "description": "Stores actionable follow-up items and commitments"
+      "description": "Stores user-isolated actionable follow-up items and commitments"
     },
-    "/notes/{noteId}": {
+    "/users/{userId}/notes/{noteId}": {
       "schema": { "$ref": "entities/Note" },
-      "description": "Stores general reference notes and checklists"
+      "description": "Stores user-isolated reference notes and checklists"
     }
   }
 }

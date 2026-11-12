@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
+import { User } from 'firebase/auth';
 import { AppState, Client, Meeting, ActionItem, Note, SyncState } from './types';
-import { INITIAL_CLIENTS, INITIAL_MEETINGS, INITIAL_TASKS, INITIAL_NOTES } from './data/mockData';
 import { categorizeTasks } from './utils/logic';
 import { Header } from './components/Header';
 import { BottomNav, NavTab } from './components/BottomNav';
@@ -14,10 +14,13 @@ import { BiometricLockModal } from './components/BiometricLockModal';
 import { SearchModal } from './components/SearchModal';
 import { SettingsModal } from './components/SettingsModal';
 import { ConflictResolutionModal } from './components/ConflictResolutionModal';
+import { AuthScreen } from './components/AuthScreen';
 import { ConflictItem, ResolutionChoice } from './types';
 import { detectEntityConflict, resolveConflictRecord } from './utils/conflictLogic';
 import {
   testConnection,
+  subscribeAuthState,
+  logOut,
   subscribeClients,
   subscribeMeetings,
   subscribeTasks,
@@ -30,19 +33,22 @@ import {
   deleteTask as fbDeleteTask,
   saveNote as fbSaveNote,
   deleteNote as fbDeleteNote,
-  seedInitialData,
 } from './services/firebase';
 import { Wifi, BatteryMedium, Signal } from 'lucide-react';
 
 export default function App() {
-  // Main app state
-  const [clients, setClients] = useState<Client[]>(INITIAL_CLIENTS);
-  const [meetings, setMeetings] = useState<Meeting[]>(INITIAL_MEETINGS);
-  const [tasks, setTasks] = useState<ActionItem[]>(INITIAL_TASKS);
-  const [notes, setNotes] = useState<Note[]>(INITIAL_NOTES);
+  // Authentication state (Task 002)
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [isAuthRestoring, setIsAuthRestoring] = useState<boolean>(true);
+
+  // User-scoped data state (starts genuinely empty - no auto-seeding)
+  const [clients, setClients] = useState<Client[]>([]);
+  const [meetings, setMeetings] = useState<Meeting[]>([]);
+  const [tasks, setTasks] = useState<ActionItem[]>([]);
+  const [notes, setNotes] = useState<Note[]>([]);
 
   // System & Settings state
-  const [syncState, setSyncState] = useState<SyncState>('pending');
+  const [syncState, setSyncState] = useState<SyncState>('local');
   const [conflicts, setConflicts] = useState<ConflictItem[]>([]);
   const [activeConflict, setActiveConflict] = useState<ConflictItem | null>(null);
   const [isBiometricLocked, setIsBiometricLocked] = useState(false);
@@ -66,64 +72,143 @@ export default function App() {
   const [preselectedClientIdForMeeting, setPreselectedClientIdForMeeting] = useState<string | null>(null);
   const [preselectedClientIdForTask, setPreselectedClientIdForTask] = useState<string | null>(null);
 
-  // Firestore Live Subscriptions on Mount
+  // 1. Monitor Authentication State on App Mount
   useEffect(() => {
-    let unsubs: (() => void)[] = [];
+    const unsubscribeAuth = subscribeAuthState((user) => {
+      setCurrentUser(user);
+      setIsAuthRestoring(false);
 
-    const initFirebaseSync = async () => {
-      setSyncState('pending');
-      const isConnected = await testConnection();
-      if (!isConnected) {
+      if (!user) {
+        // Clear all sensitive in-memory data on logout to prevent cross-account disclosure
+        setClients([]);
+        setMeetings([]);
+        setTasks([]);
+        setNotes([]);
+        setConflicts([]);
+        setActiveConflict(null);
         setSyncState('local');
-        return;
       }
-
-      const unsubClients = subscribeClients(
-        (data) => {
-          if (data.length > 0) {
-            setClients(data);
-          } else {
-            // Seed database with authentic initial Arabic data if completely empty
-            seedInitialData(INITIAL_CLIENTS, INITIAL_MEETINGS, INITIAL_TASKS, INITIAL_NOTES);
-          }
-          setSyncState('synced');
-        },
-        () => setSyncState('failed')
-      );
-
-      const unsubMeetings = subscribeMeetings(
-        (data) => {
-          if (data.length > 0) setMeetings(data);
-          setSyncState('synced');
-        },
-        () => setSyncState('failed')
-      );
-
-      const unsubTasks = subscribeTasks(
-        (data) => {
-          if (data.length > 0) setTasks(data);
-          setSyncState('synced');
-        },
-        () => setSyncState('failed')
-      );
-
-      const unsubNotes = subscribeNotes(
-        (data) => {
-          if (data.length > 0) setNotes(data);
-          setSyncState('synced');
-        },
-        () => setSyncState('failed')
-      );
-
-      unsubs = [unsubClients, unsubMeetings, unsubTasks, unsubNotes];
-    };
-
-    initFirebaseSync();
+    });
 
     return () => {
-      unsubs.forEach((u) => u());
+      unsubscribeAuth();
     };
   }, []);
+
+  // 2. User-Scoped Firestore Subscriptions (Initialized ONLY after authentication)
+  useEffect(() => {
+    if (!currentUser || !currentUser.uid) {
+      return;
+    }
+
+    let isSubscribed = true;
+    const activeUid = currentUser.uid;
+    let unsubs: (() => void)[] = [];
+
+    const initUserSubscriptions = async () => {
+      setSyncState('pending');
+      const isConnected = await testConnection();
+      if (!isSubscribed) return;
+
+      if (!isConnected) {
+        setSyncState('local');
+      }
+
+      const updateSyncStateFromMetadata = (meta: { fromCache: boolean; hasPendingWrites: boolean }) => {
+        if (!isSubscribed) return;
+        if (meta.hasPendingWrites) {
+          setSyncState('pending');
+        } else if (meta.fromCache) {
+          setSyncState('local');
+        } else {
+          setSyncState('synced');
+        }
+      };
+
+      try {
+        const unsubClients = subscribeClients(
+          (data, meta) => {
+            if (!isSubscribed || activeUid !== currentUser.uid) return;
+            setClients(data); // Empty dataset is valid empty dataset - no auto-seeding!
+            updateSyncStateFromMetadata(meta);
+          },
+          (err) => {
+            if (!isSubscribed) return;
+            console.warn('Clients subscription error:', err);
+            setSyncState('failed');
+          }
+        );
+
+        const unsubMeetings = subscribeMeetings(
+          (data, meta) => {
+            if (!isSubscribed || activeUid !== currentUser.uid) return;
+            setMeetings(data);
+            updateSyncStateFromMetadata(meta);
+          },
+          (err) => {
+            if (!isSubscribed) return;
+            console.warn('Meetings subscription error:', err);
+            setSyncState('failed');
+          }
+        );
+
+        const unsubTasks = subscribeTasks(
+          (data, meta) => {
+            if (!isSubscribed || activeUid !== currentUser.uid) return;
+            setTasks(data);
+            updateSyncStateFromMetadata(meta);
+          },
+          (err) => {
+            if (!isSubscribed) return;
+            console.warn('Tasks subscription error:', err);
+            setSyncState('failed');
+          }
+        );
+
+        const unsubNotes = subscribeNotes(
+          (data, meta) => {
+            if (!isSubscribed || activeUid !== currentUser.uid) return;
+            setNotes(data);
+            updateSyncStateFromMetadata(meta);
+          },
+          (err) => {
+            if (!isSubscribed) return;
+            console.warn('Notes subscription error:', err);
+            setSyncState('failed');
+          }
+        );
+
+        unsubs = [unsubClients, unsubMeetings, unsubTasks, unsubNotes];
+      } catch (err) {
+        console.warn('Failed to initialize user-scoped subscriptions:', err);
+        if (isSubscribed) setSyncState('failed');
+      }
+    };
+
+    initUserSubscriptions();
+
+    return () => {
+      isSubscribed = false;
+      unsubs.forEach((u) => u());
+    };
+  }, [currentUser?.uid]);
+
+  // Logout handler
+  const handleLogOut = async () => {
+    try {
+      await logOut();
+      setCurrentUser(null);
+      setClients([]);
+      setMeetings([]);
+      setTasks([]);
+      setNotes([]);
+      setConflicts([]);
+      setActiveConflict(null);
+      setSyncState('local');
+    } catch (err) {
+      console.error('Logout error:', err);
+    }
+  };
 
   // Counts for badges
   const { overdue } = categorizeTasks(tasks);
@@ -297,9 +382,21 @@ export default function App() {
     }
   };
 
-  // Helper to trigger a realistic conflict simulation for demonstration
+  // Conflict Simulation for Demonstration
   const handleSimulateConflict = () => {
-    const targetMeeting = meetings[0] || INITIAL_MEETINGS[0];
+    const targetMeeting: Meeting = meetings[0] || {
+      id: `m-demo-${Date.now()}`,
+      clientId: clients[0]?.id || 'c-demo',
+      title: 'جلسة عمل تجريبية لاختبار فض التعارض',
+      dateTime: new Date().toISOString(),
+      type: 'in_person',
+      notes: 'محضر الجلسة الأصلي قبل حدوث التعارض.',
+      status: 'confirmed',
+      photoPaths: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
     const localCopy: Meeting = {
       ...targetMeeting,
       location: 'كافيه برو بريك — الرياض (تعديل محلي بدون إنترنت)',
@@ -321,23 +418,11 @@ export default function App() {
     }
   };
 
-  // Reset / Reseed data to Firestore
-  const handleResetData = async () => {
-    setClients(INITIAL_CLIENTS);
-    setMeetings(INITIAL_MEETINGS);
-    setTasks(INITIAL_TASKS);
-    setNotes(INITIAL_NOTES);
+  // Safe Reset Local State (Does NOT reseed Firestore - Requirement 4)
+  const handleResetData = () => {
     setConflicts([]);
     setActiveConflict(null);
     setIsSettingsOpen(false);
-
-    try {
-      setSyncState('pending');
-      await seedInitialData(INITIAL_CLIENTS, INITIAL_MEETINGS, INITIAL_TASKS, INITIAL_NOTES);
-      setSyncState('synced');
-    } catch {
-      setSyncState('local');
-    }
   };
 
   // Navigation helpers
@@ -364,6 +449,34 @@ export default function App() {
   // Direction and Language
   const isRtl = language === 'ar';
 
+  // 3. Render Session Restoration Loading State
+  if (isAuthRestoring) {
+    return (
+      <div
+        dir={isRtl ? 'rtl' : 'ltr'}
+        className="min-h-screen bg-stone-100 flex flex-col items-center justify-center p-4 text-center select-none"
+      >
+        <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-emerald-600 to-teal-700 text-white flex items-center justify-center font-bold text-2xl shadow-lg border border-emerald-400/30 mb-4 animate-pulse">
+          م
+        </div>
+        <h3 className="font-heading font-bold text-stone-800 text-base mb-1">
+          مُرافق — Murafiq
+        </h3>
+        <p className="text-xs text-stone-500">
+          {language === 'ar'
+            ? 'جاري استعادة جلسة الحساب والتحقق من الأمان...'
+            : 'Restoring authentication session...'}
+        </p>
+      </div>
+    );
+  }
+
+  // 4. Render Google Auth Screen if not signed in
+  if (!currentUser) {
+    return <AuthScreen language={language} />;
+  }
+
+  // 5. Render Main Application for Authenticated User
   return (
     <div
       dir={isRtl ? 'rtl' : 'ltr'}
@@ -393,7 +506,7 @@ export default function App() {
           </div>
         )}
 
-        {/* Global Header */}
+        {/* Global Header with Authenticated User Profile & Logout */}
         <Header
           syncState={syncState}
           onSyncStateChange={(st) => {
@@ -418,6 +531,8 @@ export default function App() {
               handleSimulateConflict();
             }
           }}
+          currentUser={currentUser}
+          onLogOut={handleLogOut}
         />
 
         {/* Scrollable Main View Container */}
@@ -522,7 +637,7 @@ export default function App() {
         />
       )}
 
-      {/* Biometric Security Lock Screen */}
+      {/* Demo Screen Lock Modal (Clearly labeled as Demo PIN Lock) */}
       <BiometricLockModal
         isOpen={isBiometricLocked}
         onUnlock={() => setIsBiometricLocked(false)}

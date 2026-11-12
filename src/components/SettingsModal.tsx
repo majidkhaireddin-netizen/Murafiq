@@ -166,12 +166,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 />
               </div>
 
-              {/* 3. Biometric Security Lock */}
+              {/* 3. Biometric Security Lock (Demo Only - Requirement 7) */}
               <div className="pt-3 border-t border-stone-200 flex items-center justify-between">
                 <div>
-                  <span className="font-bold text-stone-900 block">القفل الحيوي ورمز PIN</span>
-                  <span className="text-[11px] text-stone-500">
-                    طلب بصمة الإصبع أو رمز PIN عند فتح التطبيق لحماية خصوصية بيانات العملاء
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-bold text-stone-900 block">قفل الشاشة التجريبي</span>
+                    <span className="text-[10px] bg-amber-100 text-amber-800 font-semibold px-1.5 py-0.2 rounded">عرض توضيحي فقط</span>
+                  </div>
+                  <span className="text-[11px] text-stone-500 block mt-0.5">
+                    محاكاة لقفل شاشة الجهاز برقم PIN محلي (1234). حماية وعزل البيانات السحابية الحقيقية تتم بالكامل عبر حساب Google.
                   </span>
                 </div>
                 <input
@@ -182,23 +185,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 />
               </div>
 
-              {/* 4. Data Backup & Reset */}
+              {/* 4. Data Backup & Storage Info */}
               <div className="pt-3 border-t border-stone-200 space-y-2">
-                <span className="font-bold text-stone-900 block">النسخ الاحتياطي وإعادة الضبط</span>
-                <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-bold text-stone-900 block">النسخ الاحتياطي وتصدير البيانات</span>
+                <p className="text-[11px] text-stone-500 leading-relaxed">
+                  بياناتك معزولة ومخزنة في مسارك الخاص المشفر. تم إلغاء الحقن التلقائي للبيانات التجريبية لضمان بدء الحسابات الجديدة نظيفة تماماً.
+                </p>
+                <div className="flex items-center gap-2 flex-wrap pt-1">
                   <button
                     onClick={handleExportJson}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-stone-900 text-white font-medium hover:bg-stone-800 transition-colors"
                   >
                     <Download className="w-3.5 h-3.5" />
                     <span>تصدير نسخة احتياطية JSON</span>
-                  </button>
-                  <button
-                    onClick={onResetData}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-stone-100 text-rose-700 font-medium hover:bg-rose-50 border border-stone-200 transition-colors"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    <span>إعادة ضبط البيانات الأولية</span>
                   </button>
                 </div>
               </div>
