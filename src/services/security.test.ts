@@ -258,3 +258,54 @@ test('canSafelySignOut prevents signing out with unacknowledged local writes', (
   assert.deepEqual(checkClean.pendingCollections, []);
 });
 
+import { executeWithRollback, getArabicSaveErrorMessage } from '../utils/sessionState';
+
+// Task 002-GateFix: Save Error Handling & Atomic Rollback Tests
+test('executeWithRollback updates state optimistically on success', async () => {
+  let items = ['a', 'b'];
+  const updateState = (next: string[]) => { items = next; };
+
+  const result = await executeWithRollback(
+    items,
+    updateState,
+    (prev) => [...prev, 'c'],
+    async () => { /* success */ }
+  );
+
+  assert.equal(result.success, true);
+  assert.deepEqual(items, ['a', 'b', 'c']);
+});
+
+test('executeWithRollback performs atomic rollback and invokes onError when async operation fails', async () => {
+  let items = ['a', 'b'];
+  const updateState = (next: string[]) => { items = next; };
+  let caughtError: Error | null = null;
+
+  const result = await executeWithRollback(
+    items,
+    updateState,
+    (prev) => [...prev, 'c'],
+    async () => { throw new Error('Firestore permission denied'); },
+    (err) => { caughtError = err; }
+  );
+
+  assert.equal(result.success, false);
+  assert.deepEqual(items, ['a', 'b'], 'Items must be atomically rolled back to initial state');
+  assert.ok(caughtError !== null);
+  assert.equal((caughtError as Error).message, 'Firestore permission denied');
+});
+
+test('getArabicSaveErrorMessage formats user-friendly Arabic messages for save and delete operations', () => {
+  const clientSaveMsg = getArabicSaveErrorMessage('client', false);
+  assert.ok(clientSaveMsg.includes('تعذر حفظ العميل'));
+
+  const meetingDeleteMsg = getArabicSaveErrorMessage('meeting', true);
+  assert.ok(meetingDeleteMsg.includes('تعذر حذف اللقاء'));
+
+  const taskSaveMsg = getArabicSaveErrorMessage('task', false);
+  assert.ok(taskSaveMsg.includes('تعذر حفظ المهمة'));
+
+  const noteDeleteMsg = getArabicSaveErrorMessage('note', true);
+  assert.ok(noteDeleteMsg.includes('تعذر حذف الملاحظة'));
+});
+

@@ -26,7 +26,7 @@ interface ClientsViewProps {
   onSelectMeeting: (meeting: Meeting) => void;
   onNewMeeting: (clientId: string) => void;
   onNewTask: (clientId: string) => void;
-  onSaveClient: (client: Client) => void;
+  onSaveClient: (client: Client) => Promise<void> | void;
   onDeleteClient: (clientId: string) => void;
   selectedClientId?: string | null;
   language: 'ar' | 'en';
@@ -105,7 +105,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
     setIsEditModalOpen(true);
   };
 
-  const handleSaveForm = (e: React.FormEvent) => {
+  const handleSaveForm = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingClient?.name) return;
 
@@ -123,12 +123,16 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
       updatedAt: new Date().toISOString(),
     };
 
-    onSaveClient(saved);
-    if (activeClient?.id === saved.id) {
-      setActiveClient(saved);
+    try {
+      await onSaveClient(saved);
+      if (activeClient?.id === saved.id) {
+        setActiveClient(saved);
+      }
+      setIsEditModalOpen(false);
+      setEditingClient(null);
+    } catch (err) {
+      console.warn('ClientsView: Save client failed, keeping modal open for retry:', err);
     }
-    setIsEditModalOpen(false);
-    setEditingClient(null);
   };
 
   return (

@@ -21,7 +21,7 @@ interface ReportsViewProps {
   meetings: Meeting[];
   tasks: ActionItem[];
   notes: Note[];
-  onSaveNote: (note: Note) => void;
+  onSaveNote: (note: Note) => Promise<void> | void;
   onDeleteNote: (noteId: string) => void;
   language: 'ar' | 'en';
 }
@@ -71,7 +71,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
     return { client: c, meetingsCount: cMeetings, tasksCount: cTasks, totalScore: cMeetings * 2 + cTasks };
   }).sort((a, b) => b.totalScore - a.totalScore);
 
-  const handleSaveNoteForm = (e: React.FormEvent) => {
+  const handleSaveNoteForm = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newNote.title || !newNote.content) return;
 
@@ -85,9 +85,13 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
       createdAt: new Date().toISOString(),
     };
 
-    onSaveNote(saved);
-    setIsAddNoteModalOpen(false);
-    setNewNote({ title: '', content: '', tags: ['عام'], isPinned: false, color: '#fef3c7' });
+    try {
+      await onSaveNote(saved);
+      setIsAddNoteModalOpen(false);
+      setNewNote({ title: '', content: '', tags: ['عام'], isPinned: false, color: '#fef3c7' });
+    } catch (err) {
+      console.warn('ReportsView: Save note failed, keeping modal open for retry:', err);
+    }
   };
 
   return (

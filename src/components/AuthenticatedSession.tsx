@@ -37,6 +37,8 @@ import {
 } from '../services/firebase';
 import { AlertTriangle } from 'lucide-react';
 
+import { executeWithRollback, getArabicSaveErrorMessage } from '../utils/sessionState';
+
 interface AuthenticatedSessionProps {
   user: User;
   onSignOut: () => Promise<void>;
@@ -224,6 +226,9 @@ export function AuthenticatedSession({
     return diffMs >= -3600000 && diffMs <= 7 * 24 * 3600000;
   }).length;
 
+  // Global save error banner state
+  const [saveErrorBanner, setSaveErrorBanner] = useState<string | null>(null);
+
   // Task Mutations
   const handleToggleTask = async (taskId: string) => {
     const task = tasks.find((t) => t.id === taskId);
@@ -236,75 +241,224 @@ export function AuthenticatedSession({
       completedAt: nextStatus === 'completed' ? new Date().toISOString() : undefined,
     };
 
-    setTasks((prev) => prev.map((t) => (t.id === taskId ? updated : t)));
-    await fbSaveTask(updated);
+    const res = await executeWithRollback(
+      tasks,
+      setTasks,
+      (prev) => prev.map((t) => (t.id === taskId ? updated : t)),
+      () => fbSaveTask(updated),
+      (err) => {
+        console.warn('Save task status error:', err);
+        setCollectionSync((prev) => ({
+          ...prev,
+          tasks: { ...prev.tasks, hasError: true },
+        }));
+        setSaveErrorBanner(getArabicSaveErrorMessage('task', false));
+      }
+    );
+    if (res.success) setSaveErrorBanner(null);
   };
 
   const handleSaveTask = async (task: ActionItem) => {
-    setTasks((prev) => {
-      const idx = prev.findIndex((t) => t.id === task.id);
-      if (idx >= 0) {
-        const updated = [...prev];
-        updated[idx] = task;
-        return updated;
+    const res = await executeWithRollback(
+      tasks,
+      setTasks,
+      (prev) => {
+        const idx = prev.findIndex((t) => t.id === task.id);
+        if (idx >= 0) {
+          const updated = [...prev];
+          updated[idx] = task;
+          return updated;
+        }
+        return [task, ...prev];
+      },
+      () => fbSaveTask(task),
+      (err) => {
+        console.warn('Save task error:', err);
+        setCollectionSync((prev) => ({
+          ...prev,
+          tasks: { ...prev.tasks, hasError: true },
+        }));
+        setSaveErrorBanner(getArabicSaveErrorMessage('task', false));
       }
-      return [task, ...prev];
-    });
-    await fbSaveTask(task);
+    );
+    if (!res.success && res.error) {
+      throw res.error;
+    } else {
+      setSaveErrorBanner(null);
+    }
   };
 
   const handleDeleteTask = async (taskId: string) => {
-    setTasks((prev) => prev.filter((t) => t.id !== taskId));
-    await fbDeleteTask(taskId);
+    const res = await executeWithRollback(
+      tasks,
+      setTasks,
+      (prev) => prev.filter((t) => t.id !== taskId),
+      () => fbDeleteTask(taskId),
+      (err) => {
+        console.warn('Delete task error:', err);
+        setCollectionSync((prev) => ({
+          ...prev,
+          tasks: { ...prev.tasks, hasError: true },
+        }));
+        setSaveErrorBanner(getArabicSaveErrorMessage('task', true));
+      }
+    );
+    if (!res.success && res.error) {
+      throw res.error;
+    } else {
+      setSaveErrorBanner(null);
+    }
   };
 
   // Meeting Mutations
   const handleSaveMeeting = async (meeting: Meeting) => {
-    setMeetings((prev) => {
-      const idx = prev.findIndex((m) => m.id === meeting.id);
-      if (idx >= 0) {
-        const updated = [...prev];
-        updated[idx] = meeting;
-        return updated;
+    const res = await executeWithRollback(
+      meetings,
+      setMeetings,
+      (prev) => {
+        const idx = prev.findIndex((m) => m.id === meeting.id);
+        if (idx >= 0) {
+          const updated = [...prev];
+          updated[idx] = meeting;
+          return updated;
+        }
+        return [meeting, ...prev];
+      },
+      () => fbSaveMeeting(meeting),
+      (err) => {
+        console.warn('Save meeting error:', err);
+        setCollectionSync((prev) => ({
+          ...prev,
+          meetings: { ...prev.meetings, hasError: true },
+        }));
+        setSaveErrorBanner(getArabicSaveErrorMessage('meeting', false));
       }
-      return [meeting, ...prev];
-    });
-    await fbSaveMeeting(meeting);
+    );
+    if (!res.success && res.error) {
+      throw res.error;
+    } else {
+      setSaveErrorBanner(null);
+    }
   };
 
   const handleDeleteMeeting = async (meetingId: string) => {
-    setMeetings((prev) => prev.filter((m) => m.id !== meetingId));
-    await fbDeleteMeeting(meetingId);
+    const res = await executeWithRollback(
+      meetings,
+      setMeetings,
+      (prev) => prev.filter((m) => m.id !== meetingId),
+      () => fbDeleteMeeting(meetingId),
+      (err) => {
+        console.warn('Delete meeting error:', err);
+        setCollectionSync((prev) => ({
+          ...prev,
+          meetings: { ...prev.meetings, hasError: true },
+        }));
+        setSaveErrorBanner(getArabicSaveErrorMessage('meeting', true));
+      }
+    );
+    if (!res.success && res.error) {
+      throw res.error;
+    } else {
+      setSaveErrorBanner(null);
+    }
   };
 
   // Client Mutations
   const handleSaveClient = async (client: Client) => {
-    setClients((prev) => {
-      const idx = prev.findIndex((c) => c.id === client.id);
-      if (idx >= 0) {
-        const updated = [...prev];
-        updated[idx] = client;
-        return updated;
+    const res = await executeWithRollback(
+      clients,
+      setClients,
+      (prev) => {
+        const idx = prev.findIndex((c) => c.id === client.id);
+        if (idx >= 0) {
+          const updated = [...prev];
+          updated[idx] = client;
+          return updated;
+        }
+        return [client, ...prev];
+      },
+      () => fbSaveClient(client),
+      (err) => {
+        console.warn('Save client error:', err);
+        setCollectionSync((prev) => ({
+          ...prev,
+          clients: { ...prev.clients, hasError: true },
+        }));
+        setSaveErrorBanner(getArabicSaveErrorMessage('client', false));
       }
-      return [client, ...prev];
-    });
-    await fbSaveClient(client);
+    );
+    if (!res.success && res.error) {
+      throw res.error;
+    } else {
+      setSaveErrorBanner(null);
+    }
   };
 
   const handleDeleteClient = async (clientId: string) => {
-    setClients((prev) => prev.filter((c) => c.id !== clientId));
-    await fbDeleteClient(clientId);
+    const res = await executeWithRollback(
+      clients,
+      setClients,
+      (prev) => prev.filter((c) => c.id !== clientId),
+      () => fbDeleteClient(clientId),
+      (err) => {
+        console.warn('Delete client error:', err);
+        setCollectionSync((prev) => ({
+          ...prev,
+          clients: { ...prev.clients, hasError: true },
+        }));
+        setSaveErrorBanner(getArabicSaveErrorMessage('client', true));
+      }
+    );
+    if (!res.success && res.error) {
+      throw res.error;
+    } else {
+      setSaveErrorBanner(null);
+    }
   };
 
   // Note Mutations
   const handleSaveNote = async (note: Note) => {
-    setNotes((prev) => [note, ...prev]);
-    await fbSaveNote(note);
+    const res = await executeWithRollback(
+      notes,
+      setNotes,
+      (prev) => [note, ...prev],
+      () => fbSaveNote(note),
+      (err) => {
+        console.warn('Save note error:', err);
+        setCollectionSync((prev) => ({
+          ...prev,
+          notes: { ...prev.notes, hasError: true },
+        }));
+        setSaveErrorBanner(getArabicSaveErrorMessage('note', false));
+      }
+    );
+    if (!res.success && res.error) {
+      throw res.error;
+    } else {
+      setSaveErrorBanner(null);
+    }
   };
 
   const handleDeleteNote = async (noteId: string) => {
-    setNotes((prev) => prev.filter((n) => n.id !== noteId));
-    await fbDeleteNote(noteId);
+    const res = await executeWithRollback(
+      notes,
+      setNotes,
+      (prev) => prev.filter((n) => n.id !== noteId),
+      () => fbDeleteNote(noteId),
+      (err) => {
+        console.warn('Delete note error:', err);
+        setCollectionSync((prev) => ({
+          ...prev,
+          notes: { ...prev.notes, hasError: true },
+        }));
+        setSaveErrorBanner(getArabicSaveErrorMessage('note', true));
+      }
+    );
+    if (!res.success && res.error) {
+      throw res.error;
+    } else {
+      setSaveErrorBanner(null);
+    }
   };
 
   // Conflict Resolution Handlers
@@ -412,6 +566,21 @@ export function AuthenticatedSession({
         />
 
         <main className="flex-1 overflow-y-auto px-4 py-4">
+          {saveErrorBanner && (
+            <div className="mb-4 p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 text-xs flex items-center justify-between gap-2 shadow-xs animate-in fade-in">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span className="font-medium">{saveErrorBanner}</span>
+              </div>
+              <button
+                onClick={() => setSaveErrorBanner(null)}
+                className="text-rose-600 hover:text-rose-900 p-1 font-bold text-xs"
+              >
+                إغلاق
+              </button>
+            </div>
+          )}
+
           {activeTab === 'dashboard' && (
             <DashboardView
               clients={clients}

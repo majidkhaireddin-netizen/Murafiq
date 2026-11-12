@@ -37,7 +37,7 @@ interface MeetingsViewProps {
   meetings: Meeting[];
   clients: Client[];
   tasks: ActionItem[];
-  onSaveMeeting: (meeting: Meeting) => void;
+  onSaveMeeting: (meeting: Meeting) => Promise<void> | void;
   onOpenPdfModal: (meeting: Meeting) => void;
   onNewTaskFromMeeting: (meeting: Meeting) => void;
   selectedMeetingId?: string | null;
@@ -280,7 +280,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
     setTimeout(() => setExtractedTasksCount(null), 4000);
   };
 
-  const handleSaveMeetingForm = (e: React.FormEvent) => {
+  const handleSaveMeetingForm = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingMeeting?.title || !editingMeeting.clientId) return;
 
@@ -301,13 +301,17 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
       updatedAt: new Date().toISOString(),
     };
 
-    onSaveMeeting(saved);
-    if (activeMeeting?.id === saved.id) {
-      setActiveMeeting(saved);
-      setLiveNotes(saved.notes);
+    try {
+      await onSaveMeeting(saved);
+      if (activeMeeting?.id === saved.id) {
+        setActiveMeeting(saved);
+        setLiveNotes(saved.notes);
+      }
+      setIsEditModalOpen(false);
+      setEditingMeeting(null);
+    } catch (err) {
+      console.warn('MeetingsView: Save meeting failed, keeping modal open for retry:', err);
     }
-    setIsEditModalOpen(false);
-    setEditingMeeting(null);
   };
 
   const handleAddSamplePhoto = () => {

@@ -23,7 +23,7 @@ interface TasksViewProps {
   clients: Client[];
   meetings: Meeting[];
   onToggleTask: (taskId: string) => void;
-  onSaveTask: (task: ActionItem) => void;
+  onSaveTask: (task: ActionItem) => Promise<void> | void;
   onDeleteTask: (taskId: string) => void;
   preselectedClientId?: string | null;
   preselectedMeetingId?: string | null;
@@ -90,7 +90,7 @@ export const TasksView: React.FC<TasksViewProps> = ({
     });
   };
 
-  const handleSaveForm = (e: React.FormEvent) => {
+  const handleSaveForm = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingTask?.title || !editingTask.clientId) return;
 
@@ -107,9 +107,13 @@ export const TasksView: React.FC<TasksViewProps> = ({
       createdAt: editingTask.createdAt || new Date().toISOString(),
     };
 
-    onSaveTask(saved);
-    setIsEditModalOpen(false);
-    setEditingTask(null);
+    try {
+      await onSaveTask(saved);
+      setIsEditModalOpen(false);
+      setEditingTask(null);
+    } catch (err) {
+      console.warn('TasksView: Save task failed, keeping modal open for retry:', err);
+    }
   };
 
   const renderTaskItem = (task: ActionItem) => {
