@@ -39,11 +39,10 @@ async function loadRulesForDatabase(projectId: string, databaseId: string, rules
 }
 
 function getDbInstance(context: any, databaseId: string = NAMED_DB_ID) {
-  const app = context.getApp();
   if (databaseId === '(default)') {
     return context.firestore();
   }
-  return getFirestore(app, databaseId);
+  return context.firestore({ databaseId });
 }
 
 test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)', async (t) => {
@@ -77,7 +76,7 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
     }
   });
 
-  const dbTargets = ['(default)'];
+  const dbTargets = [NAMED_DB_ID, '(default)'];
 
   for (const dbId of dbTargets) {
     await t.test(`Database Target [${dbId}]: Security & Data Isolation Assertions`, async (st) => {
