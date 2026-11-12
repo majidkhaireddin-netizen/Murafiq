@@ -22,6 +22,7 @@ interface SettingsModalProps {
   onUpdateState: (updates: Partial<AppState>) => void;
   onResetData: () => void;
   language: 'ar' | 'en';
+  onTriggerSimulatedConflict?: () => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -31,6 +32,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onUpdateState,
   onResetData,
   language,
+  onTriggerSimulatedConflict,
 }) => {
   const [activeTab, setActiveTab] = useState<'general' | 'assumptions'>('general');
 
@@ -102,10 +104,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <div className="p-5 overflow-y-auto space-y-5 flex-1 text-xs">
           {activeTab === 'general' ? (
             <>
-              {/* 1. Offline & Sync Simulation */}
+              {/* 1. Cloud Database Connection Info */}
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="font-bold text-stone-900 block flex items-center gap-1.5">
+                  <span className="font-bold text-stone-900 flex items-center gap-1.5">
                     <HardDrive className="w-4 h-4 text-emerald-700" />
                     <span>قاعدة بيانات Firebase Firestore السحابية</span>
                   </span>
@@ -124,30 +126,36 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>
                 </div>
 
-                <p className="text-stone-500 text-[11px] leading-relaxed pt-1">
-                  يتم حفظ وتحديث بيانات العملاء واللقاءات والمهام في السحابة ومزامنتها لحظياً. يمكنك اختبار التبديل بين الحالات البصرية:
-                </p>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  {[
-                    { id: 'synced', label: '✅ متزامن بالكامل' },
-                    { id: 'pending', label: '⏳ قيد المزامنة' },
-                    { id: 'local', label: '⚡ محلي (أوفلاين)' },
-                    { id: 'conflict', label: '⚠️ تعارض بيانات' },
-                    { id: 'failed', label: '❌ فشل المزامنة' },
-                  ].map((item) => (
-                    <button
-                      key={item.id}
-                      onClick={() => onUpdateState({ syncState: item.id as SyncState })}
-                      className={`p-2 rounded-xl border text-center font-medium transition-colors ${
-                        appState.syncState === item.id
-                          ? 'bg-emerald-50 text-emerald-900 border-emerald-400 font-bold'
-                          : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
-                      }`}
-                    >
-                      {item.label}
-                    </button>
-                  ))}
+                <div className="p-3 bg-stone-50 border border-stone-200 rounded-xl text-[11px] text-stone-600">
+                  <p className="leading-relaxed">
+                    يتم تتبع حالة المزامنة اللحظية آلياً عبر المجموعات الأربع: العملاء، اللقاءات، المهام، والملاحظات. تم إلغاء التبديل اليدوي لحالة المزامنة لضمان دقة التقارير السحابية.
+                  </p>
                 </div>
+
+                {/* Developer Feature: Conflict Simulation Only */}
+                {onTriggerSimulatedConflict && (
+                  <div className="pt-2">
+                    <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-xl space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-amber-900 text-[11px]">
+                          أداة اختبار فض التعارض (Development Only)
+                        </span>
+                        <span className="text-[9px] bg-amber-200 text-amber-900 px-1.5 py-0.5 rounded font-mono">
+                          DEV_TEST
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-amber-800 leading-relaxed">
+                        اختبار ظهور نافذة حل التعارض البصري (Conflict Resolution) في حال وجود اختلاف بين النسخة المحلية والنسخة السحابية.
+                      </p>
+                      <button
+                        onClick={onTriggerSimulatedConflict}
+                        className="w-full py-1.5 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-medium text-xs transition-colors"
+                      >
+                        ⚡ تشغيل محاكاة تعارض بيانات
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* 2. Hijri Calendar */}

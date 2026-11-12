@@ -8,7 +8,7 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // 2. Global Authentication & Validation Helpers
+    // 2. Global Authentication & ID Validation Helpers
     function isSignedIn() {
       return request.auth != null;
     }
@@ -29,13 +29,7 @@ service cloud.firestore {
       return resource.data;
     }
 
-    // 3. Initial connection testing document (Read-only check)
-    match /test/{docId} {
-      allow read: if true;
-      allow write: if false;
-    }
-
-    // 4. Legacy Root Collections - Explicitly Denied for Client Access
+    // 3. Deny all legacy root collections explicitly (Defense in Depth)
     match /clients/{clientId} {
       allow read, write: if false;
     }
@@ -49,56 +43,103 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // 5. Data Model Validation Helpers
+    // 4. Schema & Data Integrity Validation Helpers
 
-    function isValidClient(data) {
-      return data.id is string && data.id.size() <= 128
+    // User Profile Document Validation
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'lastLoginAt', 'createdAt'])
+        && data.keys().hasAll(['uid'])
+        && data.uid is string && data.uid == userId
+        && (!('email' in data) || (data.email is string && data.email.size() <= 150))
+        && (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 150))
+        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 500))
+        && (!('lastLoginAt' in data) || (data.lastLoginAt is string && data.lastLoginAt.size() <= 50))
+        && (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 50));
+    }
+
+    // Client Validation
+    function isValidClient(data, userId) {
+      return data.keys().hasOnly(['id', 'userId', 'name', 'company', 'phone', 'email', 'notes', 'avatarPath', 'color', 'isFavorite', 'createdAt', 'updatedAt'])
+        && data.keys().hasAll(['id', 'name'])
+        && data.id is string && isValidId(data.id)
         && data.name is string && data.name.size() > 0 && data.name.size() <= 150
-        && (!('userId' in data) || (data.userId is string && data.userId.size() <= 128))
+        && (!('userId' in data) || (data.userId is string && data.userId == userId))
         && (!('company' in data) || (data.company is string && data.company.size() <= 150))
         && (!('phone' in data) || (data.phone is string && data.phone.size() <= 50))
         && (!('email' in data) || (data.email is string && data.email.size() <= 150))
         && (!('notes' in data) || (data.notes is string && data.notes.size() <= 2000))
-        && (!('color' in data) || (data.color is string && data.color.size() <= 20))
-        && (!('isFavorite' in data) || data.isFavorite is bool);
+        && (!('avatarPath' in data) || (data.avatarPath is string && data.avatarPath.size() <= 500))
+        && (!('color' in data) || (data.color is string && data.color.size() <= 30))
+        && (!('isFavorite' in data) || data.isFavorite is bool)
+        && (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 50))
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50));
     }
 
-    function isValidMeeting(data) {
-      return data.id is string && data.id.size() <= 128
-        && data.clientId is string && data.clientId.size() <= 128
+    // Meeting Validation
+    function isValidMeeting(data, userId) {
+      return data.keys().hasOnly(['id', 'userId', 'clientId', 'title', 'dateTime', 'duration', 'type', 'location', 'notes', 'status', 'photoPaths', 'isFollowUpScheduled', 'attendees', 'createdAt', 'updatedAt'])
+        && data.keys().hasAll(['id', 'clientId', 'title', 'dateTime', 'type', 'status', 'notes'])
+        && data.id is string && isValidId(data.id)
+        && data.clientId is string && isValidId(data.clientId)
         && data.title is string && data.title.size() > 0 && data.title.size() <= 200
         && data.dateTime is string && data.dateTime.size() <= 50
         && data.type in ['in_person', 'phone', 'video', 'chat']
         && data.status in ['draft', 'confirmed', 'completed']
-        && (!('userId' in data) || (data.userId is string && data.userId.size() <= 128))
-        && (!('duration' in data) || data.duration is number)
+        && data.notes is string && data.notes.size() <= 10000
+        && (!('userId' in data) || (data.userId is string && data.userId == userId))
+        && (!('duration' in data) || (data.duration is number && data.duration >= 0 && data.duration <= 1440))
         && (!('location' in data) || (data.location is string && data.location.size() <= 200))
-        && (!('notes' in data) || (data.notes is string && data.notes.size() <= 10000));
+        && (!('photoPaths' in data) || (data.photoPaths is list && data.photoPaths.size() <= 20))
+        && (!('isFollowUpScheduled' in data) || data.isFollowUpScheduled is bool)
+        && (!('attendees' in data) || (data.attendees is list && data.attendees.size() <= 50))
+        && (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 50))
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50));
     }
 
-    function isValidTask(data) {
-      return data.id is string && data.id.size() <= 128
-        && data.clientId is string && data.clientId.size() <= 128
+    // Task Validation
+    function isValidTask(data, userId) {
+      return data.keys().hasOnly(['id', 'userId', 'meetingId', 'clientId', 'title', 'description', 'dueDate', 'priority', 'status', 'reminderDate', 'completedAt', 'provenance', 'createdAt'])
+        && data.keys().hasAll(['id', 'clientId', 'title', 'priority', 'status'])
+        && data.id is string && isValidId(data.id)
+        && data.clientId is string && isValidId(data.clientId)
         && data.title is string && data.title.size() > 0 && data.title.size() <= 250
         && data.priority in ['urgent', 'high', 'medium', 'low']
         && data.status in ['pending', 'in_progress', 'completed', 'cancelled']
-        && (!('userId' in data) || (data.userId is string && data.userId.size() <= 128))
+        && (!('userId' in data) || (data.userId is string && data.userId == userId))
+        && (!('meetingId' in data) || (data.meetingId is string && isValidId(data.meetingId)))
         && (!('description' in data) || (data.description is string && data.description.size() <= 2000))
-        && (!('dueDate' in data) || (data.dueDate is string && data.dueDate.size() <= 50));
+        && (!('dueDate' in data) || (data.dueDate is string && data.dueDate.size() <= 50))
+        && (!('reminderDate' in data) || (data.reminderDate is string && data.reminderDate.size() <= 50))
+        && (!('completedAt' in data) || (data.completedAt is string && data.completedAt.size() <= 50))
+        && (!('provenance' in data) || (data.provenance in ['source', 'ai_suggested', 'approved', 'uncertain']))
+        && (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 50));
     }
 
-    function isValidNote(data) {
-      return data.id is string && data.id.size() <= 128
+    // Note Validation
+    function isValidNote(data, userId) {
+      return data.keys().hasOnly(['id', 'userId', 'clientId', 'title', 'content', 'tags', 'isPinned', 'color', 'createdAt'])
+        && data.keys().hasAll(['id', 'title', 'content', 'isPinned'])
+        && data.id is string && isValidId(data.id)
         && data.title is string && data.title.size() > 0 && data.title.size() <= 200
         && data.content is string && data.content.size() <= 5000
-        && (!('userId' in data) || (data.userId is string && data.userId.size() <= 128))
-        && (!('isPinned' in data) || data.isPinned is bool);
+        && data.isPinned is bool
+        && (!('userId' in data) || (data.userId is string && data.userId == userId))
+        && (!('clientId' in data) || (data.clientId is string && isValidId(data.clientId)))
+        && (!('tags' in data) || (data.tags is list && data.tags.size() <= 30))
+        && (!('color' in data) || (data.color is string && data.color.size() <= 30))
+        && (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 50));
     }
 
-    // 6. User-Scoped Data Hierarchy (/users/{userId}/...)
+    // 5. User-Scoped Data Hierarchy (/users/{userId}/...)
     match /users/{userId} {
       allow get: if isOwner(userId);
-      allow create, update: if isOwner(userId) && isValidId(userId);
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidUserProfile(incoming(), userId);
+      allow update: if isOwner(userId)
+        && isValidId(userId)
+        && incoming().uid == existing().uid
+        && isValidUserProfile(incoming(), userId);
       allow delete: if false;
 
       // Scoped Subcollection: Clients
@@ -107,12 +148,14 @@ service cloud.firestore {
         allow create: if isOwner(userId)
           && isValidId(clientId)
           && incoming().id == clientId
-          && isValidClient(incoming());
+          && (!('userId' in incoming()) || incoming().userId == userId)
+          && isValidClient(incoming(), userId);
         allow update: if isOwner(userId)
           && isValidId(clientId)
           && incoming().id == clientId
           && incoming().id == existing().id
-          && isValidClient(incoming());
+          && (!('userId' in existing()) || incoming().userId == existing().userId)
+          && isValidClient(incoming(), userId);
         allow delete: if isOwner(userId) && isValidId(clientId);
       }
 
@@ -122,12 +165,14 @@ service cloud.firestore {
         allow create: if isOwner(userId)
           && isValidId(meetingId)
           && incoming().id == meetingId
-          && isValidMeeting(incoming());
+          && (!('userId' in incoming()) || incoming().userId == userId)
+          && isValidMeeting(incoming(), userId);
         allow update: if isOwner(userId)
           && isValidId(meetingId)
           && incoming().id == meetingId
           && incoming().id == existing().id
-          && isValidMeeting(incoming());
+          && (!('userId' in existing()) || incoming().userId == existing().userId)
+          && isValidMeeting(incoming(), userId);
         allow delete: if isOwner(userId) && isValidId(meetingId);
       }
 
@@ -137,12 +182,14 @@ service cloud.firestore {
         allow create: if isOwner(userId)
           && isValidId(taskId)
           && incoming().id == taskId
-          && isValidTask(incoming());
+          && (!('userId' in incoming()) || incoming().userId == userId)
+          && isValidTask(incoming(), userId);
         allow update: if isOwner(userId)
           && isValidId(taskId)
           && incoming().id == taskId
           && incoming().id == existing().id
-          && isValidTask(incoming());
+          && (!('userId' in existing()) || incoming().userId == existing().userId)
+          && isValidTask(incoming(), userId);
         allow delete: if isOwner(userId) && isValidId(taskId);
       }
 
@@ -152,12 +199,14 @@ service cloud.firestore {
         allow create: if isOwner(userId)
           && isValidId(noteId)
           && incoming().id == noteId
-          && isValidNote(incoming());
+          && (!('userId' in incoming()) || incoming().userId == userId)
+          && isValidNote(incoming(), userId);
         allow update: if isOwner(userId)
           && isValidId(noteId)
           && incoming().id == noteId
           && incoming().id == existing().id
-          && isValidNote(incoming());
+          && (!('userId' in existing()) || incoming().userId == existing().userId)
+          && isValidNote(incoming(), userId);
         allow delete: if isOwner(userId) && isValidId(noteId);
       }
     }

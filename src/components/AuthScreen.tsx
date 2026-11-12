@@ -69,7 +69,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSuccess, language }) =
             </div>
             <div className="flex items-start gap-2">
               <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-              <span>{language === 'ar' ? 'يعمل دون اتصال بالإنترنت (Offline-First) مع حفظ محلي آمن' : 'Fully operational offline with resilient local persistence'}</span>
+              <span>{language === 'ar' ? 'واجهة تفاعلية خفيفة مع مزامنة سحابية مؤمنة لقواعد البيانات' : 'Lightweight interactive interface with secure cloud database synchronization'}</span>
             </div>
           </div>
 

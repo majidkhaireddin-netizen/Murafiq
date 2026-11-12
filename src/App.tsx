@@ -1,93 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { User } from 'firebase/auth';
-import { AppState, Client, Meeting, ActionItem, Note, SyncState } from './types';
-import { categorizeTasks } from './utils/logic';
-import { Header } from './components/Header';
-import { BottomNav, NavTab } from './components/BottomNav';
-import { DashboardView } from './components/views/DashboardView';
-import { ClientsView } from './components/views/ClientsView';
-import { MeetingsView } from './components/views/MeetingsView';
-import { TasksView } from './components/views/TasksView';
-import { ReportsView } from './components/views/ReportsView';
-import { MeetingMinutesPdfModal } from './components/MeetingMinutesPdfModal';
-import { BiometricLockModal } from './components/BiometricLockModal';
-import { SearchModal } from './components/SearchModal';
-import { SettingsModal } from './components/SettingsModal';
-import { ConflictResolutionModal } from './components/ConflictResolutionModal';
+import { subscribeAuthState, logOut } from './services/firebase';
 import { AuthScreen } from './components/AuthScreen';
-import { ConflictItem, ResolutionChoice } from './types';
-import { detectEntityConflict, resolveConflictRecord } from './utils/conflictLogic';
-import {
-  testConnection,
-  subscribeAuthState,
-  logOut,
-  subscribeClients,
-  subscribeMeetings,
-  subscribeTasks,
-  subscribeNotes,
-  saveClient as fbSaveClient,
-  deleteClient as fbDeleteClient,
-  saveMeeting as fbSaveMeeting,
-  deleteMeeting as fbDeleteMeeting,
-  saveTask as fbSaveTask,
-  deleteTask as fbDeleteTask,
-  saveNote as fbSaveNote,
-  deleteNote as fbDeleteNote,
-} from './services/firebase';
+import { AuthenticatedSession } from './components/AuthenticatedSession';
 import { Wifi, BatteryMedium, Signal } from 'lucide-react';
 
 export default function App() {
-  // Authentication state (Task 002)
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [isAuthRestoring, setIsAuthRestoring] = useState<boolean>(true);
+  const [isMobileFrame, setIsMobileFrame] = useState<boolean>(true);
 
-  // User-scoped data state (starts genuinely empty - no auto-seeding)
-  const [clients, setClients] = useState<Client[]>([]);
-  const [meetings, setMeetings] = useState<Meeting[]>([]);
-  const [tasks, setTasks] = useState<ActionItem[]>([]);
-  const [notes, setNotes] = useState<Note[]>([]);
-
-  // System & Settings state
-  const [syncState, setSyncState] = useState<SyncState>('local');
-  const [conflicts, setConflicts] = useState<ConflictItem[]>([]);
-  const [activeConflict, setActiveConflict] = useState<ConflictItem | null>(null);
-  const [isBiometricLocked, setIsBiometricLocked] = useState(false);
-  const [isBiometricEnabled, setIsBiometricEnabled] = useState(true);
-  const [pinCode, setPinCode] = useState('1234');
-  const [showHijri, setShowHijri] = useState(true);
-  const [language, setLanguage] = useState<'ar' | 'en'>('ar');
-  const [isMobileFrame, setIsMobileFrame] = useState(true);
-
-  // Navigation state
-  const [activeTab, setActiveTab] = useState<NavTab>('dashboard');
-
-  // Modals state
-  const [isSearchOpen, setIsSearchOpen] = useState(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [pdfMeeting, setPdfMeeting] = useState<Meeting | null>(null);
-
-  // Cross-view selection helpers
-  const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
-  const [selectedMeetingId, setSelectedMeetingId] = useState<string | null>(null);
-  const [preselectedClientIdForMeeting, setPreselectedClientIdForMeeting] = useState<string | null>(null);
-  const [preselectedClientIdForTask, setPreselectedClientIdForTask] = useState<string | null>(null);
-
-  // 1. Monitor Authentication State on App Mount
+  // Monitor Authentication State
   useEffect(() => {
     const unsubscribeAuth = subscribeAuthState((user) => {
       setCurrentUser(user);
       setIsAuthRestoring(false);
-
-      if (!user) {
-        // Clear all sensitive in-memory data on logout to prevent cross-account disclosure
-        setClients([]);
-        setMeetings([]);
-        setTasks([]);
-        setNotes([]);
-        setConflicts([]);
-        setActiveConflict(null);
-        setSyncState('local');
-      }
     });
 
     return () => {
@@ -95,610 +22,95 @@ export default function App() {
     };
   }, []);
 
-  // 2. User-Scoped Firestore Subscriptions (Initialized ONLY after authentication)
-  useEffect(() => {
-    if (!currentUser || !currentUser.uid) {
-      return;
-    }
-
-    let isSubscribed = true;
-    const activeUid = currentUser.uid;
-    let unsubs: (() => void)[] = [];
-
-    const initUserSubscriptions = async () => {
-      setSyncState('pending');
-      const isConnected = await testConnection();
-      if (!isSubscribed) return;
-
-      if (!isConnected) {
-        setSyncState('local');
-      }
-
-      const updateSyncStateFromMetadata = (meta: { fromCache: boolean; hasPendingWrites: boolean }) => {
-        if (!isSubscribed) return;
-        if (meta.hasPendingWrites) {
-          setSyncState('pending');
-        } else if (meta.fromCache) {
-          setSyncState('local');
-        } else {
-          setSyncState('synced');
-        }
-      };
-
-      try {
-        const unsubClients = subscribeClients(
-          (data, meta) => {
-            if (!isSubscribed || activeUid !== currentUser.uid) return;
-            setClients(data); // Empty dataset is valid empty dataset - no auto-seeding!
-            updateSyncStateFromMetadata(meta);
-          },
-          (err) => {
-            if (!isSubscribed) return;
-            console.warn('Clients subscription error:', err);
-            setSyncState('failed');
-          }
-        );
-
-        const unsubMeetings = subscribeMeetings(
-          (data, meta) => {
-            if (!isSubscribed || activeUid !== currentUser.uid) return;
-            setMeetings(data);
-            updateSyncStateFromMetadata(meta);
-          },
-          (err) => {
-            if (!isSubscribed) return;
-            console.warn('Meetings subscription error:', err);
-            setSyncState('failed');
-          }
-        );
-
-        const unsubTasks = subscribeTasks(
-          (data, meta) => {
-            if (!isSubscribed || activeUid !== currentUser.uid) return;
-            setTasks(data);
-            updateSyncStateFromMetadata(meta);
-          },
-          (err) => {
-            if (!isSubscribed) return;
-            console.warn('Tasks subscription error:', err);
-            setSyncState('failed');
-          }
-        );
-
-        const unsubNotes = subscribeNotes(
-          (data, meta) => {
-            if (!isSubscribed || activeUid !== currentUser.uid) return;
-            setNotes(data);
-            updateSyncStateFromMetadata(meta);
-          },
-          (err) => {
-            if (!isSubscribed) return;
-            console.warn('Notes subscription error:', err);
-            setSyncState('failed');
-          }
-        );
-
-        unsubs = [unsubClients, unsubMeetings, unsubTasks, unsubNotes];
-      } catch (err) {
-        console.warn('Failed to initialize user-scoped subscriptions:', err);
-        if (isSubscribed) setSyncState('failed');
-      }
-    };
-
-    initUserSubscriptions();
-
-    return () => {
-      isSubscribed = false;
-      unsubs.forEach((u) => u());
-    };
-  }, [currentUser?.uid]);
-
-  // Logout handler
   const handleLogOut = async () => {
     try {
       await logOut();
       setCurrentUser(null);
-      setClients([]);
-      setMeetings([]);
-      setTasks([]);
-      setNotes([]);
-      setConflicts([]);
-      setActiveConflict(null);
-      setSyncState('local');
     } catch (err) {
       console.error('Logout error:', err);
     }
   };
 
-  // Counts for badges
-  const { overdue } = categorizeTasks(tasks);
-  const now = new Date();
-  const upcomingMeetingsCount = meetings.filter((m) => {
-    const diffMs = new Date(m.dateTime).getTime() - now.getTime();
-    return diffMs >= -3600000 && diffMs <= 7 * 24 * 3600000;
-  }).length;
-
-  // Task Actions
-  const handleToggleTask = async (taskId: string) => {
-    const task = tasks.find((t) => t.id === taskId);
-    if (!task) return;
-
-    const nextStatus = task.status === 'completed' ? 'pending' : 'completed';
-    const updated: ActionItem = {
-      ...task,
-      status: nextStatus,
-      completedAt: nextStatus === 'completed' ? new Date().toISOString() : undefined,
-    };
-
-    setTasks((prev) => prev.map((t) => (t.id === taskId ? updated : t)));
-    try {
-      setSyncState('pending');
-      await fbSaveTask(updated);
-      setSyncState('synced');
-    } catch {
-      setSyncState('failed');
-    }
-  };
-
-  const handleSaveTask = async (task: ActionItem) => {
-    setTasks((prev) => {
-      const idx = prev.findIndex((t) => t.id === task.id);
-      if (idx >= 0) {
-        const updated = [...prev];
-        updated[idx] = task;
-        return updated;
-      }
-      return [task, ...prev];
-    });
-
-    try {
-      setSyncState('pending');
-      await fbSaveTask(task);
-      setSyncState('synced');
-    } catch {
-      setSyncState('failed');
-    }
-  };
-
-  const handleDeleteTask = async (taskId: string) => {
-    setTasks((prev) => prev.filter((t) => t.id !== taskId));
-    try {
-      setSyncState('pending');
-      await fbDeleteTask(taskId);
-      setSyncState('synced');
-    } catch {
-      setSyncState('failed');
-    }
-  };
-
-  // Meeting Actions
-  const handleSaveMeeting = async (meeting: Meeting) => {
-    setMeetings((prev) => {
-      const idx = prev.findIndex((m) => m.id === meeting.id);
-      if (idx >= 0) {
-        const updated = [...prev];
-        updated[idx] = meeting;
-        return updated;
-      }
-      return [meeting, ...prev];
-    });
-
-    try {
-      setSyncState('pending');
-      await fbSaveMeeting(meeting);
-      setSyncState('synced');
-    } catch {
-      setSyncState('failed');
-    }
-  };
-
-  // Client Actions
-  const handleSaveClient = async (client: Client) => {
-    setClients((prev) => {
-      const idx = prev.findIndex((c) => c.id === client.id);
-      if (idx >= 0) {
-        const updated = [...prev];
-        updated[idx] = client;
-        return updated;
-      }
-      return [client, ...prev];
-    });
-
-    try {
-      setSyncState('pending');
-      await fbSaveClient(client);
-      setSyncState('synced');
-    } catch {
-      setSyncState('failed');
-    }
-  };
-
-  const handleDeleteClient = async (clientId: string) => {
-    setClients((prev) => prev.filter((c) => c.id !== clientId));
-    try {
-      setSyncState('pending');
-      await fbDeleteClient(clientId);
-      setSyncState('synced');
-    } catch {
-      setSyncState('failed');
-    }
-  };
-
-  // Note Actions
-  const handleSaveNote = async (note: Note) => {
-    setNotes((prev) => [note, ...prev]);
-    try {
-      setSyncState('pending');
-      await fbSaveNote(note);
-      setSyncState('synced');
-    } catch {
-      setSyncState('failed');
-    }
-  };
-
-  const handleDeleteNote = async (noteId: string) => {
-    setNotes((prev) => prev.filter((n) => n.id !== noteId));
-    try {
-      setSyncState('pending');
-      await fbDeleteNote(noteId);
-      setSyncState('synced');
-    } catch {
-      setSyncState('failed');
-    }
-  };
-
-  // Conflict Resolution Handlers
-  const handleResolveConflict = async (
-    conflict: ConflictItem,
-    choice: ResolutionChoice,
-    customMergedNotes?: string
-  ) => {
-    setSyncState('pending');
-
-    if (conflict.entityType === 'meeting') {
-      const resolved = resolveConflictRecord<Meeting>(conflict, choice, customMergedNotes);
-      setMeetings((prev) => prev.map((m) => (m.id === resolved.id ? resolved : m)));
-      await fbSaveMeeting(resolved);
-    } else if (conflict.entityType === 'client') {
-      const resolved = resolveConflictRecord<Client>(conflict, choice, customMergedNotes);
-      setClients((prev) => prev.map((c) => (c.id === resolved.id ? resolved : c)));
-      await fbSaveClient(resolved);
-    } else if (conflict.entityType === 'task') {
-      const resolved = resolveConflictRecord<ActionItem>(conflict, choice, customMergedNotes);
-      setTasks((prev) => prev.map((t) => (t.id === resolved.id ? resolved : t)));
-      await fbSaveTask(resolved);
-    } else if (conflict.entityType === 'note') {
-      const resolved = resolveConflictRecord<Note>(conflict, choice, customMergedNotes);
-      setNotes((prev) => prev.map((n) => (n.id === resolved.id ? resolved : n)));
-      await fbSaveNote(resolved);
-    }
-
-    const remaining = conflicts.filter((c) => c.id !== conflict.id);
-    setConflicts(remaining);
-    setActiveConflict(remaining.length > 0 ? remaining[0] : null);
-
-    if (remaining.length === 0) {
-      setSyncState('synced');
-    }
-  };
-
-  // Conflict Simulation for Demonstration
-  const handleSimulateConflict = () => {
-    const targetMeeting: Meeting = meetings[0] || {
-      id: `m-demo-${Date.now()}`,
-      clientId: clients[0]?.id || 'c-demo',
-      title: 'جلسة عمل تجريبية لاختبار فض التعارض',
-      dateTime: new Date().toISOString(),
-      type: 'in_person',
-      notes: 'محضر الجلسة الأصلي قبل حدوث التعارض.',
-      status: 'confirmed',
-      photoPaths: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    const localCopy: Meeting = {
-      ...targetMeeting,
-      location: 'كافيه برو بريك — الرياض (تعديل محلي بدون إنترنت)',
-      notes: `${targetMeeting.notes}\n\n### تعديلات تمت أثناء وضع الأوفلاين:\n- إضافة بند تسليم فوري في ملحق العقد.\n- اعتماد جدول تسليم أسبوعي جديد.`,
-      status: 'confirmed',
-    };
-    const remoteCopy: Meeting = {
-      ...targetMeeting,
-      location: 'مقر شركة أفق — قاعة الاجتماعات الرئيسية (تم تحديثه عبر السحابة)',
-      notes: `${targetMeeting.notes}\n\n### تعديلات تمت عبر السحابة من جهاز آخر:\n- تم تغيير المكان بطلب من العميل وتأكيد حضور المحامي.`,
-      status: 'completed',
-    };
-
-    const detected = detectEntityConflict(localCopy, remoteCopy, 'meeting');
-    if (detected) {
-      setConflicts([detected]);
-      setActiveConflict(detected);
-      setSyncState('conflict');
-    }
-  };
-
-  // Safe Reset Local State (Does NOT reseed Firestore - Requirement 4)
-  const handleResetData = () => {
-    setConflicts([]);
-    setActiveConflict(null);
-    setIsSettingsOpen(false);
-  };
-
-  // Navigation helpers
-  const handleOpenNewMeeting = (clientId?: string) => {
-    setPreselectedClientIdForMeeting(clientId || null);
-    setActiveTab('meetings');
-  };
-
-  const handleOpenNewTask = (clientId?: string) => {
-    setPreselectedClientIdForTask(clientId || null);
-    setActiveTab('tasks');
-  };
-
-  const handleSelectClientFromDashboard = (client: Client) => {
-    setSelectedClientId(client.id);
-    setActiveTab('clients');
-  };
-
-  const handleSelectMeetingFromDashboard = (meeting: Meeting) => {
-    setSelectedMeetingId(meeting.id);
-    setActiveTab('meetings');
-  };
-
-  // Direction and Language
-  const isRtl = language === 'ar';
-
-  // 3. Render Session Restoration Loading State
+  // Restoring Auth State Screen
   if (isAuthRestoring) {
     return (
-      <div
-        dir={isRtl ? 'rtl' : 'ltr'}
-        className="min-h-screen bg-stone-100 flex flex-col items-center justify-center p-4 text-center select-none"
-      >
-        <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-emerald-600 to-teal-700 text-white flex items-center justify-center font-bold text-2xl shadow-lg border border-emerald-400/30 mb-4 animate-pulse">
-          م
+      <div className="min-h-screen bg-stone-100 flex items-center justify-center p-4">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-10 h-10 border-3 border-emerald-700 border-t-transparent rounded-full animate-spin" />
+          <span className="text-xs font-medium text-stone-600">
+            جارٍ استعادة جلسة العمل الآمنة...
+          </span>
         </div>
-        <h3 className="font-heading font-bold text-stone-800 text-base mb-1">
-          مُرافق — Murafiq
-        </h3>
-        <p className="text-xs text-stone-500">
-          {language === 'ar'
-            ? 'جاري استعادة جلسة الحساب والتحقق من الأمان...'
-            : 'Restoring authentication session...'}
-        </p>
       </div>
     );
   }
 
-  // 4. Render Google Auth Screen if not signed in
+  // Unauthenticated Screen
   if (!currentUser) {
-    return <AuthScreen language={language} />;
+    return (
+      <div className="min-h-screen bg-stone-100 flex items-center justify-center p-0 sm:p-4">
+        <div
+          className={`w-full bg-white flex flex-col overflow-hidden transition-all duration-300 ${
+            isMobileFrame
+              ? 'sm:max-w-[430px] sm:h-[932px] sm:rounded-[48px] sm:shadow-2xl sm:border-[8px] sm:border-stone-800 relative'
+              : 'max-w-md h-screen sm:h-auto sm:rounded-2xl shadow-xl'
+          }`}
+        >
+          {isMobileFrame && (
+            <div className="hidden sm:flex items-center justify-between px-7 pt-3 pb-1 text-stone-900 text-xs font-semibold select-none z-50">
+              <span>9:41</span>
+              <div className="w-24 h-4 bg-black rounded-full mx-auto" />
+              <div className="flex items-center gap-1.5 text-stone-900">
+                <Signal className="w-3.5 h-3.5" />
+                <Wifi className="w-3.5 h-3.5" />
+                <BatteryMedium className="w-4 h-4" />
+              </div>
+            </div>
+          )}
+
+          <div className="flex-1 overflow-y-auto">
+            <AuthScreen language="ar" />
+          </div>
+        </div>
+      </div>
+    );
   }
 
-  // 5. Render Main Application for Authenticated User
+  // Explicit UID-Keyed Authenticated User Session Boundary
+  // When currentUser.uid changes (Account Switch User A -> User B),
+  // React immediately unmounts User A's component tree, terminating subscriptions,
+  // wiping all in-memory data, modals, and selections, and mounts a fresh User B session.
   return (
-    <div
-      dir={isRtl ? 'rtl' : 'ltr'}
-      className={`min-h-screen bg-stone-100 text-stone-900 flex flex-col justify-center items-center ${
-        isMobileFrame ? 'p-0 sm:py-6 sm:px-4' : 'p-0'
-      }`}
-    >
-      {/* App Shell */}
+    <div className="min-h-screen bg-stone-100 flex items-center justify-center p-0 sm:p-4">
       <div
-        className={`w-full bg-stone-50 flex flex-col relative transition-all duration-200 overflow-hidden ${
+        className={`w-full bg-white flex flex-col overflow-hidden transition-all duration-300 ${
           isMobileFrame
-            ? 'max-w-[430px] min-h-screen sm:min-h-[860px] sm:max-h-[920px] sm:rounded-[40px] sm:shadow-2xl sm:border-[8px] sm:border-stone-800'
-            : 'max-w-4xl min-h-screen shadow-lg'
+            ? 'sm:max-w-[430px] sm:h-[932px] sm:rounded-[48px] sm:shadow-2xl sm:border-[8px] sm:border-stone-800 relative'
+            : 'w-full max-w-5xl h-screen sm:h-[90vh] sm:rounded-2xl shadow-xl'
         }`}
       >
-        {/* Mobile Phone Simulated Status Bar (Visible on mobile frame mode) */}
         {isMobileFrame && (
-          <div className="bg-stone-900 text-white px-6 pt-3 pb-2 text-[11px] font-medium flex items-center justify-between select-none">
-            <span className="font-semibold tracking-tight">9:41</span>
-            {/* Dynamic Island / Camera Notch Pill */}
-            <div className="w-20 h-4 bg-black rounded-full hidden sm:block" />
-            <div className="flex items-center gap-1.5 opacity-90">
-              <Signal className="w-3 h-3" />
-              <Wifi className="w-3 h-3" />
-              <BatteryMedium className="w-3.5 h-3.5" />
+          <div className="hidden sm:flex items-center justify-between px-7 pt-3 pb-1 text-stone-900 text-xs font-semibold select-none z-50">
+            <span>9:41</span>
+            <div className="w-24 h-4 bg-black rounded-full mx-auto" />
+            <div className="flex items-center gap-1.5 text-stone-900">
+              <Signal className="w-3.5 h-3.5" />
+              <Wifi className="w-3.5 h-3.5" />
+              <BatteryMedium className="w-4 h-4" />
             </div>
           </div>
         )}
 
-        {/* Global Header with Authenticated User Profile & Logout */}
-        <Header
-          syncState={syncState}
-          onSyncStateChange={(st) => {
-            if (st === 'conflict') {
-              handleSimulateConflict();
-            } else {
-              setSyncState(st);
-            }
-          }}
-          onOpenSearch={() => setIsSearchOpen(true)}
-          onTriggerLock={() => setIsBiometricLocked(true)}
-          isMobileFrame={isMobileFrame}
-          onToggleFrame={() => setIsMobileFrame(!isMobileFrame)}
-          language={language}
-          onToggleLanguage={() => setLanguage(language === 'ar' ? 'en' : 'ar')}
-          onOpenSettings={() => setIsSettingsOpen(true)}
-          conflictCount={conflicts.length}
-          onOpenConflictModal={() => {
-            if (conflicts.length > 0) {
-              setActiveConflict(conflicts[0]);
-            } else {
-              handleSimulateConflict();
-            }
-          }}
-          currentUser={currentUser}
-          onLogOut={handleLogOut}
-        />
-
-        {/* Scrollable Main View Container */}
-        <main className="flex-1 overflow-y-auto px-4 py-4">
-          {activeTab === 'dashboard' && (
-            <DashboardView
-              clients={clients}
-              meetings={meetings}
-              tasks={tasks}
-              notes={notes}
-              onSelectMeeting={handleSelectMeetingFromDashboard}
-              onSelectClient={handleSelectClientFromDashboard}
-              onToggleTask={handleToggleTask}
-              onNewMeeting={handleOpenNewMeeting}
-              onNewTask={() => handleOpenNewTask()}
-              onNewClient={() => {
-                setSelectedClientId(null);
-                setActiveTab('clients');
-              }}
-              onGoToTab={setActiveTab}
-              showHijri={showHijri}
-              language={language}
-            />
-          )}
-
-          {activeTab === 'clients' && (
-            <ClientsView
-              clients={clients}
-              meetings={meetings}
-              tasks={tasks}
-              notes={notes}
-              onSelectMeeting={handleSelectMeetingFromDashboard}
-              onNewMeeting={handleOpenNewMeeting}
-              onNewTask={handleOpenNewTask}
-              onSaveClient={handleSaveClient}
-              onDeleteClient={handleDeleteClient}
-              selectedClientId={selectedClientId}
-              language={language}
-            />
-          )}
-
-          {activeTab === 'meetings' && (
-            <MeetingsView
-              meetings={meetings}
-              clients={clients}
-              tasks={tasks}
-              onSaveMeeting={handleSaveMeeting}
-              onOpenPdfModal={(m) => setPdfMeeting(m)}
-              onNewTaskFromMeeting={(m) => handleOpenNewTask(m.clientId)}
-              selectedMeetingId={selectedMeetingId}
-              onSelectMeetingChange={(m) => setSelectedMeetingId(m ? m.id : null)}
-              preselectedClientId={preselectedClientIdForMeeting}
-              language={language}
-            />
-          )}
-
-          {activeTab === 'tasks' && (
-            <TasksView
-              tasks={tasks}
-              clients={clients}
-              meetings={meetings}
-              onToggleTask={handleToggleTask}
-              onSaveTask={handleSaveTask}
-              onDeleteTask={handleDeleteTask}
-              preselectedClientId={preselectedClientIdForTask}
-              language={language}
-            />
-          )}
-
-          {activeTab === 'reports' && (
-            <ReportsView
-              clients={clients}
-              meetings={meetings}
-              tasks={tasks}
-              notes={notes}
-              onSaveNote={handleSaveNote}
-              onDeleteNote={handleDeleteNote}
-              language={language}
-            />
-          )}
-        </main>
-
-        {/* Bottom Navigation */}
-        <BottomNav
-          activeTab={activeTab}
-          onChangeTab={setActiveTab}
-          overdueTasksCount={overdue.length}
-          upcomingMeetingsCount={upcomingMeetingsCount}
-          language={language}
-        />
+        <div className="flex-1 overflow-hidden flex flex-col">
+          <AuthenticatedSession
+            key={currentUser.uid}
+            user={currentUser}
+            onSignOut={handleLogOut}
+            isMobileFrame={isMobileFrame}
+            onToggleMobileFrame={() => setIsMobileFrame(!isMobileFrame)}
+          />
+        </div>
       </div>
-
-      {/* Official Meeting Minutes Printable PDF Modal */}
-      {pdfMeeting && (
-        <MeetingMinutesPdfModal
-          isOpen={Boolean(pdfMeeting)}
-          meeting={pdfMeeting}
-          client={clients.find((c) => c.id === pdfMeeting.clientId)}
-          tasks={tasks}
-          onClose={() => setPdfMeeting(null)}
-          language={language}
-        />
-      )}
-
-      {/* Demo Screen Lock Modal (Clearly labeled as Demo PIN Lock) */}
-      <BiometricLockModal
-        isOpen={isBiometricLocked}
-        onUnlock={() => setIsBiometricLocked(false)}
-        expectedPin={pinCode}
-        language={language}
-      />
-
-      {/* Universal Search Modal */}
-      <SearchModal
-        isOpen={isSearchOpen}
-        onClose={() => setIsSearchOpen(false)}
-        data={{ clients, meetings, tasks, notes }}
-        onSelectClient={(client) => {
-          setSelectedClientId(client.id);
-          setActiveTab('clients');
-        }}
-        onSelectMeeting={(meeting) => {
-          setSelectedMeetingId(meeting.id);
-          setActiveTab('meetings');
-        }}
-        onSelectTask={() => {
-          setActiveTab('tasks');
-        }}
-        language={language}
-      />
-
-      {/* Conflict Resolution Modal */}
-      <ConflictResolutionModal
-        conflict={activeConflict}
-        onResolve={handleResolveConflict}
-        onClose={() => setActiveConflict(null)}
-        language={language}
-      />
-
-      {/* Settings & Design Assumptions Modal */}
-      <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-        appState={{
-          clients,
-          meetings,
-          tasks,
-          notes,
-          syncState,
-          conflicts,
-          isBiometricLocked,
-          isBiometricEnabled,
-          pinCode,
-          showHijri,
-          language,
-        }}
-        onUpdateState={(updates) => {
-          if (updates.syncState !== undefined) setSyncState(updates.syncState);
-          if (updates.showHijri !== undefined) setShowHijri(updates.showHijri);
-          if (updates.isBiometricEnabled !== undefined) setIsBiometricEnabled(updates.isBiometricEnabled);
-          if (updates.pinCode !== undefined) setPinCode(updates.pinCode);
-          if (updates.language !== undefined) setLanguage(updates.language);
-        }}
-        onResetData={handleResetData}
-        language={language}
-      />
     </div>
   );
 }

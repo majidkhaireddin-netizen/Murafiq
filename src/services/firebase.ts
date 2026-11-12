@@ -57,8 +57,8 @@ export interface FirestoreErrorInfo {
   };
 }
 
-export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errInfo: FirestoreErrorInfo = {
+export function formatFirestoreError(error: unknown, operationType: OperationType, path: string | null): FirestoreErrorInfo {
+  return {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
       userId: auth.currentUser?.uid,
@@ -75,7 +75,16 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
     operationType,
     path,
   };
+}
+
+export function logFirestoreError(error: unknown, operationType: OperationType, path: string | null): FirestoreErrorInfo {
+  const errInfo = formatFirestoreError(error, operationType, path);
   console.error('Firestore Error: ', JSON.stringify(errInfo));
+  return errInfo;
+}
+
+export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo = logFirestoreError(error, operationType, path);
   throw new Error(JSON.stringify(errInfo));
 }
 
@@ -161,20 +170,10 @@ export function subscribeAuthState(callback: (user: User | null) => void) {
 }
 
 /**
- * Validate Connection to Firestore on boot
+ * Check connection status (non-blocking)
  */
 export async function testConnection(): Promise<boolean> {
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-    return true;
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.warn('Firestore is running in offline mode.');
-    } else {
-      console.warn('Firestore initial connection check:', error);
-    }
-    return false;
-  }
+  return typeof navigator !== 'undefined' ? navigator.onLine : true;
 }
 
 export interface SyncMetadata {
@@ -201,8 +200,8 @@ export function subscribeClients(
       });
     },
     (error) => {
-      if (onError) onError(error);
-      handleFirestoreError(error, OperationType.LIST, `users/${uid}/clients`);
+      logFirestoreError(error, OperationType.LIST, `users/${uid}/clients`);
+      if (onError) onError(error as Error);
     }
   );
 }
@@ -225,8 +224,8 @@ export function subscribeMeetings(
       });
     },
     (error) => {
-      if (onError) onError(error);
-      handleFirestoreError(error, OperationType.LIST, `users/${uid}/meetings`);
+      logFirestoreError(error, OperationType.LIST, `users/${uid}/meetings`);
+      if (onError) onError(error as Error);
     }
   );
 }
@@ -249,8 +248,8 @@ export function subscribeTasks(
       });
     },
     (error) => {
-      if (onError) onError(error);
-      handleFirestoreError(error, OperationType.LIST, `users/${uid}/tasks`);
+      logFirestoreError(error, OperationType.LIST, `users/${uid}/tasks`);
+      if (onError) onError(error as Error);
     }
   );
 }
@@ -273,8 +272,8 @@ export function subscribeNotes(
       });
     },
     (error) => {
-      if (onError) onError(error);
-      handleFirestoreError(error, OperationType.LIST, `users/${uid}/notes`);
+      logFirestoreError(error, OperationType.LIST, `users/${uid}/notes`);
+      if (onError) onError(error as Error);
     }
   );
 }
@@ -287,6 +286,8 @@ export async function saveClient(client: Client): Promise<void> {
     const payload: Client = {
       ...client,
       userId: uid,
+      createdAt: client.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     };
     await setDoc(doc(db, 'users', uid, 'clients', client.id), payload);
   } catch (error) {
@@ -311,6 +312,8 @@ export async function saveMeeting(meeting: Meeting): Promise<void> {
     const payload: Meeting = {
       ...meeting,
       userId: uid,
+      createdAt: meeting.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     };
     await setDoc(doc(db, 'users', uid, 'meetings', meeting.id), payload);
   } catch (error) {
@@ -335,6 +338,7 @@ export async function saveTask(task: ActionItem): Promise<void> {
     const payload: ActionItem = {
       ...task,
       userId: uid,
+      createdAt: task.createdAt || new Date().toISOString(),
     };
     await setDoc(doc(db, 'users', uid, 'tasks', task.id), payload);
   } catch (error) {
@@ -359,6 +363,7 @@ export async function saveNote(note: Note): Promise<void> {
     const payload: Note = {
       ...note,
       userId: uid,
+      createdAt: note.createdAt || new Date().toISOString(),
     };
     await setDoc(doc(db, 'users', uid, 'notes', note.id), payload);
   } catch (error) {

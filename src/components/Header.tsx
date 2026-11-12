@@ -138,46 +138,40 @@ export const Header: React.FC<HeaderProps> = ({
 
             {showSyncPopover && (
               <div
-                className="absolute top-full mt-2 rtl:right-0 ltr:left-0 w-64 max-w-[280px] bg-white rounded-xl shadow-xl border border-stone-200 p-3 z-50 animate-in fade-in zoom-in-95"
+                className="absolute top-full mt-2 rtl:right-0 ltr:left-0 w-72 max-w-[290px] bg-white rounded-xl shadow-xl border border-stone-200 p-3.5 z-50 animate-in fade-in zoom-in-95"
                 onMouseLeave={() => setShowSyncPopover(false)}
               >
                 <div className="flex items-center justify-between mb-2 pb-1.5 border-b border-stone-100">
-                  <span className="text-xs font-semibold text-stone-800">
-                    {language === 'ar' ? 'محاكي حالات المزامنة' : 'Sync State Simulator'}
+                  <span className="text-xs font-bold text-stone-800">
+                    {language === 'ar' ? 'حالة التزامن اللحظية' : 'Real-time Sync Status'}
                   </span>
-                  <span className="text-[10px] text-stone-500 bg-stone-100 px-1.5 py-0.5 rounded">
-                    Offline-First
+                  <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${syncBadge.className}`}>
+                    {syncBadge.label}
                   </span>
                 </div>
-                <p className="text-[11px] text-stone-500 mb-2 leading-relaxed">
-                  {language === 'ar'
-                    ? 'في الإصدار الأول، يعمل مرافق محلياً 100%. يمكنك اختبار ظهور الحالات البصرية الخمس للمزامنة:'
-                    : 'In v1.0, Murafiq is 100% offline-first. Preview the 5 visual sync states:'}
-                </p>
-                <div className="space-y-1">
-                  {(['local', 'pending', 'synced', 'conflict', 'failed'] as SyncState[]).map((st) => (
-                    <button
-                      key={st}
-                      onClick={() => {
-                        onSyncStateChange(st);
-                        setShowSyncPopover(false);
-                      }}
-                      className={`w-full text-start flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition-colors ${
-                        syncState === st
-                          ? 'bg-emerald-50 text-emerald-800 font-semibold'
-                          : 'hover:bg-stone-50 text-stone-700'
-                      }`}
-                    >
-                      <span className="capitalize">
-                        {st === 'local' && (language === 'ar' ? '⚡ محلي فقط (الافتراضي)' : '⚡ Local Only (Default)')}
-                        {st === 'pending' && (language === 'ar' ? '⏳ قيد المزامنة' : '⏳ Pending Sync')}
-                        {st === 'synced' && (language === 'ar' ? '✅ متزامن بالكامل' : '✅ Synced')}
-                        {st === 'conflict' && (language === 'ar' ? '⚠️ تعارض يحتاج حسم' : '⚠️ Conflict')}
-                        {st === 'failed' && (language === 'ar' ? '❌ فشل الاتصال' : '❌ Sync Failed')}
-                      </span>
-                      {syncState === st && <span className="text-emerald-600 font-bold">✓</span>}
-                    </button>
-                  ))}
+                <div className="text-[11px] text-stone-600 space-y-2 leading-relaxed">
+                  <p>
+                    {syncState === 'synced' && (language === 'ar'
+                      ? 'كافة التعديلات والبيانات مؤكدة ومحفوظة بنجاح على خادم السحابة الآمن.'
+                      : 'All changes and records are confirmed and synchronized with the cloud server.')}
+                    {syncState === 'pending' && (language === 'ar'
+                      ? 'توجد تعديلات محلية بانتظار التأكيد من الخادم السحابي. لا تغلق التطبيق أو تسجل الخروج.'
+                      : 'Local changes are queued and waiting for server confirmation.')}
+                    {syncState === 'local' && (language === 'ar'
+                      ? 'البيانات تُعرض من الذاكرة المحلية المؤقتة بانتظار استجابة الخادم.'
+                      : 'Data is loaded from local memory cache awaiting server response.')}
+                    {syncState === 'conflict' && (language === 'ar'
+                      ? 'تم رصد اختلاف بين نسختك والنسخة السحابية. انقر على الشارة لحسم التعارض.'
+                      : 'A conflict was detected between local and remote versions. Click badge to resolve.')}
+                    {syncState === 'failed' && (language === 'ar'
+                      ? 'تعذر الاتصال بخادم السحابة. تحقق من اتصال الإنترنت.'
+                      : 'Could not connect to the cloud server. Check your network connection.')}
+                  </p>
+                  <div className="pt-2 border-t border-stone-100 text-[10px] text-stone-400">
+                    {language === 'ar'
+                      ? 'يتم تتبع حالة المزامنة تلقائياً عبر مراقبة مجموعات العملاء واللقاءات والمهام والملاحظات.'
+                      : 'Sync state is monitored automatically across clients, meetings, tasks, and notes.'}
+                  </div>
                 </div>
               </div>
             )}
