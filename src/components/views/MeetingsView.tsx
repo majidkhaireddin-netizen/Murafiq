@@ -32,13 +32,21 @@ import {
   Check,
   ListPlus,
   HelpCircle,
+  Trash2,
+  AlertTriangle,
 } from 'lucide-react';
+import { MEETING_HAS_ATTACHMENTS_MESSAGE_AR } from '../../utils/attachmentPolicy';
+import { cleanupExpiredMeetingAttachments } from '../../services/attachments';
 
 interface MeetingsViewProps {
   meetings: Meeting[];
   clients: Client[];
   tasks: ActionItem[];
   onSaveMeeting: (meeting: Meeting) => Promise<void> | void;
+  onDeleteMeeting?: (
+    meetingId: string,
+    knownAttachmentsCount?: number
+  ) => Promise<{ deleted: boolean; blockedMessageArabic?: string } | void> | void;
   onSaveTask?: (task: ActionItem) => Promise<void> | void;
   onOpenPdfModal: (meeting: Meeting) => void;
   onNewTaskFromMeeting: (meeting: Meeting) => void;
@@ -54,6 +62,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
   clients,
   tasks,
   onSaveMeeting,
+  onDeleteMeeting,
   onSaveTask,
   onOpenPdfModal,
   onNewTaskFromMeeting,
@@ -85,6 +94,14 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
   const [liveSavedNotice, setLiveSavedNotice] = useState<boolean>(false);
   const [extractedTasksCount, setExtractedTasksCount] = useState<number | null>(null);
 
+  // Meeting deletion guard UI state
+  const [activeMeetingAttachmentsCount, setActiveMeetingAttachmentsCount] = useState<number>(0);
+  const [confirmDeleteMeeting, setConfirmDeleteMeeting] = useState<boolean>(false);
+  const [deleteMeetingError, setDeleteMeetingError] = useState<string | null>(null);
+  const [deleteMeetingNotice, setDeleteMeetingNotice] = useState<string | null>(null);
+  const [isDeletingMeeting, setIsDeletingMeeting] = useState<boolean>(false);
+  const [isCleaningExpired, setIsCleaningExpired] = useState<boolean>(false);
+
   // Sync if selectedMeetingId changes from outside
   useEffect(() => {
     if (selectedMeetingId) {
@@ -96,12 +113,17 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
     }
   }, [selectedMeetingId, meetings]);
 
-  // When active meeting changes, sync liveNotes
+  // When active meeting changes, sync liveNotes & reset deletion UI state
   useEffect(() => {
     if (activeMeeting) {
       setLiveNotes(activeMeeting.notes || '');
       setLiveSavedNotice(false);
       setExtractedTasksCount(null);
+      setActiveMeetingAttachmentsCount(0);
+      setConfirmDeleteMeeting(false);
+      setDeleteMeetingError(null);
+      setDeleteMeetingNotice(null);
+      setIsDeletingMeeting(false);
     }
   }, [activeMeeting?.id]);
 
@@ -316,6 +338,67 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
       setEditingMeeting(null);
     } catch (err) {
       console.warn('MeetingsView: Save meeting failed, keeping modal open for retry:', err);
+    }
+  };
+
+  const handleRequestDeleteMeeting = () => {
+    if (!activeMeeting || !onDeleteMeeting) return;
+    setDeleteMeetingError(null);
+    setDeleteMeetingNotice(null);
+    if (activeMeetingAttachmentsCount > 0) {
+      setDeleteMeetingError(MEETING_HAS_ATTACHMENTS_MESSAGE_AR);
+      return;
+    }
+    setConfirmDeleteMeeting(true);
+  };
+
+  const handleConfirmDeleteMeeting = async () => {
+    if (!activeMeeting || !onDeleteMeeting) return;
+    setIsDeletingMeeting(true);
+    setDeleteMeetingError(null);
+    setDeleteMeetingNotice(null);
+    try {
+      const res = await onDeleteMeeting(activeMeeting.id, activeMeetingAttachmentsCount);
+      if (res && res.deleted === false) {
+        setDeleteMeetingError(res.blockedMessageArabic || MEETING_HAS_ATTACHMENTS_MESSAGE_AR);
+        setConfirmDeleteMeeting(false);
+        return;
+      }
+      setConfirmDeleteMeeting(false);
+      setActiveMeeting(null);
+      if (onSelectMeetingChange) onSelectMeetingChange(null);
+    } catch (err: any) {
+      setDeleteMeetingError(
+        err?.message || MEETING_HAS_ATTACHMENTS_MESSAGE_AR
+      );
+      setConfirmDeleteMeeting(false);
+    } finally {
+      setIsDeletingMeeting(false);
+    }
+  };
+
+  const handleCleanupExpiredForMeeting = async () => {
+    if (!activeMeeting || !isOnline) return;
+    setIsCleaningExpired(true);
+    setDeleteMeetingNotice(null);
+    try {
+      const summary = await cleanupExpiredMeetingAttachments({ meetingId: activeMeeting.id });
+      if (summary.cleaned > 0) {
+        setDeleteMeetingError(null);
+        setDeleteMeetingNotice(
+          `تم تنظيف ${summary.cleaned} عملية رفع منتهية غير مكتملة. يمكنك الآن إعادة محاولة حذف اللقاء.`
+        );
+      } else if (summary.skipped > 0) {
+        setDeleteMeetingNotice(
+          'لا تزال هناك عملية رفع قيد الانتظار أو ضمن مهلة الأمان ولم تنتهِ صلاحيتها بعد.'
+        );
+      } else {
+        setDeleteMeetingNotice('لم يتم العثور على عمليات رفع منتهية قابلة للتنظيف.');
+      }
+    } catch (err: any) {
+      setDeleteMeetingError(err?.message || 'تعذر تنظيف عمليات الرفع غير المكتملة.');
+    } finally {
+      setIsCleaningExpired(false);
     }
   };
 
@@ -555,6 +638,19 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
               </div>
 
               <div className="flex items-center gap-1.5">
+                {onDeleteMeeting && (
+                  <button
+                    type="button"
+                    data-testid="delete-meeting-button"
+                    onClick={handleRequestDeleteMeeting}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 transition-colors"
+                    title="حذف اللقاء"
+                    aria-label="حذف اللقاء"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">حذف</span>
+                  </button>
+                )}
                 {/* Official PDF Export Button */}
                 <button
                   onClick={() => onOpenPdfModal(activeMeeting)}
@@ -569,12 +665,66 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
                     setActiveMeeting(null);
                     if (onSelectMeetingChange) onSelectMeetingChange(null);
                   }}
+                  aria-label="إغلاق تفاصيل اللقاء"
                   className="p-1.5 text-stone-400 hover:text-stone-700 rounded-lg hover:bg-stone-200 transition-colors"
                 >
                   <X className="w-5 h-5" />
                 </button>
               </div>
             </div>
+
+            {deleteMeetingError && (
+              <div
+                data-testid="meeting-delete-blocked-banner"
+                className="mx-4 mt-3 p-3 rounded-xl bg-rose-50 border border-rose-300 text-rose-950 text-xs space-y-2 shrink-0"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-700 shrink-0 mt-0.5" />
+                    <span className="leading-relaxed font-medium">{deleteMeetingError}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setDeleteMeetingError(null)}
+                    aria-label="إغلاق تنبيه تعذر الحذف"
+                    className="text-rose-500 hover:text-rose-800 p-0.5"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                {isOnline && deleteMeetingError.includes('لم تكتمل') && (
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => void handleCleanupExpiredForMeeting()}
+                      disabled={isCleaningExpired}
+                      className="px-2.5 py-1 rounded-lg bg-rose-700 hover:bg-rose-800 text-white text-[11px] font-semibold disabled:opacity-60"
+                    >
+                      {isCleaningExpired
+                        ? 'جاري فحص وتنظيف العمليات المنتهية...'
+                        : 'تنظيف عمليات الرفع المنتهية'}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {deleteMeetingNotice && (
+              <div
+                data-testid="meeting-delete-notice-banner"
+                className="mx-4 mt-3 p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-center justify-between gap-2 shrink-0"
+              >
+                <span>{deleteMeetingNotice}</span>
+                <button
+                  type="button"
+                  onClick={() => setDeleteMeetingNotice(null)}
+                  aria-label="إغلاق الملاحظة"
+                  className="text-amber-600 hover:text-amber-900"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
 
             {/* Phase Switcher (قبل اللقاء / أثناء اللقاء / بعد اللقاء) */}
             <div className="bg-stone-100/70 p-1.5 border-b border-stone-200 flex items-center justify-around gap-1 text-[11px] sm:text-xs shrink-0">
@@ -948,7 +1098,46 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
               <MeetingAttachmentsSection
                 meetingId={activeMeeting.id}
                 isOnline={isOnline}
+                onAttachmentsCountChange={setActiveMeetingAttachmentsCount}
               />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Safe Meeting Deletion Confirmation Dialog */}
+      {confirmDeleteMeeting && activeMeeting && (
+        <div
+          data-testid="meeting-delete-confirm-modal"
+          className="fixed inset-0 z-70 flex items-center justify-center p-4 bg-stone-900/60 backdrop-blur-xs"
+        >
+          <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-4 border border-stone-200 space-y-3">
+            <div className="flex items-center gap-2 text-rose-800">
+              <Trash2 className="w-5 h-5" />
+              <h4 className="font-heading font-bold text-sm">تأكيد حذف اللقاء</h4>
+            </div>
+            <p className="text-xs text-stone-700 leading-relaxed">
+              هل أنت متأكد من حذف اللقاء{' '}
+              <strong className="text-stone-900">{activeMeeting.title}</strong>؟ لا يمكن التراجع عن هذه العملية بعد تأكيدها.
+            </p>
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setConfirmDeleteMeeting(false)}
+                disabled={isDeletingMeeting}
+                className="px-3 py-1.5 rounded-xl text-xs text-stone-600 hover:bg-stone-100 font-medium"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                data-testid="confirm-delete-meeting-btn"
+                onClick={() => void handleConfirmDeleteMeeting()}
+                disabled={isDeletingMeeting}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-rose-700 text-white hover:bg-rose-800 disabled:opacity-60"
+              >
+                <span>{isDeletingMeeting ? 'جاري التحقق والحذف...' : 'تأكيد الحذف'}</span>
+              </button>
             </div>
           </div>
         </div>

@@ -4,19 +4,29 @@ import express from 'express';
 import http from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { createAttachmentsRouter } from '../src/server/attachmentsRouter.ts';
+import {
+  createAttachmentsRouter,
+  sweepExpiredUploadIntents,
+} from '../src/server/attachmentsRouter.ts';
+import { createMeetingsRouter } from '../src/server/meetingsRouter.ts';
 import type { B2StorageService } from '../src/server/b2Storage.ts';
 import {
+  getFirebaseAdminReadinessStatus,
   getFirebaseServerConfig,
+  MEETING_GUARD_DOC_ID,
   verifyFirebaseTokenWithFallback,
   type AttachmentMetadataStore,
 } from '../src/server/firebaseServerAuth.ts';
 import {
   buildAttachmentStorageKey,
   isPresignedUrlExpired,
+  isUploadIntentEligibleForExpirationCleanup,
   MAX_ATTACHMENT_SIZE_BYTES,
   PRESIGNED_DOWNLOAD_TTL_SECONDS,
   PRESIGNED_UPLOAD_TTL_SECONDS,
+  UPLOAD_CLEANUP_SAFETY_BUFFER_MS,
+  UPLOAD_COMMIT_LEASE_MS,
+  UPLOAD_INTENT_GRACE_MS,
   validateAttachmentFileRequest,
   verifyMagicBytes,
 } from '../src/utils/attachmentPolicy.ts';
@@ -26,11 +36,18 @@ import {
 } from '../src/utils/attachmentDownloadCache.ts';
 import {
   AttachmentClientError,
+  cleanupExpiredMeetingAttachmentsWithDeps,
   deleteMeetingAttachmentWithDeps,
   getFreshPresignedDownloadUrlWithDeps,
   uploadMeetingAttachmentWithDeps,
 } from '../src/services/attachments.ts';
-import type { MeetingAttachment, UploadIntentRecord } from '../src/types/index.ts';
+import { deleteMeetingWithDeps } from '../src/services/firebase.ts';
+import { classifyWriteError } from '../src/utils/sessionState.ts';
+import type {
+  MeetingAttachment,
+  MeetingAttachmentGuardRecord,
+  UploadIntentRecord,
+} from '../src/types/index.ts';
 
 const USER_A = 'user_alice_001';
 const USER_B = 'user_bob_002';
@@ -49,6 +66,11 @@ function createMockTestServer(options?: {
   failB2Delete?: boolean;
   failFinalizeDeletion?: boolean;
   slowCommitMs?: number;
+  slowVerifyMs?: number;
+  failVerifyOnce?: boolean;
+  initialTimeMs?: number;
+  enableScheduledSweepEndpoint?: boolean;
+  scheduledSweepSecret?: string;
   uploadedObjects?: Map<
     string,
     { sizeBytes: number; contentType: string; headerBytes: Uint8Array; etag: string }
@@ -58,14 +80,20 @@ function createMockTestServer(options?: {
     options?.uploadedObjects ||
     new Map<string, { sizeBytes: number; contentType: string; headerBytes: Uint8Array; etag: string }>();
 
-  const meetingsOwned = new Map<string, { uid: string }>([[MEETING_A, { uid: USER_A }]]);
+  const meetingsOwned = new Map<string, { uid: string; title: string }>([
+    [MEETING_A, { uid: USER_A, title: 'لقاء المراجعة السنوية' }],
+  ]);
   const attachmentsOwned = new Map<string, MeetingAttachment>();
   const uploadIntents = new Map<string, UploadIntentRecord>();
+  const guards = new Map<string, MeetingAttachmentGuardRecord>();
 
   let failDelete = options?.failB2Delete ?? false;
   let failFinalize = options?.failFinalizeDeletion ?? false;
   let slowCommitMs = options?.slowCommitMs ?? 0;
+  let slowVerifyMs = options?.slowVerifyMs ?? 0;
+  let failVerifyOnce = options?.failVerifyOnce ?? false;
   let adminConfigured = options?.adminConfigured ?? true;
+  let clockMs = options?.initialTimeMs ?? Date.now();
 
   const ensureAdminConfigured = () => {
     if (!adminConfigured) {
@@ -75,20 +103,59 @@ function createMockTestServer(options?: {
     }
   };
 
+  const guardKey = (uid: string, meetingId: string) => `${uid}:${meetingId}`;
+
+  const updateGuard = (params: {
+    uid: string;
+    meetingId: string;
+    addPendingId?: string;
+    removePendingId?: string;
+    addActiveId?: string;
+    removeActiveId?: string;
+    nowIso: string;
+  }) => {
+    const k = guardKey(params.uid, params.meetingId);
+    const prev = guards.get(k);
+    const active = new Set<string>(prev?.activeAttachmentIds || []);
+    const pending = new Set<string>(prev?.pendingIntentIds || []);
+    if (params.addPendingId) pending.add(params.addPendingId);
+    if (params.removePendingId) pending.delete(params.removePendingId);
+    if (params.addActiveId) active.add(params.addActiveId);
+    if (params.removeActiveId) active.delete(params.removeActiveId);
+    const activeAttachmentIds = Array.from(active);
+    const pendingIntentIds = Array.from(pending);
+    guards.set(k, {
+      guardVersion: 1,
+      meetingId: params.meetingId,
+      userId: params.uid,
+      activeAttachmentIds,
+      pendingIntentIds,
+      locked: activeAttachmentIds.length > 0 || pendingIntentIds.length > 0,
+      updatedAt: params.nowIso,
+    });
+  };
+
   const mockStorage: B2StorageService = {
     getBucketName: () => 'Murafiq',
     isConfigured: () => options?.b2Configured ?? true,
     createPresignedUploadUrl: async ({ key }) => ({
       uploadUrl: `https://s3.us-east-005.backblazeb2.com/Murafiq/${key}?X-Amz-Expires=${PRESIGNED_UPLOAD_TTL_SECONDS}`,
-      expiresAt: new Date(Date.now() + PRESIGNED_UPLOAD_TTL_SECONDS * 1000).toISOString(),
+      expiresAt: new Date(clockMs + PRESIGNED_UPLOAD_TTL_SECONDS * 1000).toISOString(),
       expiresInSeconds: PRESIGNED_UPLOAD_TTL_SECONDS,
     }),
     createPresignedDownloadUrl: async ({ key, disposition }) => ({
       downloadUrl: `https://s3.us-east-005.backblazeb2.com/Murafiq/${key}?disposition=${disposition}&X-Amz-Expires=${PRESIGNED_DOWNLOAD_TTL_SECONDS}&nonce=${Math.random()}`,
-      expiresAt: new Date(Date.now() + PRESIGNED_DOWNLOAD_TTL_SECONDS * 1000).toISOString(),
+      expiresAt: new Date(clockMs + PRESIGNED_DOWNLOAD_TTL_SECONDS * 1000).toISOString(),
       expiresInSeconds: PRESIGNED_DOWNLOAD_TTL_SECONDS,
     }),
     verifyUploadedObject: async ({ key, expectedContentType, expectedSizeBytes }) => {
+      if (slowVerifyMs > 0) {
+        await new Promise((r) => setTimeout(r, slowVerifyMs));
+      }
+      if (failVerifyOnce) {
+        failVerifyOnce = false;
+        throw new Error('Simulated transient B2 verification timeout');
+      }
       const obj = b2Objects.get(key);
       if (!obj) {
         return { verified: false, sizeBytes: 0, reasonArabic: 'لم يتم العثور على الملف المرفوع في Backblaze B2.' };
@@ -139,9 +206,16 @@ function createMockTestServer(options?: {
     createUploadIntent: async (intent) => {
       ensureAdminConfigured();
       uploadIntents.set(`${intent.userId}:${intent.meetingId}:${intent.attachmentId}`, { ...intent });
+      updateGuard({
+        uid: intent.userId,
+        meetingId: intent.meetingId,
+        addPendingId: intent.attachmentId,
+        nowIso: intent.updatedAt,
+      });
     },
     getUploadIntent: async ({ uid, meetingId, attachmentId }) => {
       ensureAdminConfigured();
+      if (attachmentId === MEETING_GUARD_DOC_ID) return null;
       const item = uploadIntents.get(`${uid}:${meetingId}:${attachmentId}`);
       return item ? { ...item } : null;
     },
@@ -158,6 +232,67 @@ function createMockTestServer(options?: {
         deleteStatus: att.deleteStatus,
       };
     },
+    claimIntentForCommit: async ({
+      uid,
+      meetingId,
+      attachmentId,
+      nowMs: tMs,
+      nowIso,
+      leaseDurationMs = UPLOAD_COMMIT_LEASE_MS,
+      expectedFileName,
+      expectedContentType,
+      expectedSizeBytes,
+    }) => {
+      ensureAdminConfigured();
+      const key = `${uid}:${meetingId}:${attachmentId}`;
+      const existing = attachmentsOwned.get(key);
+      if (existing) {
+        return { outcome: 'already_committed', record: { ...existing } };
+      }
+      const intent = uploadIntents.get(key);
+      if (!intent) return { outcome: 'intent_not_found' };
+      if (intent.userId !== uid || intent.meetingId !== meetingId) {
+        return { outcome: 'intent_mismatch' };
+      }
+      if (
+        (expectedFileName !== undefined && intent.fileName !== expectedFileName) ||
+        (expectedContentType !== undefined && intent.contentType !== expectedContentType) ||
+        (expectedSizeBytes !== undefined && intent.sizeBytes !== expectedSizeBytes)
+      ) {
+        return { outcome: 'intent_mismatch' };
+      }
+      if (
+        intent.status === 'abandoned' ||
+        intent.status === 'deleted' ||
+        intent.status === 'cleaning' ||
+        intent.status === 'committed'
+      ) {
+        return { outcome: 'intent_abandoned' };
+      }
+      if (intent.status === 'committing' && intent.committingLeaseExpiresAt) {
+        const leaseMs = new Date(intent.committingLeaseExpiresAt).getTime();
+        if (Number.isFinite(leaseMs) && tMs < leaseMs) {
+          return { outcome: 'commit_in_progress', intent: { ...intent } };
+        }
+      }
+      const leaseIso = new Date(tMs + leaseDurationMs).toISOString();
+      const claimed: UploadIntentRecord = {
+        ...intent,
+        status: 'committing',
+        committingLeaseExpiresAt: leaseIso,
+        updatedAt: nowIso,
+      };
+      uploadIntents.set(key, claimed);
+      return { outcome: 'claimed', intent: { ...claimed } };
+    },
+    releaseIntentCommitLease: async ({ uid, meetingId, attachmentId, nowIso }) => {
+      ensureAdminConfigured();
+      const key = `${uid}:${meetingId}:${attachmentId}`;
+      const intent = uploadIntents.get(key);
+      if (intent && intent.status === 'committing') {
+        uploadIntents.set(key, { ...intent, status: 'pending', updatedAt: nowIso });
+      }
+    },
     commitAttachmentFromIntent: async ({ uid, meetingId, attachmentId, attachment, nowIso }) => {
       ensureAdminConfigured();
       if (slowCommitMs > 0) {
@@ -173,7 +308,12 @@ function createMockTestServer(options?: {
       if (intent.userId !== uid || intent.meetingId !== meetingId) {
         return { outcome: 'intent_mismatch' };
       }
-      if (intent.status === 'abandoned' || intent.status === 'deleted' || intent.status === 'committed') {
+      if (
+        intent.status === 'abandoned' ||
+        intent.status === 'deleted' ||
+        intent.status === 'cleaning' ||
+        intent.status === 'committed'
+      ) {
         return { outcome: 'intent_abandoned' };
       }
       const record: MeetingAttachment = {
@@ -195,9 +335,23 @@ function createMockTestServer(options?: {
         committedAt: nowIso,
         updatedAt: nowIso,
       });
+      updateGuard({
+        uid,
+        meetingId,
+        removePendingId: attachmentId,
+        addActiveId: attachmentId,
+        nowIso,
+      });
       return { outcome: 'committed', record: { ...record } };
     },
-    markUploadIntentAbandonedIfPending: async ({ uid, meetingId, attachmentId, nowIso }) => {
+    markUploadIntentAbandonedIfPending: async ({
+      uid,
+      meetingId,
+      attachmentId,
+      nowIso,
+      releaseGuard = false,
+      cleanupReason = 'client_abandoned',
+    }) => {
       ensureAdminConfigured();
       const key = `${uid}:${meetingId}:${attachmentId}`;
       const existing = attachmentsOwned.get(key);
@@ -210,14 +364,25 @@ function createMockTestServer(options?: {
         return { outcome: 'already_committed' };
       }
       if (intent.status === 'abandoned') {
+        if (releaseGuard) {
+          updateGuard({ uid, meetingId, removePendingId: attachmentId, nowIso });
+        }
         return { outcome: 'already_abandoned' };
       }
       uploadIntents.set(key, {
         ...intent,
         status: 'abandoned',
+        cleanupReason,
         updatedAt: nowIso,
       });
+      if (releaseGuard) {
+        updateGuard({ uid, meetingId, removePendingId: attachmentId, nowIso });
+      }
       return { outcome: 'abandoned' };
+    },
+    releaseIntentFromGuard: async ({ uid, meetingId, attachmentId, nowIso }) => {
+      ensureAdminConfigured();
+      updateGuard({ uid, meetingId, removePendingId: attachmentId, nowIso });
     },
     updateAttachmentDeleteStatus: async ({
       uid,
@@ -263,48 +428,243 @@ function createMockTestServer(options?: {
           updatedAt: nowIso,
         });
       }
+      updateGuard({
+        uid,
+        meetingId,
+        removeActiveId: attachmentId,
+        removePendingId: attachmentId,
+        nowIso,
+      });
     },
+    listPendingUploadIntentsForMeeting: async ({ uid, meetingId }) => {
+      ensureAdminConfigured();
+      const prefix = `${uid}:${meetingId}:`;
+      const items: UploadIntentRecord[] = [];
+      for (const [k, v] of uploadIntents.entries()) {
+        if (k.startsWith(prefix) && (v.status === 'pending' || v.status === 'committing')) {
+          items.push({ ...v });
+        }
+      }
+      return items;
+    },
+    listPendingUploadIntentsGlobal: async ({ limit }) => {
+      ensureAdminConfigured();
+      const items: UploadIntentRecord[] = [];
+      for (const v of uploadIntents.values()) {
+        if (v.status === 'pending' || v.status === 'committing') {
+          items.push({ ...v });
+          if (items.length >= limit) break;
+        }
+      }
+      return items;
+    },
+    claimIntentForExpirationCleanup: async ({
+      uid,
+      meetingId,
+      attachmentId,
+      nowMs: tMs,
+      nowIso,
+      safetyBufferMs = UPLOAD_CLEANUP_SAFETY_BUFFER_MS,
+    }) => {
+      ensureAdminConfigured();
+      const key = `${uid}:${meetingId}:${attachmentId}`;
+      if (attachmentsOwned.has(key)) {
+        return { outcome: 'already_committed' };
+      }
+      const intent = uploadIntents.get(key);
+      if (!intent) return { outcome: 'not_found' };
+      if (intent.status !== 'pending' && intent.status !== 'committing') {
+        return { outcome: 'not_eligible', intent: { ...intent } };
+      }
+      const eligible = isUploadIntentEligibleForExpirationCleanup({
+        status: intent.status,
+        expiresAt: intent.expiresAt,
+        committingLeaseExpiresAt: intent.committingLeaseExpiresAt,
+        nowMs: tMs,
+        safetyBufferMs,
+      });
+      if (!eligible) {
+        return { outcome: 'not_expired', intent: { ...intent } };
+      }
+      const next: UploadIntentRecord = {
+        ...intent,
+        status: 'cleaning',
+        cleaningStartedAt: nowIso,
+        updatedAt: nowIso,
+      };
+      uploadIntents.set(key, next);
+      return { outcome: 'claimed', intent: { ...next } };
+    },
+    finalizeExpiredIntentCleanup: async ({ uid, meetingId, attachmentId, nowIso }) => {
+      ensureAdminConfigured();
+      const key = `${uid}:${meetingId}:${attachmentId}`;
+      const intent = uploadIntents.get(key);
+      if (intent) {
+        uploadIntents.set(key, {
+          ...intent,
+          status: 'abandoned',
+          cleanupReason: 'expired_uncommitted',
+          cleanedAt: nowIso,
+          updatedAt: nowIso,
+        });
+      }
+      updateGuard({ uid, meetingId, removePendingId: attachmentId, nowIso });
+    },
+    releaseExpiredIntentCleaningOnFailure: async ({ uid, meetingId, attachmentId, nowIso }) => {
+      ensureAdminConfigured();
+      const key = `${uid}:${meetingId}:${attachmentId}`;
+      const intent = uploadIntents.get(key);
+      if (intent && intent.status === 'cleaning') {
+        uploadIntents.set(key, { ...intent, status: 'pending', updatedAt: nowIso });
+      }
+    },
+    checkMeetingDeletionEligibility: async ({ uid, meetingId }) => {
+      ensureAdminConfigured();
+      const prefix = `${uid}:${meetingId}:`;
+      let attachmentsCount = 0;
+      for (const k of attachmentsOwned.keys()) {
+        if (k.startsWith(prefix)) attachmentsCount++;
+      }
+      let pendingIntentsCount = 0;
+      for (const [k, v] of uploadIntents.entries()) {
+        if (
+          k.startsWith(prefix) &&
+          (v.status === 'pending' || v.status === 'committing' || v.status === 'cleaning')
+        ) {
+          pendingIntentsCount++;
+        }
+      }
+      const g = guards.get(guardKey(uid, meetingId));
+      const effAtt = Math.max(attachmentsCount, g?.activeAttachmentIds.length || 0);
+      const effPend = Math.max(pendingIntentsCount, g?.pendingIntentIds.length || 0);
+      if (effAtt > 0) {
+        return {
+          canDelete: false,
+          reason: 'HAS_ATTACHMENTS',
+          attachmentsCount: effAtt,
+          pendingIntentsCount: effPend,
+        };
+      }
+      if (effPend > 0 || g?.locked) {
+        return {
+          canDelete: false,
+          reason: 'HAS_PENDING_INTENTS',
+          attachmentsCount: effAtt,
+          pendingIntentsCount: Math.max(effPend, 1),
+        };
+      }
+      return { canDelete: true, attachmentsCount: 0, pendingIntentsCount: 0 };
+    },
+    deleteMeetingIfNoAttachments: async ({ uid, meetingId }) => {
+      ensureAdminConfigured();
+      const prefix = `${uid}:${meetingId}:`;
+      for (const k of attachmentsOwned.keys()) {
+        if (k.startsWith(prefix)) return { outcome: 'blocked_attachments' };
+      }
+      const g = guards.get(guardKey(uid, meetingId));
+      if ((g?.activeAttachmentIds.length || 0) > 0) {
+        return { outcome: 'blocked_attachments' };
+      }
+      for (const [k, v] of uploadIntents.entries()) {
+        if (
+          k.startsWith(prefix) &&
+          (v.status === 'pending' || v.status === 'committing' || v.status === 'cleaning')
+        ) {
+          return { outcome: 'blocked_pending_intents' };
+        }
+      }
+      if ((g?.pendingIntentIds.length || 0) > 0 || g?.locked) {
+        return { outcome: 'blocked_pending_intents' };
+      }
+      if (!meetingsOwned.has(meetingId)) {
+        return { outcome: 'not_found' };
+      }
+      meetingsOwned.delete(meetingId);
+      guards.delete(guardKey(uid, meetingId));
+      return { outcome: 'deleted' };
+    },
+  };
+
+  const verifyBearerToken = async (authHeader: string | undefined) => {
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      throw new Error('UNAUTHENTICATED: Missing Bearer token');
+    }
+    const token = authHeader.slice('Bearer '.length).trim();
+    if (token === 'token-alice') return { uid: USER_A, email: 'alice@example.com', idToken: token };
+    if (token === 'token-bob') return { uid: USER_B, email: 'bob@example.com', idToken: token };
+    throw new Error('UNAUTHENTICATED: Invalid token');
+  };
+
+  const verifyMeetingOwnership = async ({ uid, meetingId }: { uid: string; meetingId: string }) => {
+    const meeting = meetingsOwned.get(meetingId);
+    return Boolean(meeting && meeting.uid === uid);
+  };
+
+  const verifyAttachmentOwnership = async ({
+    uid,
+    meetingId,
+    attachmentId,
+  }: {
+    uid: string;
+    meetingId: string;
+    attachmentId: string;
+  }) => {
+    const att = attachmentsOwned.get(`${uid}:${meetingId}:${attachmentId}`);
+    if (!att) return { exists: false };
+    return {
+      exists: true,
+      record: { ...att },
+      fileName: att.fileName,
+      contentType: att.contentType,
+      storageKey: att.storageKey,
+      deleteStatus: att.deleteStatus,
+    };
   };
 
   const router = createAttachmentsRouter({
     storageService: mockStorage,
     metadataStore,
-    verifyBearerToken: async (authHeader) => {
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        throw new Error('UNAUTHENTICATED: Missing Bearer token');
-      }
-      const token = authHeader.slice('Bearer '.length).trim();
-      if (token === 'token-alice') return { uid: USER_A, email: 'alice@example.com', idToken: token };
-      if (token === 'token-bob') return { uid: USER_B, email: 'bob@example.com', idToken: token };
-      throw new Error('UNAUTHENTICATED: Invalid token');
-    },
-    verifyMeetingOwnership: async ({ uid, meetingId }) => {
-      const meeting = meetingsOwned.get(meetingId);
-      return Boolean(meeting && meeting.uid === uid);
-    },
-    verifyAttachmentOwnership: async ({ uid, meetingId, attachmentId }) => {
-      const att = attachmentsOwned.get(`${uid}:${meetingId}:${attachmentId}`);
-      if (!att) return { exists: false };
-      return {
-        exists: true,
-        record: { ...att },
-        fileName: att.fileName,
-        contentType: att.contentType,
-        storageKey: att.storageKey,
-        deleteStatus: att.deleteStatus,
-      };
-    },
+    verifyBearerToken,
+    verifyMeetingOwnership,
+    verifyAttachmentOwnership,
+    now: () => clockMs,
+    enableScheduledSweepEndpoint: options?.enableScheduledSweepEndpoint,
+    scheduledSweepSecret: options?.scheduledSweepSecret,
+  });
+
+  // Second router instance sharing the EXACT SAME metadataStore & storage (simulates Cloud Run multi-instance)
+  const secondaryRouter = createAttachmentsRouter({
+    storageService: mockStorage,
+    metadataStore,
+    verifyBearerToken,
+    verifyMeetingOwnership,
+    verifyAttachmentOwnership,
+    now: () => clockMs,
+    enableScheduledSweepEndpoint: options?.enableScheduledSweepEndpoint,
+    scheduledSweepSecret: options?.scheduledSweepSecret,
+  });
+
+  const meetingsRouter = createMeetingsRouter({
+    verifyBearerToken,
+    verifyMeetingOwnership,
+    metadataStore,
   });
 
   const app = express();
   app.use(express.json());
   app.use('/api/attachments', router);
+  app.use('/api/instance2/attachments', secondaryRouter);
+  app.use('/api/meetings', meetingsRouter);
 
   return {
     app,
     b2Objects,
+    meetingsOwned,
     attachmentsOwned,
     uploadIntents,
+    guards,
+    metadataStore,
+    mockStorage,
     setFailDelete: (v: boolean) => {
       failDelete = v;
     },
@@ -314,9 +674,19 @@ function createMockTestServer(options?: {
     setSlowCommitMs: (ms: number) => {
       slowCommitMs = ms;
     },
+    setSlowVerifyMs: (ms: number) => {
+      slowVerifyMs = ms;
+    },
+    setFailVerifyOnce: (v: boolean) => {
+      failVerifyOnce = v;
+    },
     setAdminConfigured: (v: boolean) => {
       adminConfigured = v;
     },
+    advanceTimeMs: (delta: number) => {
+      clockMs += delta;
+    },
+    getTimeMs: () => clockMs,
   };
 }
 
@@ -1446,5 +1816,441 @@ test('Task 004-A & Fix-01 Security, Integrity & Reliability Suite (Backblaze B2 
       const data = (await res.json()) as any;
       assert.equal(data.error, 'FIREBASE_ADMIN_NOT_CONFIGURED');
     });
+  });
+
+  await t.test('17. Meeting deletion guard prevents deleting meetings with committed attachments or pending uploads while preserving Offline-First', async () => {
+    const { app, b2Objects, meetingsOwned, guards } = createMockTestServer();
+    meetingsOwned.set('meet_clean_01', { uid: USER_A, title: 'لقاء خالٍ من المرفقات' });
+    meetingsOwned.set('meet_pending_01', { uid: USER_A, title: 'لقاء برفع غير مكتمل' });
+
+    await withServer(app, async (baseUrl) => {
+      // 17a. Unauthenticated or cross-user meeting delete rejected
+      const unauthDel = await fetch(`${baseUrl}/api/meetings/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ meetingId: 'meet_clean_01' }),
+      });
+      assert.equal(unauthDel.status, 401);
+
+      const bobDel = await fetch(`${baseUrl}/api/meetings/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-bob' },
+        body: JSON.stringify({ meetingId: MEETING_A }),
+      });
+      assert.equal(bobDel.status, 403);
+      assert.equal(meetingsOwned.has(MEETING_A), true);
+
+      // 17b. Meeting with pending UploadIntent CANNOT be deleted (409 MEETING_HAS_PENDING_ATTACHMENTS)
+      const pPending = await fetch(`${baseUrl}/api/attachments/presign-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({
+          meetingId: 'meet_pending_01',
+          fileName: 'incomplete.pdf',
+          contentType: 'application/pdf',
+          sizeBytes: PDF_HEADER.byteLength,
+        }),
+      });
+      assert.equal(pPending.status, 200);
+      const dPending = (await pPending.json()) as any;
+      b2Objects.set(dPending.storageKey, {
+        sizeBytes: PDF_HEADER.byteLength,
+        contentType: 'application/pdf',
+        headerBytes: PDF_HEADER,
+        etag: 'e-pend',
+      });
+      assert.equal(guards.get(`${USER_A}:meet_pending_01`)?.locked, true);
+
+      const blockedPendingRes = await fetch(`${baseUrl}/api/meetings/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({ meetingId: 'meet_pending_01' }),
+      });
+      assert.equal(blockedPendingRes.status, 409);
+      const blockedPendingJson = (await blockedPendingRes.json()) as any;
+      assert.equal(blockedPendingJson.error, 'MEETING_HAS_PENDING_ATTACHMENTS');
+      assert.equal(meetingsOwned.has('meet_pending_01'), true);
+      assert.equal(b2Objects.has(dPending.storageKey), true);
+
+      // 17c. Meeting with committed attachment CANNOT be deleted (409 MEETING_HAS_ATTACHMENTS) and B2 file remains untouched
+      const pAtt = await fetch(`${baseUrl}/api/attachments/presign-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({
+          meetingId: MEETING_A,
+          fileName: 'contract.pdf',
+          contentType: 'application/pdf',
+          sizeBytes: PDF_HEADER.byteLength,
+        }),
+      });
+      const dAtt = (await pAtt.json()) as any;
+      b2Objects.set(dAtt.storageKey, {
+        sizeBytes: PDF_HEADER.byteLength,
+        contentType: 'application/pdf',
+        headerBytes: PDF_HEADER,
+        etag: 'e-att',
+      });
+      const compRes = await fetch(`${baseUrl}/api/attachments/complete-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({
+          meetingId: MEETING_A,
+          attachmentId: dAtt.attachmentId,
+          fileName: 'contract.pdf',
+          contentType: 'application/pdf',
+          sizeBytes: PDF_HEADER.byteLength,
+        }),
+      });
+      assert.equal(compRes.status, 200);
+      assert.equal(guards.get(`${USER_A}:${MEETING_A}`)?.locked, true);
+
+      const blockedAttRes = await fetch(`${baseUrl}/api/meetings/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({ meetingId: MEETING_A }),
+      });
+      assert.equal(blockedAttRes.status, 409);
+      const blockedAttJson = (await blockedAttRes.json()) as any;
+      assert.equal(blockedAttJson.error, 'MEETING_HAS_ATTACHMENTS');
+      assert.match(blockedAttJson.messageArabic, /حذف المرفقات أولاً/);
+      assert.equal(meetingsOwned.has(MEETING_A), true);
+      assert.equal(b2Objects.has(dAtt.storageKey), true);
+
+      // 17d. After deleting attachments via approved endpoint, guard unlocks and meeting delete succeeds
+      const delAttRes = await fetch(`${baseUrl}/api/attachments/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({ meetingId: MEETING_A, attachmentId: dAtt.attachmentId }),
+      });
+      assert.equal(delAttRes.status, 200);
+      assert.equal(guards.get(`${USER_A}:${MEETING_A}`)?.locked, false);
+
+      const allowAfterCleanupRes = await fetch(`${baseUrl}/api/meetings/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({ meetingId: MEETING_A }),
+      });
+      assert.equal(allowAfterCleanupRes.status, 200);
+      assert.equal(meetingsOwned.has(MEETING_A), false);
+
+      // 17e. Deleting attachment-free meeting succeeds cleanly (200)
+      const cleanDelRes = await fetch(`${baseUrl}/api/meetings/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({ meetingId: 'meet_clean_01' }),
+      });
+      assert.equal(cleanDelRes.status, 200);
+      assert.equal(meetingsOwned.has('meet_clean_01'), false);
+    });
+
+    // 17f. Client deleteMeetingWithDeps preserves Offline-First for attachment-free meetings & blocks known attachments
+    let directDeletedCount = 0;
+    const offlineCleanHandle = deleteMeetingWithDeps('meet_offline_ok', { knownAttachmentsCount: 0 }, {
+      getUid: () => USER_A,
+      isOnline: () => false,
+      getIdToken: async () => null,
+      hasAnyAttachmentsInFirestore: async () => false,
+      callServerDelete: async () => ({ status: 200, body: { deleted: true } }),
+      deleteMeetingDocDirect: async () => {
+        directDeletedCount++;
+      },
+    });
+    assert.equal(offlineCleanHandle.localAccepted, true);
+    await offlineCleanHandle.serverPromise;
+    assert.equal(directDeletedCount, 1);
+
+    const offlineKnownAttHandle = deleteMeetingWithDeps('meet_offline_blocked', { knownAttachmentsCount: 2 }, {
+      getUid: () => USER_A,
+      isOnline: () => false,
+      getIdToken: async () => null,
+      hasAnyAttachmentsInFirestore: async () => false,
+      callServerDelete: async () => ({ status: 200, body: { deleted: true } }),
+      deleteMeetingDocDirect: async () => {
+        throw new Error('Must never delete meeting with known attachments');
+      },
+    });
+    await assert.rejects(() => offlineKnownAttHandle.serverPromise, (err: any) => err.code === 'MEETING_HAS_ATTACHMENTS');
+
+    const classifiedAtt = classifyWriteError(
+      Object.assign(new Error('MEETING_HAS_ATTACHMENTS'), { code: 'MEETING_HAS_ATTACHMENTS' }),
+      'meeting',
+      true
+    );
+    assert.match(classifiedAtt.messageArabic, /حذف المرفقات أولاً/);
+
+    const classifiedPerm = classifyWriteError({ code: 'permission-denied' }, 'meeting', true);
+    assert.match(classifiedPerm.messageArabic, /مرفقات معتمدة|عمليات رفع غير مكتملة/);
+  });
+
+  await t.test('18. UploadIntent expiration cleanup, browser disconnect recovery, multi-instance race safety, and disabled-by-default cron trigger', async () => {
+    const baseMs = 1_731_500_000_000;
+    const expiresIso = new Date(baseMs + UPLOAD_INTENT_GRACE_MS).toISOString();
+
+    // 18a. Pure eligibility window & safety buffer boundary checks
+    assert.equal(
+      isUploadIntentEligibleForExpirationCleanup({
+        status: 'pending',
+        expiresAt: expiresIso,
+        nowMs: baseMs + UPLOAD_INTENT_GRACE_MS - 1000,
+      }),
+      false,
+      'Before expiresAt must NEVER be eligible'
+    );
+    assert.equal(
+      isUploadIntentEligibleForExpirationCleanup({
+        status: 'pending',
+        expiresAt: expiresIso,
+        nowMs: baseMs + UPLOAD_INTENT_GRACE_MS + UPLOAD_CLEANUP_SAFETY_BUFFER_MS - 1000,
+      }),
+      false,
+      'Inside post-expiry safety buffer must NEVER be eligible'
+    );
+    assert.equal(
+      isUploadIntentEligibleForExpirationCleanup({
+        status: 'pending',
+        expiresAt: expiresIso,
+        nowMs: baseMs + UPLOAD_INTENT_GRACE_MS + UPLOAD_CLEANUP_SAFETY_BUFFER_MS,
+      }),
+      true,
+      'Past expiresAt + safetyBuffer must be eligible'
+    );
+    assert.equal(
+      isUploadIntentEligibleForExpirationCleanup({
+        status: 'committing',
+        expiresAt: expiresIso,
+        committingLeaseExpiresAt: new Date(
+          baseMs + UPLOAD_INTENT_GRACE_MS + UPLOAD_CLEANUP_SAFETY_BUFFER_MS + 30_000
+        ).toISOString(),
+        nowMs: baseMs + UPLOAD_INTENT_GRACE_MS + UPLOAD_CLEANUP_SAFETY_BUFFER_MS,
+      }),
+      false,
+      'Active committing lease MUST NEVER be cleaned'
+    );
+    assert.equal(
+      isUploadIntentEligibleForExpirationCleanup({
+        status: 'committed',
+        expiresAt: expiresIso,
+        nowMs: baseMs + UPLOAD_INTENT_GRACE_MS + UPLOAD_CLEANUP_SAFETY_BUFFER_MS + 60_000,
+      }),
+      false,
+      'Committed attachment MUST NEVER be cleaned'
+    );
+
+    // 18b. Browser disconnects before complete-upload -> stays pending during grace+buffer, then cleans safely & unlocks meeting deletion
+    const ctx = createMockTestServer({
+      initialTimeMs: baseMs,
+      enableScheduledSweepEndpoint: false,
+    });
+
+    await withServer(ctx.app, async (baseUrl) => {
+      const p = await fetch(`${baseUrl}/api/attachments/presign-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({
+          meetingId: MEETING_A,
+          fileName: 'abandoned_scan.jpg',
+          contentType: 'image/jpeg',
+          sizeBytes: JPEG_HEADER.byteLength,
+        }),
+      });
+      const presigned = (await p.json()) as any;
+      // Simulate browser finished PUT to B2 then closed tab before calling complete-upload
+      ctx.b2Objects.set(presigned.storageKey, {
+        sizeBytes: JPEG_HEADER.byteLength,
+        contentType: 'image/jpeg',
+        headerBytes: JPEG_HEADER,
+        etag: 'e-disconnect',
+      });
+
+      // Scheduled sweep endpoint MUST be disabled by default
+      const disabledCronRes = await fetch(`${baseUrl}/api/attachments/sweep-expired-scheduled`, {
+        method: 'POST',
+      });
+      assert.equal(disabledCronRes.status, 403);
+      assert.equal(((await disabledCronRes.json()) as any).error, 'SCHEDULED_SWEEP_DISABLED');
+
+      // Advance past expiresAt but still inside safety buffer -> cleanup MUST skip
+      ctx.advanceTimeMs(UPLOAD_INTENT_GRACE_MS + 10_000);
+      const earlySweep = await cleanupExpiredMeetingAttachmentsWithDeps(
+        { meetingId: MEETING_A },
+        {
+          isOnline: () => true,
+          getIdToken: async () => 'token-alice',
+          fetchApi: (input, init) => fetch(typeof input === 'string' ? `${baseUrl}${input}` : input, init),
+        }
+      );
+      assert.equal(earlySweep.cleaned, 0);
+      assert.equal(earlySweep.skipped, 1);
+      assert.equal(ctx.b2Objects.has(presigned.storageKey), true);
+
+      // Advance past grace + safety buffer -> cleanup removes orphan B2 object, unlocks guard, allows meeting deletion
+      ctx.advanceTimeMs(UPLOAD_CLEANUP_SAFETY_BUFFER_MS);
+      const lateSweep = await cleanupExpiredMeetingAttachmentsWithDeps(
+        { meetingId: MEETING_A },
+        {
+          isOnline: () => true,
+          getIdToken: async () => 'token-alice',
+          fetchApi: (input, init) => fetch(typeof input === 'string' ? `${baseUrl}${input}` : input, init),
+        }
+      );
+      assert.equal(lateSweep.cleaned, 1);
+      assert.equal(ctx.b2Objects.has(presigned.storageKey), false);
+      assert.equal(
+        ctx.uploadIntents.get(`${USER_A}:${MEETING_A}:${presigned.attachmentId}`)?.status,
+        'abandoned'
+      );
+      assert.equal(ctx.guards.get(`${USER_A}:${MEETING_A}`)?.locked, false);
+    });
+
+    // 18c. Multi-instance concurrency race: Instance 1 runs complete-upload while Instance 2 runs expiration sweep -> committed file NEVER deleted
+    const raceCtx = createMockTestServer({
+      initialTimeMs: baseMs,
+      enableScheduledSweepEndpoint: true,
+      scheduledSweepSecret: 'super-secret-cron-token-murafiq-2026',
+    });
+
+    await withServer(raceCtx.app, async (baseUrl) => {
+      const p = await fetch(`${baseUrl}/api/attachments/presign-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({
+          meetingId: MEETING_A,
+          fileName: 'slow_commit.pdf',
+          contentType: 'application/pdf',
+          sizeBytes: PDF_HEADER.byteLength,
+        }),
+      });
+      const d = (await p.json()) as any;
+      raceCtx.b2Objects.set(d.storageKey, {
+        sizeBytes: PDF_HEADER.byteLength,
+        contentType: 'application/pdf',
+        headerBytes: PDF_HEADER,
+        etag: 'e-race',
+      });
+
+      // Advance clock past expiry+buffer right BEFORE slow complete-upload finishes on Instance 1,
+      // simulating a client completing upload right around expiry while Instance 2 sweeps globally!
+      raceCtx.advanceTimeMs(UPLOAD_INTENT_GRACE_MS + UPLOAD_CLEANUP_SAFETY_BUFFER_MS + 1000);
+      raceCtx.setSlowVerifyMs(50);
+
+      const instance1CompletePromise = fetch(`${baseUrl}/api/attachments/complete-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({
+          meetingId: MEETING_A,
+          attachmentId: d.attachmentId,
+          fileName: 'slow_commit.pdf',
+          contentType: 'application/pdf',
+          sizeBytes: PDF_HEADER.byteLength,
+        }),
+      });
+
+      await new Promise((r) => setTimeout(r, 15));
+
+      // Instance 2 triggers global scheduled sweep concurrently while Instance 1 holds committing lease
+      const wrongSecretRes = await fetch(`${baseUrl}/api/attachments/sweep-expired-scheduled`, {
+        method: 'POST',
+        headers: { 'x-murafiq-cleanup-secret': 'wrong-secret' },
+      });
+      assert.equal(wrongSecretRes.status, 403);
+
+      const instance2SweepRes = await fetch(
+        `${baseUrl}/api/instance2/attachments/sweep-expired-scheduled`,
+        {
+          method: 'POST',
+          headers: { 'x-murafiq-cleanup-secret': 'super-secret-cron-token-murafiq-2026' },
+        }
+      );
+      assert.equal(instance2SweepRes.status, 200);
+      const sweepBody = (await instance2SweepRes.json()) as any;
+      assert.equal(sweepBody.cleaned, 0, 'Sweeper MUST skip intent locked by Instance 1 committing lease');
+      assert.equal(sweepBody.skipped, 1);
+
+      const instance1Res = await instance1CompletePromise;
+      raceCtx.setSlowVerifyMs(0);
+      assert.equal(instance1Res.status, 200);
+      assert.equal(raceCtx.b2Objects.has(d.storageKey), true);
+      assert.equal(
+        raceCtx.attachmentsOwned.has(`${USER_A}:${MEETING_A}:${d.attachmentId}`),
+        true
+      );
+    });
+
+    // 18d. Transient B2 verification failure releases committing lease so immediate retry succeeds cleanly
+    const retryCtx = createMockTestServer({ failVerifyOnce: true });
+    await withServer(retryCtx.app, async (baseUrl) => {
+      const p = await fetch(`${baseUrl}/api/attachments/presign-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({
+          meetingId: MEETING_A,
+          fileName: 'retry.pdf',
+          contentType: 'application/pdf',
+          sizeBytes: PDF_HEADER.byteLength,
+        }),
+      });
+      const d = (await p.json()) as any;
+      retryCtx.b2Objects.set(d.storageKey, {
+        sizeBytes: PDF_HEADER.byteLength,
+        contentType: 'application/pdf',
+        headerBytes: PDF_HEADER,
+        etag: 'e-retry',
+      });
+
+      const firstAttempt = await fetch(`${baseUrl}/api/attachments/complete-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({
+          meetingId: MEETING_A,
+          attachmentId: d.attachmentId,
+          fileName: 'retry.pdf',
+          contentType: 'application/pdf',
+          sizeBytes: PDF_HEADER.byteLength,
+        }),
+      });
+      assert.equal(firstAttempt.status, 500);
+      assert.equal(
+        retryCtx.uploadIntents.get(`${USER_A}:${MEETING_A}:${d.attachmentId}`)?.status,
+        'pending',
+        'Lease must release back to pending after unexpected transient verify exception'
+      );
+
+      const secondAttempt = await fetch(`${baseUrl}/api/attachments/complete-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({
+          meetingId: MEETING_A,
+          attachmentId: d.attachmentId,
+          fileName: 'retry.pdf',
+          contentType: 'application/pdf',
+          sizeBytes: PDF_HEADER.byteLength,
+        }),
+      });
+      assert.equal(secondAttempt.status, 200);
+      assert.equal(retryCtx.attachmentsOwned.has(`${USER_A}:${MEETING_A}:${d.attachmentId}`), true);
+    });
+  });
+
+  await t.test('19. Firebase Admin credential readiness distinguishes ADC/Cloud Run Identity from explicit JSON key without exposing secrets', () => {
+    const noneState = getFirebaseAdminReadinessStatus({} as NodeJS.ProcessEnv);
+    assert.equal(noneState.configured, false);
+    assert.equal(noneState.credentialSource, 'none');
+    assert.equal(noneState.supportsManagedIdentityAdc, false);
+    assert.equal(noneState.firestoreDatabaseId, 'ai-studio-murafiq-cb988db3-5a07-40b7-b1ca-8eaaae894475');
+
+    const cloudRunAdcState = getFirebaseAdminReadinessStatus({
+      K_SERVICE: 'murafiq-prod-service',
+    } as unknown as NodeJS.ProcessEnv);
+    assert.equal(cloudRunAdcState.supportsManagedIdentityAdc, true);
+    assert.equal(cloudRunAdcState.credentialSource, 'cloud_run_adc');
+    assert.equal(cloudRunAdcState.configured, false);
+
+    const saState = getFirebaseAdminReadinessStatus({
+      FIREBASE_SERVICE_ACCOUNT_JSON: '{"client_email":"x@y.iam","private_key":"secret"}',
+    } as unknown as NodeJS.ProcessEnv);
+    assert.equal(saState.configured, true);
+    assert.equal(saState.credentialSource, 'service_account_json');
+    assert.equal(JSON.stringify(saState).includes('private_key'), false);
+    assert.equal(JSON.stringify(saState).includes('x@y.iam'), false);
   });
 });

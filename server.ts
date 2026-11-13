@@ -3,10 +3,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import express from 'express';
 import { createAttachmentsRouter } from './src/server/attachmentsRouter.ts';
+import { createMeetingsRouter } from './src/server/meetingsRouter.ts';
 import { readB2ConfigFromEnv } from './src/server/b2Storage.ts';
 import {
-  getFirebaseServerConfig,
-  isFirebaseAdminConfigured,
+  getFirebaseAdminReadinessStatus,
+  verifyNamedDatabaseAdminAccess,
 } from './src/server/firebaseServerAuth.ts';
 
 export async function createMurafiqServerApp() {
@@ -15,20 +16,31 @@ export async function createMurafiqServerApp() {
   app.disable('x-powered-by');
   app.use(express.json({ limit: '128kb' }));
 
-  app.get('/api/health', (_req, res) => {
+  app.get('/api/health', async (req, res) => {
     const b2Configured = readB2ConfigFromEnv() !== null;
-    const firebaseAdminConfigured = isFirebaseAdminConfigured();
-    const { firestoreDatabaseId } = getFirebaseServerConfig();
+    const adminReadiness = getFirebaseAdminReadinessStatus();
+    const shouldVerifyAccess = req.query.verify === 'admin';
+    const accessProbe = shouldVerifyAccess ? await verifyNamedDatabaseAdminAccess() : null;
+
     res.json({
       ok: true,
       storageProvider: 'backblaze_b2',
       b2Configured,
-      firebaseAdminConfigured,
-      firestoreDatabaseId,
+      firebaseAdminConfigured: adminReadiness.configured,
+      firebaseAdminCredentialSource: adminReadiness.credentialSource,
+      supportsManagedIdentityAdc: adminReadiness.supportsManagedIdentityAdc,
+      ...(accessProbe
+        ? {
+            firebaseAdminAccessVerified: accessProbe.accessVerified,
+            firebaseAdminAccessStatus: accessProbe.reasonCode,
+          }
+        : {}),
+      firestoreDatabaseId: adminReadiness.firestoreDatabaseId,
     });
   });
 
   app.use('/api/attachments', createAttachmentsRouter());
+  app.use('/api/meetings', createMeetingsRouter());
 
   // Always return JSON 404 for unknown /api routes rather than falling through to SPA HTML
   app.use('/api', (_req, res) => {

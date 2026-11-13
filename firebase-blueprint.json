@@ -116,11 +116,15 @@
         "sizeBytes": { "type": "number" },
         "storageKey": { "type": "string", "maxLength": 512 },
         "bucket": { "type": "string", "maxLength": 128 },
-        "status": { "type": "string", "enum": ["pending", "committed", "abandoned", "deleted"] },
+        "status": { "type": "string", "enum": ["pending", "committing", "committed", "cleaning", "abandoned", "deleted"] },
         "expiresAt": { "type": "string", "maxLength": 50 },
         "createdAt": { "type": "string", "maxLength": 50 },
         "updatedAt": { "type": "string", "maxLength": 50 },
-        "committedAt": { "type": "string", "maxLength": 50 }
+        "committedAt": { "type": "string", "maxLength": 50 },
+        "committingLeaseExpiresAt": { "type": "string", "maxLength": 50 },
+        "cleaningStartedAt": { "type": "string", "maxLength": 50 },
+        "cleanedAt": { "type": "string", "maxLength": 50 },
+        "cleanupReason": { "type": "string", "enum": ["client_abandoned", "expired_uncommitted", "verification_failed"] }
       },
       "required": ["attachmentId", "userId", "meetingId", "fileName", "contentType", "sizeBytes", "storageKey", "status", "expiresAt", "createdAt", "updatedAt"]
     }

@@ -417,6 +417,74 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
         await assertFails(deleteDoc(doc(unauthDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_server_1`)));
         await assertFails(getDoc(doc(unauthDb, `users/${USER_A_UID}/meetings/meet_att_1/uploadIntents/att_server_1`)));
       });
+
+      // 8c. Meeting Deletion Guard Rules (_meetingGuard blocks direct Client SDK deleteDoc when locked)
+      await st.test(`8c. Meeting deletion blocked by Firestore Rules via _meetingGuard when attachments or pending uploads exist on ${dbId}`, async () => {
+        const aliceCtx = testEnv.authenticatedContext(USER_A_UID);
+        const aliceDb = getDbInstance(aliceCtx, dbId);
+        const bobCtx = testEnv.authenticatedContext(USER_B_UID);
+        const bobDb = getDbInstance(bobCtx, dbId);
+
+        const lockedMeetingRef = doc(aliceDb, `users/${USER_A_UID}/meetings/meet_locked_guard`);
+        const guardRef = doc(aliceDb, `users/${USER_A_UID}/meetings/meet_locked_guard/uploadIntents/_meetingGuard`);
+
+        await assertSucceeds(
+          setDoc(lockedMeetingRef, {
+            id: 'meet_locked_guard',
+            userId: USER_A_UID,
+            clientId: 'client_1',
+            title: 'لقاء محمي بالمرفقات',
+            dateTime: '2026-11-15T10:00:00.000Z',
+            type: 'in_person',
+            status: 'confirmed',
+            notes: 'لقاء تجريبي لقواعد القفل',
+            createdAt: '2026-11-13T10:00:00.000Z',
+          })
+        );
+
+        // Server writes _meetingGuard { locked: true }
+        await testEnv.withSecurityRulesDisabled(async (adminCtx) => {
+          const adminDb = getDbInstance(adminCtx, dbId);
+          await setDoc(doc(adminDb, `users/${USER_A_UID}/meetings/meet_locked_guard/uploadIntents/_meetingGuard`), {
+            guardVersion: 1,
+            meetingId: 'meet_locked_guard',
+            userId: USER_A_UID,
+            activeAttachmentIds: ['att_server_locked'],
+            pendingIntentIds: [],
+            locked: true,
+            updatedAt: '2026-11-13T10:05:00.000Z',
+          });
+        });
+
+        // Direct Client SDK deletion by owner Alice MUST FAIL with PERMISSION_DENIED while locked
+        await assertFails(deleteDoc(lockedMeetingRef));
+
+        // Direct Client SDK CANNOT read, tamper, or delete _meetingGuard to bypass protection
+        await assertFails(getDoc(guardRef));
+        await assertFails(setDoc(guardRef, { locked: false }));
+        await assertFails(updateDoc(guardRef, { locked: false }));
+        await assertFails(deleteDoc(guardRef));
+
+        // Server unlocks _meetingGuard after all attachments/intents are cleanly deleted
+        await testEnv.withSecurityRulesDisabled(async (adminCtx) => {
+          const adminDb = getDbInstance(adminCtx, dbId);
+          await setDoc(doc(adminDb, `users/${USER_A_UID}/meetings/meet_locked_guard/uploadIntents/_meetingGuard`), {
+            guardVersion: 1,
+            meetingId: 'meet_locked_guard',
+            userId: USER_A_UID,
+            activeAttachmentIds: [],
+            pendingIntentIds: [],
+            locked: false,
+            updatedAt: '2026-11-13T10:10:00.000Z',
+          });
+        });
+
+        // Cross-user Bob still CANNOT delete Alice's unlocked meeting
+        await assertFails(deleteDoc(doc(bobDb, `users/${USER_A_UID}/meetings/meet_locked_guard`)));
+
+        // Owner Alice CAN delete now that _meetingGuard is unlocked
+        await assertSucceeds(deleteDoc(lockedMeetingRef));
+      });
     });
   }
 

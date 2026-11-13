@@ -6,9 +6,17 @@ import { getFirestore } from 'firebase-admin/firestore';
 import type {
   AttachmentDeleteStatus,
   MeetingAttachment,
+  MeetingAttachmentGuardRecord,
   UploadIntentRecord,
 } from '../types/index.ts';
-import { isValidResourceId } from '../utils/attachmentPolicy.ts';
+import {
+  isUploadIntentEligibleForExpirationCleanup,
+  isValidResourceId,
+  UPLOAD_CLEANUP_SAFETY_BUFFER_MS,
+  UPLOAD_COMMIT_LEASE_MS,
+} from '../utils/attachmentPolicy.ts';
+
+export const MEETING_GUARD_DOC_ID = '_meetingGuard';
 
 interface FirebaseAppletConfig {
   projectId: string;
@@ -56,11 +64,52 @@ function parseServiceAccountFromEnv(): Record<string, any> | null {
   );
 }
 
+export type AdminCredentialSource =
+  | 'service_account_json'
+  | 'adc_file'
+  | 'emulator'
+  | 'cloud_run_adc'
+  | 'none';
+
+export interface FirebaseAdminReadinessStatus {
+  configured: boolean;
+  hasExplicitCredentials: boolean;
+  supportsManagedIdentityAdc: boolean;
+  credentialSource: AdminCredentialSource;
+  projectId: string;
+  firestoreDatabaseId: string;
+}
+
+export function getFirebaseAdminReadinessStatus(
+  env: NodeJS.ProcessEnv = process.env
+): FirebaseAdminReadinessStatus {
+  const { projectId, firestoreDatabaseId } = getFirebaseServerConfig();
+  const hasServiceAccountJson = Boolean(env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim());
+  const hasAdcFile = Boolean(env.GOOGLE_APPLICATION_CREDENTIALS?.trim());
+  const hasEmulator = Boolean(env.FIRESTORE_EMULATOR_HOST?.trim());
+  const hasCloudRunIdentity = Boolean(
+    env.K_SERVICE?.trim() || env.CLOUD_RUN_JOB?.trim() || env.GCE_METADATA_HOST?.trim()
+  );
+
+  let credentialSource: AdminCredentialSource = 'none';
+  if (hasServiceAccountJson) credentialSource = 'service_account_json';
+  else if (hasAdcFile) credentialSource = 'adc_file';
+  else if (hasEmulator) credentialSource = 'emulator';
+  else if (hasCloudRunIdentity) credentialSource = 'cloud_run_adc';
+
+  const hasExplicitCredentials = hasServiceAccountJson || hasAdcFile || hasEmulator;
+  return {
+    configured: hasExplicitCredentials,
+    hasExplicitCredentials,
+    supportsManagedIdentityAdc: hasCloudRunIdentity,
+    credentialSource,
+    projectId,
+    firestoreDatabaseId,
+  };
+}
+
 export function isFirebaseAdminConfigured(): boolean {
-  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim()) return true;
-  if (process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim()) return true;
-  if (process.env.FIRESTORE_EMULATOR_HOST?.trim()) return true;
-  return false;
+  return getFirebaseAdminReadinessStatus().configured;
 }
 
 function getOrInitAdminApp(): App {
@@ -86,6 +135,31 @@ function getNamedAdminFirestore() {
   }
   const app = getOrInitAdminApp();
   return getFirestore(app, firestoreDatabaseId);
+}
+
+/**
+ * Lightweight, non-destructive permission probe against the named Firestore database.
+ * Never logs or returns credentials, service account emails, or raw exception stacks.
+ */
+export async function verifyNamedDatabaseAdminAccess(): Promise<{
+  accessVerified: boolean;
+  reasonCode: 'OK' | 'ADMIN_UNAVAILABLE' | 'PERMISSION_DENIED';
+}> {
+  try {
+    const db = getNamedAdminFirestore();
+    await db.collection('_health_probe_nonexistent').limit(1).get();
+    return { accessVerified: true, reasonCode: 'OK' };
+  } catch (err: any) {
+    if (isAdminCredentialFailure(err)) {
+      const msg = String(err?.message || '');
+      const isPerm = msg.includes('PERMISSION_DENIED') || err?.code === 7;
+      return {
+        accessVerified: false,
+        reasonCode: isPerm ? 'PERMISSION_DENIED' : 'ADMIN_UNAVAILABLE',
+      };
+    }
+    return { accessVerified: false, reasonCode: 'ADMIN_UNAVAILABLE' };
+  }
 }
 
 function isAdminCredentialFailure(err: any): boolean {
@@ -352,6 +426,18 @@ export async function verifyAttachmentOwnershipInNamedDb(params: {
   }
 }
 
+export interface ClaimIntentForCommitResult {
+  outcome:
+    | 'claimed'
+    | 'already_committed'
+    | 'intent_not_found'
+    | 'intent_abandoned'
+    | 'intent_mismatch'
+    | 'commit_in_progress';
+  intent?: UploadIntentRecord;
+  record?: MeetingAttachment;
+}
+
 export interface CommitAttachmentResult {
   outcome: 'committed' | 'already_committed' | 'intent_not_found' | 'intent_abandoned' | 'intent_mismatch';
   record?: MeetingAttachment;
@@ -360,6 +446,22 @@ export interface CommitAttachmentResult {
 export interface MarkAbandonedResult {
   outcome: 'abandoned' | 'already_committed' | 'not_found' | 'already_abandoned';
   record?: MeetingAttachment;
+}
+
+export interface ClaimExpirationCleanupResult {
+  outcome: 'claimed' | 'already_committed' | 'not_eligible' | 'not_expired' | 'not_found';
+  intent?: UploadIntentRecord;
+}
+
+export interface MeetingDeletionEligibility {
+  canDelete: boolean;
+  reason?: 'HAS_ATTACHMENTS' | 'HAS_PENDING_INTENTS';
+  attachmentsCount: number;
+  pendingIntentsCount: number;
+}
+
+export interface DeleteMeetingOutcome {
+  outcome: 'deleted' | 'not_found' | 'blocked_attachments' | 'blocked_pending_intents';
 }
 
 /**
@@ -378,6 +480,23 @@ export interface AttachmentMetadataStore {
     meetingId: string;
     attachmentId: string;
   }): Promise<MeetingAttachmentRecordCheck>;
+  claimIntentForCommit(params: {
+    uid: string;
+    meetingId: string;
+    attachmentId: string;
+    nowMs: number;
+    nowIso: string;
+    leaseDurationMs?: number;
+    expectedFileName?: string;
+    expectedContentType?: string;
+    expectedSizeBytes?: number;
+  }): Promise<ClaimIntentForCommitResult>;
+  releaseIntentCommitLease?(params: {
+    uid: string;
+    meetingId: string;
+    attachmentId: string;
+    nowIso: string;
+  }): Promise<void>;
   commitAttachmentFromIntent(params: {
     uid: string;
     meetingId: string;
@@ -390,7 +509,15 @@ export interface AttachmentMetadataStore {
     meetingId: string;
     attachmentId: string;
     nowIso: string;
+    releaseGuard?: boolean;
+    cleanupReason?: UploadIntentRecord['cleanupReason'];
   }): Promise<MarkAbandonedResult>;
+  releaseIntentFromGuard(params: {
+    uid: string;
+    meetingId: string;
+    attachmentId: string;
+    nowIso: string;
+  }): Promise<void>;
   updateAttachmentDeleteStatus(params: {
     uid: string;
     meetingId: string;
@@ -405,14 +532,55 @@ export interface AttachmentMetadataStore {
     attachmentId: string;
     nowIso: string;
   }): Promise<void>;
+  listPendingUploadIntentsForMeeting(params: {
+    uid: string;
+    meetingId: string;
+  }): Promise<UploadIntentRecord[]>;
+  listPendingUploadIntentsGlobal(params: { limit: number }): Promise<UploadIntentRecord[]>;
+  claimIntentForExpirationCleanup(params: {
+    uid: string;
+    meetingId: string;
+    attachmentId: string;
+    nowMs: number;
+    nowIso: string;
+    safetyBufferMs?: number;
+  }): Promise<ClaimExpirationCleanupResult>;
+  finalizeExpiredIntentCleanup(params: {
+    uid: string;
+    meetingId: string;
+    attachmentId: string;
+    nowIso: string;
+  }): Promise<void>;
+  releaseExpiredIntentCleaningOnFailure(params: {
+    uid: string;
+    meetingId: string;
+    attachmentId: string;
+    nowIso: string;
+  }): Promise<void>;
+  checkMeetingDeletionEligibility(params: {
+    uid: string;
+    meetingId: string;
+  }): Promise<MeetingDeletionEligibility>;
+  deleteMeetingIfNoAttachments(params: {
+    uid: string;
+    meetingId: string;
+  }): Promise<DeleteMeetingOutcome>;
 }
 
 function intentDocPath(uid: string, meetingId: string, attachmentId: string): string {
   return `users/${uid}/meetings/${meetingId}/uploadIntents/${attachmentId}`;
 }
 
+function guardDocPath(uid: string, meetingId: string): string {
+  return `users/${uid}/meetings/${meetingId}/uploadIntents/${MEETING_GUARD_DOC_ID}`;
+}
+
 function attachmentDocPath(uid: string, meetingId: string, attachmentId: string): string {
   return `users/${uid}/meetings/${meetingId}/attachments/${attachmentId}`;
+}
+
+function meetingDocPath(uid: string, meetingId: string): string {
+  return `users/${uid}/meetings/${meetingId}`;
 }
 
 function stripUndefinedFields<T extends Record<string, any>>(obj: T): Record<string, any> {
@@ -425,13 +593,57 @@ function stripUndefinedFields<T extends Record<string, any>>(obj: T): Record<str
   return cleaned;
 }
 
+function buildUpdatedGuardRecord(params: {
+  existing: MeetingAttachmentGuardRecord | undefined;
+  uid: string;
+  meetingId: string;
+  addPendingId?: string;
+  removePendingId?: string;
+  addActiveId?: string;
+  removeActiveId?: string;
+  nowIso: string;
+}): MeetingAttachmentGuardRecord {
+  const activeSet = new Set<string>(params.existing?.activeAttachmentIds || []);
+  const pendingSet = new Set<string>(params.existing?.pendingIntentIds || []);
+
+  if (params.addPendingId) pendingSet.add(params.addPendingId);
+  if (params.removePendingId) pendingSet.delete(params.removePendingId);
+  if (params.addActiveId) activeSet.add(params.addActiveId);
+  if (params.removeActiveId) activeSet.delete(params.removeActiveId);
+
+  const activeAttachmentIds = Array.from(activeSet);
+  const pendingIntentIds = Array.from(pendingSet);
+  return {
+    guardVersion: 1,
+    meetingId: params.meetingId,
+    userId: params.uid,
+    activeAttachmentIds,
+    pendingIntentIds,
+    locked: activeAttachmentIds.length > 0 || pendingIntentIds.length > 0,
+    updatedAt: params.nowIso,
+  };
+}
+
 export function createFirebaseAttachmentMetadataStore(): AttachmentMetadataStore {
   return {
     async createUploadIntent(intent: UploadIntentRecord): Promise<void> {
       try {
         const db = getNamedAdminFirestore();
-        const ref = db.doc(intentDocPath(intent.userId, intent.meetingId, intent.attachmentId));
-        await ref.set(stripUndefinedFields(intent));
+        const intentRef = db.doc(intentDocPath(intent.userId, intent.meetingId, intent.attachmentId));
+        const guardRef = db.doc(guardDocPath(intent.userId, intent.meetingId));
+
+        await db.runTransaction(async (tx) => {
+          const guardSnap = await tx.get(guardRef);
+          const nextGuard = buildUpdatedGuardRecord({
+            existing: guardSnap.exists ? (guardSnap.data() as MeetingAttachmentGuardRecord) : undefined,
+            uid: intent.userId,
+            meetingId: intent.meetingId,
+            addPendingId: intent.attachmentId,
+            nowIso: intent.updatedAt,
+          });
+          tx.set(intentRef, stripUndefinedFields(intent));
+          tx.set(guardRef, nextGuard);
+        });
       } catch (err) {
         rethrowIfAdminUnavailable(err);
       }
@@ -439,6 +651,7 @@ export function createFirebaseAttachmentMetadataStore(): AttachmentMetadataStore
 
     async getUploadIntent({ uid, meetingId, attachmentId }): Promise<UploadIntentRecord | null> {
       try {
+        if (attachmentId === MEETING_GUARD_DOC_ID) return null;
         const db = getNamedAdminFirestore();
         const snap = await db.doc(intentDocPath(uid, meetingId, attachmentId)).get();
         if (!snap.exists) return null;
@@ -468,8 +681,18 @@ export function createFirebaseAttachmentMetadataStore(): AttachmentMetadataStore
       }
     },
 
-    async commitAttachmentFromIntent(params): Promise<CommitAttachmentResult> {
-      const { uid, meetingId, attachmentId, attachment, nowIso } = params;
+    async claimIntentForCommit(params): Promise<ClaimIntentForCommitResult> {
+      const {
+        uid,
+        meetingId,
+        attachmentId,
+        nowMs,
+        nowIso,
+        leaseDurationMs = UPLOAD_COMMIT_LEASE_MS,
+        expectedFileName,
+        expectedContentType,
+        expectedSizeBytes,
+      } = params;
       try {
         const db = getNamedAdminFirestore();
         const attRef = db.doc(attachmentDocPath(uid, meetingId, attachmentId));
@@ -477,6 +700,108 @@ export function createFirebaseAttachmentMetadataStore(): AttachmentMetadataStore
 
         return await db.runTransaction(async (tx) => {
           const [attSnap, intentSnap] = await Promise.all([tx.get(attRef), tx.get(intentRef)]);
+
+          if (attSnap.exists) {
+            return {
+              outcome: 'already_committed' as const,
+              record: attSnap.data() as MeetingAttachment,
+            };
+          }
+
+          if (!intentSnap.exists) {
+            return { outcome: 'intent_not_found' as const };
+          }
+
+          const intent = intentSnap.data() as UploadIntentRecord;
+          if (intent.userId !== uid || intent.meetingId !== meetingId) {
+            return { outcome: 'intent_mismatch' as const };
+          }
+          if (
+            (expectedFileName !== undefined && intent.fileName !== expectedFileName) ||
+            (expectedContentType !== undefined && intent.contentType !== expectedContentType) ||
+            (expectedSizeBytes !== undefined && intent.sizeBytes !== expectedSizeBytes)
+          ) {
+            return { outcome: 'intent_mismatch' as const };
+          }
+
+          if (
+            intent.status === 'abandoned' ||
+            intent.status === 'deleted' ||
+            intent.status === 'cleaning'
+          ) {
+            return { outcome: 'intent_abandoned' as const };
+          }
+
+          if (intent.status === 'committed') {
+            return { outcome: 'intent_abandoned' as const };
+          }
+
+          if (intent.status === 'committing' && intent.committingLeaseExpiresAt) {
+            const leaseMs = new Date(intent.committingLeaseExpiresAt).getTime();
+            if (Number.isFinite(leaseMs) && nowMs < leaseMs) {
+              return { outcome: 'commit_in_progress' as const, intent };
+            }
+          }
+
+          const leaseIso = new Date(nowMs + leaseDurationMs).toISOString();
+          const claimedIntent: UploadIntentRecord = {
+            ...intent,
+            status: 'committing',
+            committingLeaseExpiresAt: leaseIso,
+            updatedAt: nowIso,
+          };
+
+          tx.update(intentRef, {
+            status: 'committing',
+            committingLeaseExpiresAt: leaseIso,
+            updatedAt: nowIso,
+          });
+
+          return {
+            outcome: 'claimed' as const,
+            intent: claimedIntent,
+          };
+        });
+      } catch (err) {
+        rethrowIfAdminUnavailable(err);
+      }
+    },
+
+    async releaseIntentCommitLease(params): Promise<void> {
+      const { uid, meetingId, attachmentId, nowIso } = params;
+      try {
+        const db = getNamedAdminFirestore();
+        const intentRef = db.doc(intentDocPath(uid, meetingId, attachmentId));
+        await db.runTransaction(async (tx) => {
+          const snap = await tx.get(intentRef);
+          if (!snap.exists) return;
+          const intent = snap.data() as UploadIntentRecord;
+          if (intent.status === 'committing') {
+            tx.update(intentRef, {
+              status: 'pending',
+              updatedAt: nowIso,
+            });
+          }
+        });
+      } catch (err) {
+        rethrowIfAdminUnavailable(err);
+      }
+    },
+
+    async commitAttachmentFromIntent(params): Promise<CommitAttachmentResult> {
+      const { uid, meetingId, attachmentId, attachment, nowIso } = params;
+      try {
+        const db = getNamedAdminFirestore();
+        const attRef = db.doc(attachmentDocPath(uid, meetingId, attachmentId));
+        const intentRef = db.doc(intentDocPath(uid, meetingId, attachmentId));
+        const guardRef = db.doc(guardDocPath(uid, meetingId));
+
+        return await db.runTransaction(async (tx) => {
+          const [attSnap, intentSnap, guardSnap] = await Promise.all([
+            tx.get(attRef),
+            tx.get(intentRef),
+            tx.get(guardRef),
+          ]);
 
           // Idempotent commit retry: if attachment already exists, return the existing authoritative record
           if (attSnap.exists) {
@@ -495,7 +820,11 @@ export function createFirebaseAttachmentMetadataStore(): AttachmentMetadataStore
             return { outcome: 'intent_mismatch' as const };
           }
 
-          if (intent.status === 'abandoned' || intent.status === 'deleted') {
+          if (
+            intent.status === 'abandoned' ||
+            intent.status === 'deleted' ||
+            intent.status === 'cleaning'
+          ) {
             return { outcome: 'intent_abandoned' as const };
           }
 
@@ -516,12 +845,22 @@ export function createFirebaseAttachmentMetadataStore(): AttachmentMetadataStore
             deleteStatus: 'active',
           }) as MeetingAttachment;
 
+          const nextGuard = buildUpdatedGuardRecord({
+            existing: guardSnap.exists ? (guardSnap.data() as MeetingAttachmentGuardRecord) : undefined,
+            uid,
+            meetingId,
+            removePendingId: attachmentId,
+            addActiveId: attachmentId,
+            nowIso,
+          });
+
           tx.set(attRef, authoritativeRecord);
           tx.update(intentRef, {
             status: 'committed',
             committedAt: nowIso,
             updatedAt: nowIso,
           });
+          tx.set(guardRef, nextGuard);
 
           return {
             outcome: 'committed' as const,
@@ -534,14 +873,26 @@ export function createFirebaseAttachmentMetadataStore(): AttachmentMetadataStore
     },
 
     async markUploadIntentAbandonedIfPending(params): Promise<MarkAbandonedResult> {
-      const { uid, meetingId, attachmentId, nowIso } = params;
+      const {
+        uid,
+        meetingId,
+        attachmentId,
+        nowIso,
+        releaseGuard = false,
+        cleanupReason = 'client_abandoned',
+      } = params;
       try {
         const db = getNamedAdminFirestore();
         const attRef = db.doc(attachmentDocPath(uid, meetingId, attachmentId));
         const intentRef = db.doc(intentDocPath(uid, meetingId, attachmentId));
+        const guardRef = db.doc(guardDocPath(uid, meetingId));
 
         return await db.runTransaction(async (tx) => {
-          const [attSnap, intentSnap] = await Promise.all([tx.get(attRef), tx.get(intentRef)]);
+          const [attSnap, intentSnap, guardSnap] = await Promise.all([
+            tx.get(attRef),
+            tx.get(intentRef),
+            tx.get(guardRef),
+          ]);
 
           if (attSnap.exists) {
             return {
@@ -560,15 +911,59 @@ export function createFirebaseAttachmentMetadataStore(): AttachmentMetadataStore
           }
 
           if (intent.status === 'abandoned') {
+            if (releaseGuard && guardSnap.exists) {
+              const nextGuard = buildUpdatedGuardRecord({
+                existing: guardSnap.data() as MeetingAttachmentGuardRecord,
+                uid,
+                meetingId,
+                removePendingId: attachmentId,
+                nowIso,
+              });
+              tx.set(guardRef, nextGuard);
+            }
             return { outcome: 'already_abandoned' as const };
           }
 
           tx.update(intentRef, {
             status: 'abandoned',
+            cleanupReason,
             updatedAt: nowIso,
           });
 
+          if (releaseGuard) {
+            const nextGuard = buildUpdatedGuardRecord({
+              existing: guardSnap.exists ? (guardSnap.data() as MeetingAttachmentGuardRecord) : undefined,
+              uid,
+              meetingId,
+              removePendingId: attachmentId,
+              nowIso,
+            });
+            tx.set(guardRef, nextGuard);
+          }
+
           return { outcome: 'abandoned' as const };
+        });
+      } catch (err) {
+        rethrowIfAdminUnavailable(err);
+      }
+    },
+
+    async releaseIntentFromGuard(params): Promise<void> {
+      const { uid, meetingId, attachmentId, nowIso } = params;
+      try {
+        const db = getNamedAdminFirestore();
+        const guardRef = db.doc(guardDocPath(uid, meetingId));
+        await db.runTransaction(async (tx) => {
+          const guardSnap = await tx.get(guardRef);
+          if (!guardSnap.exists) return;
+          const nextGuard = buildUpdatedGuardRecord({
+            existing: guardSnap.data() as MeetingAttachmentGuardRecord,
+            uid,
+            meetingId,
+            removePendingId: attachmentId,
+            nowIso,
+          });
+          tx.set(guardRef, nextGuard);
         });
       } catch (err) {
         rethrowIfAdminUnavailable(err);
@@ -599,9 +994,13 @@ export function createFirebaseAttachmentMetadataStore(): AttachmentMetadataStore
         const db = getNamedAdminFirestore();
         const attRef = db.doc(attachmentDocPath(uid, meetingId, attachmentId));
         const intentRef = db.doc(intentDocPath(uid, meetingId, attachmentId));
+        const guardRef = db.doc(guardDocPath(uid, meetingId));
 
         await db.runTransaction(async (tx) => {
-          const intentSnap = await tx.get(intentRef);
+          const [intentSnap, guardSnap] = await Promise.all([
+            tx.get(intentRef),
+            tx.get(guardRef),
+          ]);
           tx.delete(attRef);
           if (intentSnap.exists) {
             tx.update(intentRef, {
@@ -623,6 +1022,291 @@ export function createFirebaseAttachmentMetadataStore(): AttachmentMetadataStore
               updatedAt: nowIso,
             });
           }
+          const nextGuard = buildUpdatedGuardRecord({
+            existing: guardSnap.exists ? (guardSnap.data() as MeetingAttachmentGuardRecord) : undefined,
+            uid,
+            meetingId,
+            removeActiveId: attachmentId,
+            removePendingId: attachmentId,
+            nowIso,
+          });
+          tx.set(guardRef, nextGuard);
+        });
+      } catch (err) {
+        rethrowIfAdminUnavailable(err);
+      }
+    },
+
+    async listPendingUploadIntentsForMeeting({ uid, meetingId }): Promise<UploadIntentRecord[]> {
+      try {
+        const db = getNamedAdminFirestore();
+        const colRef = db.collection(`users/${uid}/meetings/${meetingId}/uploadIntents`);
+        const snap = await colRef.where('status', 'in', ['pending', 'committing']).get();
+        const results: UploadIntentRecord[] = [];
+        snap.forEach((d) => {
+          if (d.id === MEETING_GUARD_DOC_ID) return;
+          results.push(d.data() as UploadIntentRecord);
+        });
+        return results;
+      } catch (err) {
+        rethrowIfAdminUnavailable(err);
+      }
+    },
+
+    async listPendingUploadIntentsGlobal({ limit }): Promise<UploadIntentRecord[]> {
+      try {
+        const db = getNamedAdminFirestore();
+        const snap = await db
+          .collectionGroup('uploadIntents')
+          .where('status', 'in', ['pending', 'committing'])
+          .limit(limit)
+          .get();
+        const results: UploadIntentRecord[] = [];
+        snap.forEach((d) => {
+          if (d.id === MEETING_GUARD_DOC_ID) return;
+          results.push(d.data() as UploadIntentRecord);
+        });
+        return results;
+      } catch (err) {
+        rethrowIfAdminUnavailable(err);
+      }
+    },
+
+    async claimIntentForExpirationCleanup(params): Promise<ClaimExpirationCleanupResult> {
+      const {
+        uid,
+        meetingId,
+        attachmentId,
+        nowMs,
+        nowIso,
+        safetyBufferMs = UPLOAD_CLEANUP_SAFETY_BUFFER_MS,
+      } = params;
+      try {
+        const db = getNamedAdminFirestore();
+        const attRef = db.doc(attachmentDocPath(uid, meetingId, attachmentId));
+        const intentRef = db.doc(intentDocPath(uid, meetingId, attachmentId));
+
+        return await db.runTransaction(async (tx) => {
+          const [attSnap, intentSnap] = await Promise.all([tx.get(attRef), tx.get(intentRef)]);
+
+          if (attSnap.exists) {
+            return { outcome: 'already_committed' as const };
+          }
+          if (!intentSnap.exists) {
+            return { outcome: 'not_found' as const };
+          }
+
+          const intent = intentSnap.data() as UploadIntentRecord;
+          if (intent.status !== 'pending' && intent.status !== 'committing') {
+            return { outcome: 'not_eligible' as const, intent };
+          }
+
+          const eligible = isUploadIntentEligibleForExpirationCleanup({
+            status: intent.status,
+            expiresAt: intent.expiresAt,
+            committingLeaseExpiresAt: intent.committingLeaseExpiresAt,
+            nowMs,
+            safetyBufferMs,
+          });
+
+          if (!eligible) {
+            return { outcome: 'not_expired' as const, intent };
+          }
+
+          tx.update(intentRef, {
+            status: 'cleaning',
+            cleaningStartedAt: nowIso,
+            updatedAt: nowIso,
+          });
+
+          return {
+            outcome: 'claimed' as const,
+            intent: {
+              ...intent,
+              status: 'cleaning',
+              cleaningStartedAt: nowIso,
+              updatedAt: nowIso,
+            },
+          };
+        });
+      } catch (err) {
+        rethrowIfAdminUnavailable(err);
+      }
+    },
+
+    async finalizeExpiredIntentCleanup(params): Promise<void> {
+      const { uid, meetingId, attachmentId, nowIso } = params;
+      try {
+        const db = getNamedAdminFirestore();
+        const intentRef = db.doc(intentDocPath(uid, meetingId, attachmentId));
+        const guardRef = db.doc(guardDocPath(uid, meetingId));
+
+        await db.runTransaction(async (tx) => {
+          const [intentSnap, guardSnap] = await Promise.all([
+            tx.get(intentRef),
+            tx.get(guardRef),
+          ]);
+          if (intentSnap.exists) {
+            tx.update(intentRef, {
+              status: 'abandoned',
+              cleanupReason: 'expired_uncommitted',
+              cleanedAt: nowIso,
+              updatedAt: nowIso,
+            });
+          }
+          const nextGuard = buildUpdatedGuardRecord({
+            existing: guardSnap.exists ? (guardSnap.data() as MeetingAttachmentGuardRecord) : undefined,
+            uid,
+            meetingId,
+            removePendingId: attachmentId,
+            nowIso,
+          });
+          tx.set(guardRef, nextGuard);
+        });
+      } catch (err) {
+        rethrowIfAdminUnavailable(err);
+      }
+    },
+
+    async releaseExpiredIntentCleaningOnFailure(params): Promise<void> {
+      const { uid, meetingId, attachmentId, nowIso } = params;
+      try {
+        const db = getNamedAdminFirestore();
+        const intentRef = db.doc(intentDocPath(uid, meetingId, attachmentId));
+        await db.runTransaction(async (tx) => {
+          const snap = await tx.get(intentRef);
+          if (!snap.exists) return;
+          const intent = snap.data() as UploadIntentRecord;
+          if (intent.status === 'cleaning') {
+            tx.update(intentRef, {
+              status: 'pending',
+              updatedAt: nowIso,
+            });
+          }
+        });
+      } catch (err) {
+        rethrowIfAdminUnavailable(err);
+      }
+    },
+
+    async checkMeetingDeletionEligibility({ uid, meetingId }): Promise<MeetingDeletionEligibility> {
+      try {
+        const db = getNamedAdminFirestore();
+        const attCol = db.collection(`users/${uid}/meetings/${meetingId}/attachments`);
+        const intentsCol = db.collection(`users/${uid}/meetings/${meetingId}/uploadIntents`);
+        const guardRef = db.doc(guardDocPath(uid, meetingId));
+
+        const [attSnap, intentsSnap, guardSnap] = await Promise.all([
+          attCol.limit(10).get(),
+          intentsCol.limit(25).get(),
+          guardRef.get(),
+        ]);
+
+        const attachmentsCount = attSnap.size;
+        let pendingIntentsCount = 0;
+
+        intentsSnap.forEach((d) => {
+          if (d.id === MEETING_GUARD_DOC_ID) return;
+          const data = d.data() as UploadIntentRecord;
+          if (
+            data.status === 'pending' ||
+            data.status === 'committing' ||
+            data.status === 'cleaning'
+          ) {
+            pendingIntentsCount += 1;
+          }
+        });
+
+        const guard = guardSnap.exists
+          ? (guardSnap.data() as MeetingAttachmentGuardRecord)
+          : undefined;
+        const guardActiveCount = guard?.activeAttachmentIds?.length || 0;
+        const guardPendingCount = guard?.pendingIntentIds?.length || 0;
+
+        const effectiveAttachments = Math.max(attachmentsCount, guardActiveCount);
+        const effectivePending = Math.max(pendingIntentsCount, guardPendingCount);
+
+        if (effectiveAttachments > 0) {
+          return {
+            canDelete: false,
+            reason: 'HAS_ATTACHMENTS',
+            attachmentsCount: effectiveAttachments,
+            pendingIntentsCount: effectivePending,
+          };
+        }
+
+        if (effectivePending > 0 || guard?.locked === true) {
+          return {
+            canDelete: false,
+            reason: 'HAS_PENDING_INTENTS',
+            attachmentsCount: effectiveAttachments,
+            pendingIntentsCount: Math.max(effectivePending, 1),
+          };
+        }
+
+        return {
+          canDelete: true,
+          attachmentsCount: 0,
+          pendingIntentsCount: 0,
+        };
+      } catch (err) {
+        rethrowIfAdminUnavailable(err);
+      }
+    },
+
+    async deleteMeetingIfNoAttachments({ uid, meetingId }): Promise<DeleteMeetingOutcome> {
+      try {
+        const db = getNamedAdminFirestore();
+        const meetingRef = db.doc(meetingDocPath(uid, meetingId));
+        const guardRef = db.doc(guardDocPath(uid, meetingId));
+        const attCol = db.collection(`users/${uid}/meetings/${meetingId}/attachments`);
+        const intentsCol = db.collection(`users/${uid}/meetings/${meetingId}/uploadIntents`);
+
+        return await db.runTransaction(async (tx) => {
+          const [meetingSnap, guardSnap, attSnap, intentsSnap] = await Promise.all([
+            tx.get(meetingRef),
+            tx.get(guardRef),
+            tx.get(attCol.limit(1)),
+            tx.get(intentsCol.limit(25)),
+          ]);
+
+          if (!attSnap.empty) {
+            return { outcome: 'blocked_attachments' as const };
+          }
+
+          let hasPending = false;
+          intentsSnap.forEach((d) => {
+            if (d.id === MEETING_GUARD_DOC_ID) return;
+            const data = d.data() as UploadIntentRecord;
+            if (
+              data.status === 'pending' ||
+              data.status === 'committing' ||
+              data.status === 'cleaning'
+            ) {
+              hasPending = true;
+            }
+          });
+
+          const guard = guardSnap.exists
+            ? (guardSnap.data() as MeetingAttachmentGuardRecord)
+            : undefined;
+          if ((guard?.activeAttachmentIds?.length || 0) > 0) {
+            return { outcome: 'blocked_attachments' as const };
+          }
+          if (hasPending || (guard?.pendingIntentIds?.length || 0) > 0 || guard?.locked === true) {
+            return { outcome: 'blocked_pending_intents' as const };
+          }
+
+          if (!meetingSnap.exists) {
+            return { outcome: 'not_found' as const };
+          }
+
+          tx.delete(meetingRef);
+          if (guardSnap.exists) {
+            tx.delete(guardRef);
+          }
+
+          return { outcome: 'deleted' as const };
         });
       } catch (err) {
         rethrowIfAdminUnavailable(err);

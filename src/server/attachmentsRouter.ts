@@ -12,6 +12,9 @@ import {
   MAX_ATTACHMENT_SIZE_BYTES,
   PRESIGNED_DOWNLOAD_TTL_SECONDS,
   PRESIGNED_UPLOAD_TTL_SECONDS,
+  UPLOAD_CLEANUP_SAFETY_BUFFER_MS,
+  UPLOAD_COMMIT_LEASE_MS,
+  UPLOAD_INTENT_GRACE_MS,
   validateAttachmentFileRequest,
   verifyMagicBytes,
 } from '../utils/attachmentPolicy.ts';
@@ -26,8 +29,95 @@ import {
   type VerifiedFirebaseUser,
 } from './firebaseServerAuth.ts';
 
-// Allow 15 minutes for complete-upload retries on an authorized upload intent
-const UPLOAD_INTENT_GRACE_MS = 15 * 60 * 1000;
+export interface SweepExpiredUploadIntentsResult {
+  scanned: number;
+  cleaned: number;
+  skipped: number;
+  failed: number;
+  cleanedAttachmentIds: string[];
+  skippedAttachmentIds: string[];
+  failedAttachmentIds: string[];
+}
+
+/**
+ * Multi-instance-safe server sweeper for expired, uncommitted UploadIntents.
+ * Uses Firestore transactional state transitions ('pending' -> 'cleaning' -> 'abandoned')
+ * so neither actively committing uploads nor already committed attachments can ever be deleted.
+ */
+export async function sweepExpiredUploadIntents(params: {
+  candidates: UploadIntentRecord[];
+  metadataStore: AttachmentMetadataStore;
+  storage: B2StorageService;
+  nowMs?: number;
+  safetyBufferMs?: number;
+}): Promise<SweepExpiredUploadIntentsResult> {
+  const {
+    candidates,
+    metadataStore,
+    storage,
+    nowMs = Date.now(),
+    safetyBufferMs = UPLOAD_CLEANUP_SAFETY_BUFFER_MS,
+  } = params;
+  const nowIso = new Date(nowMs).toISOString();
+
+  const result: SweepExpiredUploadIntentsResult = {
+    scanned: candidates.length,
+    cleaned: 0,
+    skipped: 0,
+    failed: 0,
+    cleanedAttachmentIds: [],
+    skippedAttachmentIds: [],
+    failedAttachmentIds: [],
+  };
+
+  for (const candidate of candidates) {
+    const claim = await metadataStore.claimIntentForExpirationCleanup({
+      uid: candidate.userId,
+      meetingId: candidate.meetingId,
+      attachmentId: candidate.attachmentId,
+      nowMs,
+      nowIso,
+      safetyBufferMs,
+    });
+
+    if (claim.outcome !== 'claimed' || !claim.intent) {
+      result.skipped += 1;
+      result.skippedAttachmentIds.push(candidate.attachmentId);
+      continue;
+    }
+
+    const expectedKey = buildAttachmentStorageKey({
+      uid: claim.intent.userId,
+      meetingId: claim.intent.meetingId,
+      attachmentId: claim.intent.attachmentId,
+    });
+
+    try {
+      await storage.deleteObject(expectedKey);
+      await metadataStore.finalizeExpiredIntentCleanup({
+        uid: claim.intent.userId,
+        meetingId: claim.intent.meetingId,
+        attachmentId: claim.intent.attachmentId,
+        nowIso,
+      });
+      result.cleaned += 1;
+      result.cleanedAttachmentIds.push(claim.intent.attachmentId);
+    } catch {
+      await metadataStore
+        .releaseExpiredIntentCleaningOnFailure({
+          uid: claim.intent.userId,
+          meetingId: claim.intent.meetingId,
+          attachmentId: claim.intent.attachmentId,
+          nowIso,
+        })
+        .catch(() => {});
+      result.failed += 1;
+      result.failedAttachmentIds.push(claim.intent.attachmentId);
+    }
+  }
+
+  return result;
+}
 
 export interface AuthenticatedRequest extends Request {
   authUser?: VerifiedFirebaseUser;
@@ -46,6 +136,8 @@ export interface AttachmentsRouterDeps {
   storageService?: B2StorageService;
   generateAttachmentId?: () => string;
   now?: () => number;
+  enableScheduledSweepEndpoint?: boolean;
+  scheduledSweepSecret?: string;
 }
 
 function rejectIfCallerTriedPathOrUidSpoofing(
@@ -249,6 +341,75 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
     }
   };
 
+  /**
+   * Prepared scheduled cleanup endpoint for Cloud Scheduler / internal cron.
+   * Disabled by default until product owner explicitly activates ENABLE_EXPIRED_INTENT_SWEEP_ENDPOINT=true
+   * and sets a high-entropy CLEANUP_SWEEP_SECRET.
+   */
+  router.post('/sweep-expired-scheduled', async (req: Request, res: Response) => {
+    const isEnabled =
+      customDeps.enableScheduledSweepEndpoint ??
+      process.env.ENABLE_EXPIRED_INTENT_SWEEP_ENDPOINT === 'true';
+
+    if (!isEnabled) {
+      res.status(403).json({
+        error: 'SCHEDULED_SWEEP_DISABLED',
+        messageArabic:
+          'مسار التنظيف المجدول التلقائي غير مفعّل بعد بانتظار اعتماد مالك المنتج.',
+      });
+      return;
+    }
+
+    const expectedSecret =
+      (customDeps.scheduledSweepSecret ?? process.env.CLEANUP_SWEEP_SECRET ?? '').trim();
+    const providedSecret = String(req.header('x-murafiq-cleanup-secret') || '').trim();
+
+    if (expectedSecret.length < 16 || !providedSecret) {
+      res.status(401).json({
+        error: 'UNAUTHENTICATED',
+        messageArabic: 'مفقود رمز التحقق المجدول للتنظيف.',
+      });
+      return;
+    }
+
+    const a = Buffer.from(expectedSecret, 'utf8');
+    const b = Buffer.from(providedSecret, 'utf8');
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      res.status(403).json({
+        error: 'FORBIDDEN',
+        messageArabic: 'رمز التحقق المجدول غير صالح.',
+      });
+      return;
+    }
+
+    if (!storage.isConfigured()) {
+      res.status(503).json({
+        error: 'STORAGE_NOT_CONFIGURED',
+        messageArabic: 'خدمة Backblaze B2 غير مفعّلة على الخادم.',
+      });
+      return;
+    }
+
+    try {
+      const candidates = await metadataStore.listPendingUploadIntentsGlobal({ limit: 50 });
+      const sweepRes = await sweepExpiredUploadIntents({
+        candidates,
+        metadataStore,
+        storage,
+        nowMs: nowMs(),
+      });
+      res.json(sweepRes);
+    } catch (err: any) {
+      handleServerConfigOrAccessError(
+        err,
+        res,
+        500,
+        'SCHEDULED_SWEEP_FAILED',
+        'تعذر تنفيذ التنظيف المجدول للعمليات المنتهية.'
+      );
+    }
+  });
+
   router.use(requireAuth);
 
   // 1. Issue short-lived S3 Presigned PUT URL and record a server-authoritative UploadIntent
@@ -428,23 +589,27 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
 
       const lockKey = `${uid}:${meetingId}:${attachmentId}`;
       const result = await withAttachmentLock(lockKey, async () => {
-        // Idempotency check: if already committed in Firestore, return existing record immediately
-        const existingAtt = await metadataStore.getAttachmentRecord({
-          uid,
-          meetingId,
-          attachmentId,
-        });
-        if (existingAtt.exists && existingAtt.record) {
-          return { status: 200 as const, body: existingAtt.record };
-        }
+        const currentMs = nowMs();
+        const claimIso = new Date(currentMs).toISOString();
 
-        // Verify server-authoritative UploadIntent
-        const intent = await metadataStore.getUploadIntent({
+        // Transactional lease claim prevents any concurrent sweeper across server instances
+        // from deleting the B2 object while this instance verifies and commits it.
+        const claim = await metadataStore.claimIntentForCommit({
           uid,
           meetingId,
           attachmentId,
+          nowMs: currentMs,
+          nowIso: claimIso,
+          leaseDurationMs: UPLOAD_COMMIT_LEASE_MS,
+          expectedFileName: fileValidation.sanitizedFileName,
+          expectedContentType: fileValidation.normalizedContentType,
+          expectedSizeBytes: body.sizeBytes as number,
         });
-        if (!intent) {
+
+        if (claim.outcome === 'already_committed' && claim.record) {
+          return { status: 200 as const, body: claim.record };
+        }
+        if (claim.outcome === 'intent_not_found') {
           return {
             status: 404 as const,
             body: {
@@ -453,18 +618,16 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
             },
           };
         }
-
-        if (intent.userId !== uid || intent.meetingId !== meetingId) {
+        if (claim.outcome === 'intent_mismatch') {
           return {
             status: 403 as const,
             body: {
               error: 'UPLOAD_INTENT_MISMATCH',
-              messageArabic: 'مرفوض: بيانات عملية الرفع لا تطابق الحساب أو اللقاء المصرح به.',
+              messageArabic: 'مرفوض: بيانات الملف أو الحساب لا تطابق إذن الرفع المصرح به.',
             },
           };
         }
-
-        if (intent.status === 'abandoned' || intent.status === 'deleted') {
+        if (claim.outcome === 'intent_abandoned') {
           return {
             status: 409 as const,
             body: {
@@ -473,20 +636,17 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
             },
           };
         }
-
-        if (
-          intent.fileName !== fileValidation.sanitizedFileName ||
-          intent.contentType !== fileValidation.normalizedContentType ||
-          intent.sizeBytes !== body.sizeBytes
-        ) {
+        if (claim.outcome === 'commit_in_progress') {
           return {
-            status: 403 as const,
+            status: 409 as const,
             body: {
-              error: 'UPLOAD_INTENT_MISMATCH',
-              messageArabic: 'بيانات الملف المرفوع لا تطابق البيانات المعتمدة عند بدء الرفع.',
+              error: 'UPLOAD_COMMIT_IN_PROGRESS',
+              messageArabic: 'جاري التحقق من نفس المرفق وتثبيته حالياً، يرجى الانتظار لحظة ثم المحاولة.',
             },
           };
         }
+
+        const intent = claim.intent!;
 
         const storageKey = buildAttachmentStorageKey({
           uid,
@@ -494,21 +654,36 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
           attachmentId,
         });
 
-        // Verify B2 object existence, exact size, and binary Magic Bytes
-        const verification = await storage.verifyUploadedObject({
-          key: storageKey,
-          expectedContentType: intent.contentType,
-          expectedSizeBytes: intent.sizeBytes,
-        });
+        let verification;
+        try {
+          // Verify B2 object existence, exact size, and binary Magic Bytes
+          verification = await storage.verifyUploadedObject({
+            key: storageKey,
+            expectedContentType: intent.contentType,
+            expectedSizeBytes: intent.sizeBytes,
+          });
+        } catch (verifyErr) {
+          await metadataStore
+            .releaseIntentCommitLease?.({
+              uid,
+              meetingId,
+              attachmentId,
+              nowIso: new Date(nowMs()).toISOString(),
+            })
+            .catch(() => {});
+          throw verifyErr;
+        }
 
         if (!verification.verified) {
-          // If B2 object is invalid/disguised/missing, safely mark intent abandoned
+          // verifyUploadedObject already removed any invalid B2 object, so we can safely release guard
           await metadataStore
             .markUploadIntentAbandonedIfPending({
               uid,
               meetingId,
               attachmentId,
               nowIso: new Date(nowMs()).toISOString(),
+              releaseGuard: true,
+              cleanupReason: 'verification_failed',
             })
             .catch(() => {});
 
@@ -953,6 +1128,8 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
           meetingId,
           attachmentId,
           nowIso: new Date(nowMs()).toISOString(),
+          releaseGuard: false,
+          cleanupReason: 'client_abandoned',
         });
 
         if (markRes.outcome === 'already_committed') {
@@ -982,6 +1159,12 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
         });
 
         await storage.deleteObject(expectedKey);
+        await metadataStore.releaseIntentFromGuard({
+          uid,
+          meetingId,
+          attachmentId,
+          nowIso: new Date(nowMs()).toISOString(),
+        });
         return {
           status: 200 as const,
           body: {
@@ -1000,6 +1183,71 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
         502,
         'CLEANUP_FAILED',
         'تعذر تنظيف الملف المؤقت من Backblaze B2.'
+      );
+    }
+  });
+
+  // 5b. Owner-triggered safe cleanup of expired, uncommitted UploadIntents on a specific meeting
+  router.post('/cleanup-expired', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const uid = req.authUser!.uid;
+      const body = (req.body || {}) as Record<string, unknown>;
+
+      const spoofError = rejectIfCallerTriedPathOrUidSpoofing(body, uid);
+      if (spoofError) {
+        res.status(403).json({ error: 'FORBIDDEN', messageArabic: spoofError });
+        return;
+      }
+
+      if (!isValidResourceId(body.meetingId)) {
+        res.status(400).json({
+          error: 'INVALID_MEETING_ID',
+          messageArabic: 'معرّف اللقاء غير صالح.',
+        });
+        return;
+      }
+
+      const meetingId = body.meetingId;
+      const ownsMeeting = await verifyMeetingOwner({
+        uid,
+        meetingId,
+        idToken: req.authUser!.idToken,
+      });
+      if (!ownsMeeting) {
+        res.status(403).json({
+          error: 'MEETING_ACCESS_DENIED',
+          messageArabic: 'مرفوض: لا تملك صلاحية تنظيف مرفقات هذا اللقاء.',
+        });
+        return;
+      }
+
+      if (!storage.isConfigured()) {
+        res.status(503).json({
+          error: 'STORAGE_NOT_CONFIGURED',
+          messageArabic: 'خدمة Backblaze B2 غير مفعّلة على الخادم.',
+        });
+        return;
+      }
+
+      const candidates = await metadataStore.listPendingUploadIntentsForMeeting({
+        uid,
+        meetingId,
+      });
+      const sweepRes = await sweepExpiredUploadIntents({
+        candidates,
+        metadataStore,
+        storage,
+        nowMs: nowMs(),
+      });
+
+      res.json(sweepRes);
+    } catch (err: any) {
+      handleServerConfigOrAccessError(
+        err,
+        res,
+        500,
+        'CLEANUP_EXPIRED_FAILED',
+        'تعذر تنظيف عمليات الرفع المنتهية غير المكتملة.'
       );
     }
   });

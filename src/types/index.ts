@@ -155,7 +155,13 @@ export type AttachmentUploadStatus = 'completed';
 
 export type AttachmentDeleteStatus = 'active' | 'deleting' | 'b2_deleted' | 'delete_failed';
 
-export type UploadIntentStatus = 'pending' | 'committed' | 'abandoned' | 'deleted';
+export type UploadIntentStatus =
+  | 'pending'
+  | 'committing'
+  | 'committed'
+  | 'cleaning'
+  | 'abandoned'
+  | 'deleted';
 
 export interface UploadIntentRecord {
   attachmentId: string;
@@ -171,6 +177,20 @@ export interface UploadIntentRecord {
   createdAt: string;
   updatedAt: string;
   committedAt?: string;
+  committingLeaseExpiresAt?: string;
+  cleaningStartedAt?: string;
+  cleanedAt?: string;
+  cleanupReason?: 'client_abandoned' | 'expired_uncommitted' | 'verification_failed';
+}
+
+export interface MeetingAttachmentGuardRecord {
+  guardVersion: 1;
+  meetingId: string;
+  userId: string;
+  activeAttachmentIds: string[];
+  pendingIntentIds: string[];
+  locked: boolean;
+  updatedAt: string;
 }
 
 export interface MeetingAttachment {

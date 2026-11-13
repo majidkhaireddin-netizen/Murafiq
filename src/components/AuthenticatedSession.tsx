@@ -55,6 +55,7 @@ import {
   formatRejectedDraftClipboardText,
 } from '../utils/sessionState';
 import { clearAttachmentDownloadCache, syncAttachmentCacheUser } from '../utils/attachmentDownloadCache';
+import { MEETING_HAS_ATTACHMENTS_MESSAGE_AR } from '../utils/attachmentPolicy';
 
 interface AuthenticatedSessionProps {
   user: User;
@@ -553,6 +554,74 @@ export function AuthenticatedSession({
     });
   };
 
+  const handleDeleteMeeting = async (
+    meetingId: string,
+    knownAttachmentsCount?: number
+  ): Promise<{ deleted: boolean; blockedMessageArabic?: string }> => {
+    if ((knownAttachmentsCount ?? 0) > 0) {
+      return {
+        deleted: false,
+        blockedMessageArabic: MEETING_HAS_ATTACHMENTS_MESSAGE_AR,
+      };
+    }
+
+    const prevEntity = meetingsRef.current.find((m) => m.id === meetingId);
+    const applyDelete = (prev: Meeting[]) => prev.filter((m) => m.id !== meetingId);
+    meetingsRef.current = applyDelete(meetingsRef.current);
+    markDeleteInFlight('meetings', meetingId, true);
+
+    let rejectionMessageArabic: string | undefined;
+
+    const handle = meetingOpsRef.current.runScopedMutation({
+      entityId: meetingId,
+      entityType: 'meeting',
+      isDelete: true,
+      previousEntity: prevEntity,
+      setState: setMeetings,
+      applyOptimistic: applyDelete,
+      dispatchWrite: () => fbDeleteMeeting(meetingId, { knownAttachmentsCount }),
+      onServerConfirmed: ({ wasSuperseded }) => {
+        markDeleteInFlight('meetings', meetingId, false);
+        clearRejectedForEntity('meeting', meetingId, wasSuperseded);
+      },
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+        markDeleteInFlight('meetings', meetingId, false);
+        rejectionMessageArabic = classification.messageArabic;
+        console.warn('Delete meeting rejected by server:', error);
+        recordRejectedWrite({
+          opId,
+          entityType: 'meeting',
+          entityId: meetingId,
+          entityTitle: prevEntity?.title || meetingId,
+          operation: 'delete',
+          classification,
+          error,
+          payload: prevEntity,
+          wasSuperseded,
+        });
+      },
+    });
+
+    if (!isOnline) {
+      return { deleted: true };
+    }
+
+    try {
+      await handle.serverPromise;
+    } catch {
+      // Handled safely via onServerRejected rollback and recovery banner
+    }
+
+    if (rejectionMessageArabic) {
+      return {
+        deleted: false,
+        blockedMessageArabic: rejectionMessageArabic,
+      };
+    }
+
+    return { deleted: true };
+  };
+
   // Client Mutations
   const handleSaveClient = async (client: Client): Promise<void> => {
     const prevEntity = clientsRef.current.find((c) => c.id === client.id);
@@ -716,12 +785,7 @@ export function AuthenticatedSession({
       else if (rec.entityType === 'task') void handleDeleteTask(rec.entityId);
       else if (rec.entityType === 'note') void handleDeleteNote(rec.entityId);
       else if (rec.entityType === 'meeting') {
-        markDeleteInFlight('meetings', rec.entityId, true);
-        const h = fbDeleteMeeting(rec.entityId);
-        void h.serverPromise.then(
-          () => markDeleteInFlight('meetings', rec.entityId, false),
-          () => markDeleteInFlight('meetings', rec.entityId, false)
-        );
+        void handleDeleteMeeting(rec.entityId);
       }
       return;
     }
@@ -1015,6 +1079,7 @@ export function AuthenticatedSession({
               clients={clients}
               tasks={tasks}
               onSaveMeeting={handleSaveMeeting}
+              onDeleteMeeting={handleDeleteMeeting}
               onSaveTask={handleSaveTask}
               onOpenPdfModal={(m: Meeting) => setPdfMeeting(m)}
               onNewTaskFromMeeting={(m: Meeting) => handleOpenNewTask(m.clientId)}

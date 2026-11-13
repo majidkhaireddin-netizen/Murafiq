@@ -21,6 +21,11 @@ service cloud.firestore {
       return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function hasMeetingAttachmentLock(userId, meetingId) {
+      return exists(/databases/$(database)/documents/users/$(userId)/meetings/$(meetingId)/uploadIntents/_meetingGuard)
+        && get(/databases/$(database)/documents/users/$(userId)/meetings/$(meetingId)/uploadIntents/_meetingGuard).data.locked == true;
+    }
+
     function incoming() {
       return request.resource.data;
     }
@@ -199,7 +204,9 @@ service cloud.firestore {
           && incoming().id == existing().id
           && (!('userId' in existing()) || incoming().userId == existing().userId)
           && isValidMeeting(incoming(), userId);
-        allow delete: if isOwner(userId) && isValidId(meetingId);
+        allow delete: if isOwner(userId)
+          && isValidId(meetingId)
+          && !hasMeetingAttachmentLock(userId, meetingId);
 
         // Scoped Subcollection: Meeting Attachments (Server-authoritative commits & deletes only)
         match /attachments/{attachmentId} {
@@ -210,7 +217,7 @@ service cloud.firestore {
           allow delete: if false;
         }
 
-        // Server-only Upload Intents (Strictly inaccessible to browser clients)
+        // Server-only Upload Intents & Meeting Attachment Guard (Strictly inaccessible to browser clients)
         match /uploadIntents/{intentId} {
           allow read, write: if false;
         }

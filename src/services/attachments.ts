@@ -722,3 +722,38 @@ export async function deleteMeetingAttachment(params: {
 }): Promise<void> {
   return deleteMeetingAttachmentWithDeps(params, defaultDeleteDeps);
 }
+
+export interface CleanupExpiredSummary {
+  scanned: number;
+  cleaned: number;
+  skipped: number;
+  failed: number;
+}
+
+export async function cleanupExpiredMeetingAttachmentsWithDeps(
+  params: { meetingId: string },
+  deps: Pick<AttachmentDeleteDeps, 'isOnline' | 'getIdToken' | 'fetchApi'>
+): Promise<CleanupExpiredSummary> {
+  if (!deps.isOnline()) {
+    throw new AttachmentClientError(
+      'OFFLINE_BLOCKED',
+      'تنظيف عمليات الرفع غير المكتملة يتطلب اتصالاً نشطاً بالإنترنت.'
+    );
+  }
+  const idToken = await deps.getIdToken();
+  const res = await deps.fetchApi('/api/attachments/cleanup-expired', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+    },
+    body: JSON.stringify({ meetingId: params.meetingId }),
+  });
+  return parseJsonApiResponse<CleanupExpiredSummary>(res);
+}
+
+export async function cleanupExpiredMeetingAttachments(params: {
+  meetingId: string;
+}): Promise<CleanupExpiredSummary> {
+  return cleanupExpiredMeetingAttachmentsWithDeps(params, defaultDeleteDeps);
+}

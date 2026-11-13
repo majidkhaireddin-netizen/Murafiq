@@ -108,6 +108,31 @@ export function classifyWriteError(
   const actionVerb = isDelete ? 'حذف' : 'حفظ';
 
   if (
+    lower.includes('meeting_has_attachments') ||
+    lower.includes('لا يمكن حذف اللقاء ما دامت له مرفقات') ||
+    lower.includes('لا يمكن حذف اللقاء لوجود مرفقات')
+  ) {
+    return {
+      category: 'failed-precondition',
+      isPermanentServerRejection: true,
+      messageArabic:
+        'لا يمكن حذف اللقاء ما دامت له مرفقات معتمدة. يرجى حذف المرفقات أولاً من قسم المرفقات داخل اللقاء.',
+    };
+  }
+
+  if (
+    lower.includes('meeting_has_pending_attachments') ||
+    lower.includes('عمليات رفع مرفقات لم تكتمل')
+  ) {
+    return {
+      category: 'failed-precondition',
+      isPermanentServerRejection: true,
+      messageArabic:
+        'لا يمكن حذف اللقاء لوجود عمليات رفع مرفقات لم تكتمل بعد. يرجى إكمالها أو تنظيفها أولاً من قسم المرفقات.',
+    };
+  }
+
+  if (
     normalizedCode === 'permission-denied' ||
     lower.includes('permission-denied') ||
     lower.includes('permission_denied') ||
@@ -117,7 +142,10 @@ export function classifyWriteError(
     return {
       category: 'permission-denied',
       isPermanentServerRejection: true,
-      messageArabic: `رفض الخادم ${actionVerb} ${entityName} بسبب قيود الصلاحيات أو التحقق الأمني (permission-denied). تم الاحتفاظ بنسخة للمراجعة في قائمة الأخطاء لتتمكن من تعديلها وإعادة المحاولة.`,
+      messageArabic:
+        entityType === 'meeting' && isDelete
+          ? 'رفض الخادم حذف اللقاء؛ قد يحتوي اللقاء على مرفقات معتمدة أو عمليات رفع غير مكتملة يجب حذفها أولاً، أو لا تملك صلاحية الحذف.'
+          : `رفض الخادم ${actionVerb} ${entityName} بسبب قيود الصلاحيات أو التحقق الأمني (permission-denied). تم الاحتفاظ بنسخة للمراجعة في قائمة الأخطاء لتتمكن من تعديلها وإعادة المحاولة.`,
     };
   }
 

@@ -36,6 +36,7 @@ import {
 interface MeetingAttachmentsSectionProps {
   meetingId: string;
   isOnline: boolean;
+  onAttachmentsCountChange?: (count: number) => void;
 }
 
 const STAGE_LABELS_AR: Record<UploadStage, string> = {
@@ -49,6 +50,7 @@ const STAGE_LABELS_AR: Record<UploadStage, string> = {
 export const MeetingAttachmentsSection: React.FC<MeetingAttachmentsSectionProps> = ({
   meetingId,
   isOnline,
+  onAttachmentsCountChange,
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const uploadAbortRef = useRef<AbortController | null>(null);
@@ -104,6 +106,7 @@ export const MeetingAttachmentsSection: React.FC<MeetingAttachmentsSectionProps>
         meetingId,
         (items) => {
           setAttachments(items);
+          onAttachmentsCountChange?.(items.length);
           setIsLoadingList(false);
           setListError(null);
         },

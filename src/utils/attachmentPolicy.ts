@@ -3,6 +3,14 @@ import type { AllowedAttachmentMimeType } from '../types/index.ts';
 export const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 export const PRESIGNED_UPLOAD_TTL_SECONDS = 120;
 export const PRESIGNED_DOWNLOAD_TTL_SECONDS = 180;
+export const UPLOAD_INTENT_GRACE_MS = 15 * 60 * 1000;
+export const UPLOAD_CLEANUP_SAFETY_BUFFER_MS = 5 * 60 * 1000;
+export const UPLOAD_COMMIT_LEASE_MS = 60 * 1000;
+
+export const MEETING_HAS_ATTACHMENTS_MESSAGE_AR =
+  'لا يمكن حذف اللقاء ما دامت له مرفقات معتمدة. يرجى حذف المرفقات أولاً من قسم المرفقات داخل اللقاء.';
+export const MEETING_HAS_PENDING_ATTACHMENTS_MESSAGE_AR =
+  'لا يمكن حذف اللقاء لوجود عمليات رفع مرفقات لم تكتمل بعد. يرجى إكمالها أو تنظيفها أولاً من قسم المرفقات.';
 
 export const ALLOWED_ATTACHMENT_MIME_TYPES: readonly AllowedAttachmentMimeType[] = [
   'image/jpeg',
@@ -280,4 +288,40 @@ export function formatFileSizeArabic(bytes: number): string {
   if (bytes < 1024) return `${bytes} بايت`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} ك.ب`;
   return `${(bytes / (1024 * 1024)).toFixed(2)} م.ب`;
+}
+
+/**
+ * Determines safely whether an UploadIntent has passed both its commit grace window
+ * and the post-expiry safety buffer, and is NOT committed or actively committing.
+ */
+export function isUploadIntentEligibleForExpirationCleanup(params: {
+  status: string;
+  expiresAt: string;
+  committingLeaseExpiresAt?: string;
+  nowMs?: number;
+  safetyBufferMs?: number;
+}): boolean {
+  const nowMs = params.nowMs ?? Date.now();
+  const safetyBufferMs = params.safetyBufferMs ?? UPLOAD_CLEANUP_SAFETY_BUFFER_MS;
+
+  if (params.status !== 'pending' && params.status !== 'committing') {
+    return false;
+  }
+
+  if (params.committingLeaseExpiresAt) {
+    const leaseMs = new Date(params.committingLeaseExpiresAt).getTime();
+    if (!Number.isFinite(leaseMs) || nowMs < leaseMs) {
+      return false;
+    }
+  } else if (params.status === 'committing') {
+    // Active/unknown committing state without an explicit expired lease is never touched
+    return false;
+  }
+
+  const expiresMs = new Date(params.expiresAt).getTime();
+  if (!Number.isFinite(expiresMs)) {
+    return false;
+  }
+
+  return nowMs >= expiresMs + safetyBufferMs;
 }

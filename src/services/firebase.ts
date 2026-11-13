@@ -21,6 +21,9 @@ import {
   enableNetwork,
   doc,
   collection,
+  getDocs,
+  limit,
+  query,
   onSnapshot,
   setDoc,
   deleteDoc,
@@ -47,6 +50,10 @@ import {
   clearAttachmentDownloadCache,
   syncAttachmentCacheUser,
 } from '../utils/attachmentDownloadCache';
+import {
+  MEETING_HAS_ATTACHMENTS_MESSAGE_AR,
+  MEETING_HAS_PENDING_ATTACHMENTS_MESSAGE_AR,
+} from '../utils/attachmentPolicy';
 
 // Initialize Firebase App
 const app = initializeApp(firebaseConfig);
@@ -740,15 +747,131 @@ export function saveMeeting(meeting: Meeting): QueuedWriteHandle {
   return { localAccepted: true, path, serverPromise };
 }
 
-export function deleteMeeting(meetingId: string): QueuedWriteHandle {
-  const uid = getAuthenticatedUid();
+export interface DeleteMeetingClientDeps {
+  getUid: () => string;
+  isOnline: () => boolean;
+  getIdToken: () => Promise<string | null>;
+  hasAnyAttachmentsInFirestore: (uid: string, meetingId: string) => Promise<boolean>;
+  callServerDelete: (meetingId: string, idToken: string) => Promise<{ status: number; body: any }>;
+  deleteMeetingDocDirect: (uid: string, meetingId: string) => Promise<void>;
+  trackWrite?: (promise: Promise<void>) => Promise<void>;
+}
+
+function createCodedMeetingError(code: string, messageArabic: string): Error {
+  const err = new Error(messageArabic);
+  (err as any).code = code;
+  return err;
+}
+
+export function deleteMeetingWithDeps(
+  meetingId: string,
+  options: { knownAttachmentsCount?: number } | undefined,
+  deps: DeleteMeetingClientDeps
+): QueuedWriteHandle {
+  const uid = deps.getUid();
   const path = `users/${uid}/meetings/${meetingId}`;
-  const serverPromise = trackInFlightWrite(
-    deleteDoc(doc(db, 'users', uid, 'meetings', meetingId)).catch((error) =>
-      handleFirestoreError(error, OperationType.DELETE, path)
-    )
-  );
-  return { localAccepted: true, path, serverPromise };
+  const track = deps.trackWrite ?? ((p: Promise<void>) => p);
+
+  const runDelete = async (): Promise<void> => {
+    if ((options?.knownAttachmentsCount ?? 0) > 0) {
+      throw createCodedMeetingError('MEETING_HAS_ATTACHMENTS', MEETING_HAS_ATTACHMENTS_MESSAGE_AR);
+    }
+
+    // Preserve Offline-First deletion ONLY for meetings without known attachments.
+    // Upon reconnect, firestore.rules (!hasMeetingAttachmentLock) enforces the guard on the server.
+    if (!deps.isOnline()) {
+      await deps.deleteMeetingDocDirect(uid, meetingId);
+      return;
+    }
+
+    const hasAttachments = await deps.hasAnyAttachmentsInFirestore(uid, meetingId);
+    if (hasAttachments) {
+      throw createCodedMeetingError('MEETING_HAS_ATTACHMENTS', MEETING_HAS_ATTACHMENTS_MESSAGE_AR);
+    }
+
+    const idToken = await deps.getIdToken();
+    if (idToken) {
+      const res = await deps.callServerDelete(meetingId, idToken);
+      if (res.status >= 200 && res.status < 300) {
+        return;
+      }
+
+      const errCode = String(res.body?.error || '');
+      if (res.status === 409) {
+        const msg =
+          errCode === 'MEETING_HAS_PENDING_ATTACHMENTS'
+            ? res.body?.messageArabic || MEETING_HAS_PENDING_ATTACHMENTS_MESSAGE_AR
+            : res.body?.messageArabic || MEETING_HAS_ATTACHMENTS_MESSAGE_AR;
+        throw createCodedMeetingError(errCode || 'MEETING_HAS_ATTACHMENTS', msg);
+      }
+
+      if (res.status === 401 || res.status === 403) {
+        throw createCodedMeetingError(
+          errCode || 'permission-denied',
+          res.body?.messageArabic || 'غير مصرح بحذف هذا اللقاء.'
+        );
+      }
+
+      const isAdminFallbackEligible =
+        (res.status === 503 && errCode === 'FIREBASE_ADMIN_NOT_CONFIGURED') ||
+        (res.status === 404 && errCode === 'API_ROUTE_NOT_FOUND');
+
+      if (!isAdminFallbackEligible) {
+        throw createCodedMeetingError(
+          errCode || `HTTP_${res.status}`,
+          res.body?.messageArabic || 'تعذر التحقق من مرفقات اللقاء على الخادم لحذفه.'
+        );
+      }
+    }
+
+    await deps.deleteMeetingDocDirect(uid, meetingId);
+  };
+
+  return {
+    localAccepted: true,
+    path,
+    serverPromise: track(runDelete()),
+  };
+}
+
+export function deleteMeeting(
+  meetingId: string,
+  options?: { knownAttachmentsCount?: number }
+): QueuedWriteHandle {
+  return deleteMeetingWithDeps(meetingId, options, {
+    getUid: getAuthenticatedUid,
+    isOnline: () => (typeof navigator !== 'undefined' ? navigator.onLine : true),
+    getIdToken: async () => (auth.currentUser ? auth.currentUser.getIdToken() : null),
+    hasAnyAttachmentsInFirestore: async (uid, mId) => {
+      const attCol = collection(db, 'users', uid, 'meetings', mId, 'attachments');
+      const snap = await getDocs(query(attCol, limit(1)));
+      return !snap.empty;
+    },
+    callServerDelete: async (mId, idToken) => {
+      const res = await fetch('/api/meetings/delete', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({ meetingId: mId }),
+      });
+      let body: any = null;
+      try {
+        body = await res.json();
+      } catch {
+        body = null;
+      }
+      return { status: res.status, body };
+    },
+    deleteMeetingDocDirect: async (uid, mId) => {
+      const path = `users/${uid}/meetings/${mId}`;
+      await deleteDoc(doc(db, 'users', uid, 'meetings', mId)).catch((error) =>
+        handleFirestoreError(error, OperationType.DELETE, path)
+      );
+    },
+    trackWrite: trackInFlightWrite,
+  });
 }
 
 export function saveTask(task: ActionItem): QueuedWriteHandle {
