@@ -6,6 +6,7 @@ import {
   requestPersistentStorageEnable,
 } from '../services/firebase';
 import {
+  canSafelyReload,
   describeAuthVsCachePolicy,
   evaluatePersistenceOptOut,
   OptOutExecutionResult,
@@ -32,6 +33,7 @@ interface SettingsModalProps {
   language: 'ar' | 'en';
   onTriggerSimulatedConflict?: () => void;
   pendingOperationsCount?: number;
+  rejectedWritesCount?: number;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -42,6 +44,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   language,
   onTriggerSimulatedConflict,
   pendingOperationsCount = 0,
+  rejectedWritesCount = 0,
 }) => {
   const [activeTab, setActiveTab] = useState<'general' | 'assumptions'>('general');
   const [cacheState, setCacheState] = useState<CacheRuntimeState>(() => getCacheRuntimeState());
@@ -55,6 +58,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const optOutEval = evaluatePersistenceOptOut({
     pendingCount: pendingOperationsCount,
     activeMode: cacheState.activeMode,
+  });
+  const reloadSafety = canSafelyReload({
+    activeMode: cacheState.activeMode,
+    pendingOperationsCount,
+    rejectedWritesCount,
   });
 
   const handleTogglePersistentStorage = (checked: boolean) => {
@@ -72,16 +80,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const handleConfirmOptOut = async () => {
     setIsClearingCache(true);
     try {
-      const result = await optOutPersistentStorageAndClearCache();
+      const result = await optOutPersistentStorageAndClearCache({
+        pendingOperationsCount,
+        hasPendingWrites: pendingOperationsCount > 0,
+      });
       setOptOutResult(result);
       setCacheState(getCacheRuntimeState());
-      setOptOutConfirmOpen(false);
+      if (!result.blockedByPendingWrites && !result.blockedByOtherTabs) {
+        setOptOutConfirmOpen(false);
+      }
     } finally {
       setIsClearingCache(false);
     }
   };
 
   const handleReloadApp = () => {
+    if (reloadSafety.blocked) {
+      return;
+    }
     if (typeof window !== 'undefined') {
       window.location.reload();
     }
@@ -214,11 +230,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       </strong>{' '}
                       لأن إعدادات Firestore تُطبَّق عند بدء التشغيل فقط.
                     </p>
+                    {reloadSafety.reasonArabic && (
+                      <div
+                        data-testid="reload-blocked-warning"
+                        className="p-2 bg-rose-100 border border-rose-300 rounded-lg text-[11px] font-bold text-rose-950 leading-relaxed"
+                      >
+                        {reloadSafety.reasonArabic}
+                      </div>
+                    )}
                     <button
                       type="button"
                       data-testid="reload-app-button"
+                      disabled={reloadSafety.blocked}
                       onClick={handleReloadApp}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-800 text-white font-semibold text-[11px] transition-colors"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-800 text-white font-semibold text-[11px] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <RefreshCw className="w-3.5 h-3.5" />
                       <span>إعادة تحميل التطبيق الآن</span>
@@ -237,15 +262,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     }`}
                   >
                     <p className="text-[11px] font-medium leading-relaxed">{optOutResult.messageArabic}</p>
-                    <button
-                      type="button"
-                      data-testid="reload-after-optout-button"
-                      onClick={handleReloadApp}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-stone-900 hover:bg-stone-800 text-white font-semibold text-[11px] transition-colors"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5" />
-                      <span>إعادة تشغيل التطبيق الآن</span>
-                    </button>
+                    {optOutResult.requiresReload && (
+                      <>
+                        {reloadSafety.reasonArabic && (
+                          <div className="p-2 bg-rose-100 border border-rose-300 rounded-lg text-[11px] font-bold text-rose-950 leading-relaxed">
+                            {reloadSafety.reasonArabic}
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          data-testid="reload-after-optout-button"
+                          disabled={reloadSafety.blocked}
+                          onClick={handleReloadApp}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-stone-900 hover:bg-stone-800 text-white font-semibold text-[11px] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" />
+                          <span>إعادة تشغيل التطبيق الآن</span>
+                        </button>
+                      </>
+                    )}
                   </div>
                 )}
 
@@ -327,11 +362,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       <button
                         type="button"
                         data-testid="confirm-optout-button"
-                        disabled={isClearingCache}
+                        disabled={isClearingCache || !optOutEval.canProceedImmediately}
                         onClick={handleConfirmOptOut}
-                        className="px-3 py-1.5 rounded-lg bg-rose-700 hover:bg-rose-800 text-white font-semibold disabled:opacity-50"
+                        className="px-3 py-1.5 rounded-lg bg-rose-700 hover:bg-rose-800 text-white font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        {isClearingCache ? 'جاري المسح...' : 'تأكيد التعطيل ومسح البيانات المحلية'}
+                        {isClearingCache
+                          ? 'جاري المسح...'
+                          : !optOutEval.canProceedImmediately
+                          ? 'مقفل لحين إتمام المزامنة'
+                          : 'تأكيد التعطيل ومسح البيانات المحلية'}
                       </button>
                     </div>
                   </div>

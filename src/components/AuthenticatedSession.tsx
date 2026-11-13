@@ -45,8 +45,15 @@ import {
   saveNote as fbSaveNote,
   deleteNote as fbDeleteNote,
 } from '../services/firebase';
-import { AlertTriangle, WifiOff, RefreshCw, X } from 'lucide-react';
-import { OperationCoordinator, WriteErrorClassification } from '../utils/sessionState';
+import { AlertTriangle, WifiOff, RefreshCw, X, Download, Copy, Check } from 'lucide-react';
+import {
+  OperationCoordinator,
+  WriteErrorClassification,
+  applyScopedConfirmation,
+  applyScopedRejection,
+  serializeRejectedDraftJson,
+  formatRejectedDraftClipboardText,
+} from '../utils/sessionState';
 
 interface AuthenticatedSessionProps {
   user: User;
@@ -106,8 +113,9 @@ export function AuthenticatedSession({
     notes: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
   });
 
-  // Preserved rejected writes (ensuring post-reconnect permission/validation failures never lose user work)
+  // Preserved rejected writes (stored ONLY in React session memory — never auto-saved to localStorage)
   const [rejectedWrites, setRejectedWrites] = useState<RejectedWriteRecord[]>([]);
+  const [copiedDraftOpId, setCopiedDraftOpId] = useState<string | null>(null);
 
   const [conflicts, setConflicts] = useState<ConflictItem[]>([]);
   const [activeConflict, setActiveConflict] = useState<ConflictItem | null>(null);
@@ -158,6 +166,25 @@ export function AuthenticatedSession({
     isOnline,
     rejectedWritesCount: rejectedWrites.length,
   });
+
+  // Protect user against accidental browser reload/close when pending writes live only in RAM or rejected drafts exist in React memory
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const shouldWarnOnUnload =
+      (cacheRuntime.activeMode === 'memory' && syncSummary.pendingOperationsCount > 0) ||
+      rejectedWrites.length > 0;
+    if (!shouldWarnOnUnload) return;
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [cacheRuntime.activeMode, syncSummary.pendingOperationsCount, rejectedWrites.length]);
 
   // Initialize Isolated Subscriptions for this User UID
   useEffect(() => {
@@ -296,7 +323,7 @@ export function AuthenticatedSession({
     }));
   };
 
-  // Helper to record a rejected write without losing user's work
+  // Helper to record a rejected write without losing user's work (respects wasSuperseded)
   const recordRejectedWrite = (params: {
     opId: string;
     entityType: RejectedWriteRecord['entityType'];
@@ -306,7 +333,9 @@ export function AuthenticatedSession({
     classification: WriteErrorClassification;
     error: Error;
     payload?: Client | Meeting | ActionItem | Note;
+    wasSuperseded?: boolean;
   }) => {
+    if (params.wasSuperseded) return;
     const rec: RejectedWriteRecord = {
       opId: params.opId,
       entityType: params.entityType,
@@ -319,16 +348,47 @@ export function AuthenticatedSession({
       payload: params.payload,
       occurredAt: new Date().toISOString(),
     };
-    setRejectedWrites((prev) => [
-      rec,
-      ...prev.filter((r) => !(r.entityType === params.entityType && r.entityId === params.entityId)),
-    ]);
+    setRejectedWrites((prev) =>
+      applyScopedRejection(prev, { record: rec, wasSuperseded: Boolean(params.wasSuperseded) })
+    );
   };
 
-  const clearRejectedForEntity = (entityType: RejectedWriteRecord['entityType'], entityId: string) => {
+  const clearRejectedForEntity = (
+    entityType: RejectedWriteRecord['entityType'],
+    entityId: string,
+    wasSuperseded: boolean = false
+  ) => {
     setRejectedWrites((prev) =>
-      prev.filter((r) => !(r.entityType === entityType && r.entityId === entityId))
+      applyScopedConfirmation(prev, { entityType, entityId, wasSuperseded })
     );
+  };
+
+  const handleDownloadRejectedDraft = (rec: RejectedWriteRecord) => {
+    const json = serializeRejectedDraftJson(rec);
+    const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.setAttribute('href', url);
+    anchor.setAttribute('download', `murafiq-draft-${rec.entityType}-${rec.entityId}.json`);
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const handleCopyRejectedDraft = async (rec: RejectedWriteRecord) => {
+    const text = formatRejectedDraftClipboardText(rec);
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        setCopiedDraftOpId(rec.opId);
+        setTimeout(() => {
+          setCopiedDraftOpId((current) => (current === rec.opId ? null : current));
+        }, 2000);
+      }
+    } catch (err) {
+      console.warn('Could not copy rejected draft to clipboard:', err);
+    }
   };
 
   // Safe Sign-Out Verification
@@ -393,10 +453,10 @@ export function AuthenticatedSession({
       setState: setTasks,
       applyOptimistic: applyUpsert,
       dispatchWrite: () => fbSaveTask(task),
-      onServerConfirmed: () => {
-        clearRejectedForEntity('task', task.id);
+      onServerConfirmed: ({ wasSuperseded }) => {
+        clearRejectedForEntity('task', task.id, wasSuperseded);
       },
-      onServerRejected: ({ opId, error, classification }) => {
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
         console.warn('Save task rejected by server:', error);
         recordRejectedWrite({
           opId,
@@ -407,6 +467,7 @@ export function AuthenticatedSession({
           classification,
           error,
           payload: task,
+          wasSuperseded,
         });
       },
     });
@@ -426,11 +487,11 @@ export function AuthenticatedSession({
       setState: setTasks,
       applyOptimistic: applyDelete,
       dispatchWrite: () => fbDeleteTask(taskId),
-      onServerConfirmed: () => {
+      onServerConfirmed: ({ wasSuperseded }) => {
         markDeleteInFlight('tasks', taskId, false);
-        clearRejectedForEntity('task', taskId);
+        clearRejectedForEntity('task', taskId, wasSuperseded);
       },
-      onServerRejected: ({ opId, error, classification }) => {
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
         markDeleteInFlight('tasks', taskId, false);
         console.warn('Delete task rejected by server:', error);
         recordRejectedWrite({
@@ -442,6 +503,7 @@ export function AuthenticatedSession({
           classification,
           error,
           payload: prevEntity,
+          wasSuperseded,
         });
       },
     });
@@ -468,10 +530,10 @@ export function AuthenticatedSession({
       setState: setMeetings,
       applyOptimistic: applyUpsert,
       dispatchWrite: () => fbSaveMeeting(meeting),
-      onServerConfirmed: () => {
-        clearRejectedForEntity('meeting', meeting.id);
+      onServerConfirmed: ({ wasSuperseded }) => {
+        clearRejectedForEntity('meeting', meeting.id, wasSuperseded);
       },
-      onServerRejected: ({ opId, error, classification }) => {
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
         console.warn('Save meeting rejected by server:', error);
         recordRejectedWrite({
           opId,
@@ -482,6 +544,7 @@ export function AuthenticatedSession({
           classification,
           error,
           payload: meeting,
+          wasSuperseded,
         });
       },
     });
@@ -508,10 +571,10 @@ export function AuthenticatedSession({
       setState: setClients,
       applyOptimistic: applyUpsert,
       dispatchWrite: () => fbSaveClient(client),
-      onServerConfirmed: () => {
-        clearRejectedForEntity('client', client.id);
+      onServerConfirmed: ({ wasSuperseded }) => {
+        clearRejectedForEntity('client', client.id, wasSuperseded);
       },
-      onServerRejected: ({ opId, error, classification }) => {
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
         console.warn('Save client rejected by server:', error);
         recordRejectedWrite({
           opId,
@@ -522,6 +585,7 @@ export function AuthenticatedSession({
           classification,
           error,
           payload: client,
+          wasSuperseded,
         });
       },
     });
@@ -541,11 +605,11 @@ export function AuthenticatedSession({
       setState: setClients,
       applyOptimistic: applyDelete,
       dispatchWrite: () => fbDeleteClient(clientId),
-      onServerConfirmed: () => {
+      onServerConfirmed: ({ wasSuperseded }) => {
         markDeleteInFlight('clients', clientId, false);
-        clearRejectedForEntity('client', clientId);
+        clearRejectedForEntity('client', clientId, wasSuperseded);
       },
-      onServerRejected: ({ opId, error, classification }) => {
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
         markDeleteInFlight('clients', clientId, false);
         console.warn('Delete client rejected by server:', error);
         recordRejectedWrite({
@@ -557,6 +621,7 @@ export function AuthenticatedSession({
           classification,
           error,
           payload: prevEntity,
+          wasSuperseded,
         });
       },
     });
@@ -583,10 +648,10 @@ export function AuthenticatedSession({
       setState: setNotes,
       applyOptimistic: applyUpsert,
       dispatchWrite: () => fbSaveNote(note),
-      onServerConfirmed: () => {
-        clearRejectedForEntity('note', note.id);
+      onServerConfirmed: ({ wasSuperseded }) => {
+        clearRejectedForEntity('note', note.id, wasSuperseded);
       },
-      onServerRejected: ({ opId, error, classification }) => {
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
         console.warn('Save note rejected by server:', error);
         recordRejectedWrite({
           opId,
@@ -597,6 +662,7 @@ export function AuthenticatedSession({
           classification,
           error,
           payload: note,
+          wasSuperseded,
         });
       },
     });
@@ -616,11 +682,11 @@ export function AuthenticatedSession({
       setState: setNotes,
       applyOptimistic: applyDelete,
       dispatchWrite: () => fbDeleteNote(noteId),
-      onServerConfirmed: () => {
+      onServerConfirmed: ({ wasSuperseded }) => {
         markDeleteInFlight('notes', noteId, false);
-        clearRejectedForEntity('note', noteId);
+        clearRejectedForEntity('note', noteId, wasSuperseded);
       },
-      onServerRejected: ({ opId, error, classification }) => {
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
         markDeleteInFlight('notes', noteId, false);
         console.warn('Delete note rejected by server:', error);
         recordRejectedWrite({
@@ -632,6 +698,7 @@ export function AuthenticatedSession({
           classification,
           error,
           payload: prevEntity,
+          wasSuperseded,
         });
       },
     });
@@ -825,17 +892,52 @@ export function AuthenticatedSession({
                   فشل مزامنة {rejectedWrites.length} عملية مع الخادم — تم الحفاظ على مسودتك للمراجعة
                 </span>
               </div>
+              <p
+                data-testid="rejected-drafts-memory-disclosure"
+                className="text-[11px] bg-rose-100/80 border border-rose-200 rounded-lg px-2.5 py-2 text-rose-900 leading-relaxed"
+              >
+                تنبيه مهم: هذه المسودات محفوظة حالياً في{' '}
+                <strong>ذاكرة الجلسة المؤقتة فقط (React Memory)</strong> ولا تُخزَّن تلقائياً في{' '}
+                <span className="font-mono">localStorage</span> لحماية سرية بيانات العملاء؛ وقد تُفقد عند إعادة تحميل الصفحة. يرجى تنزيلها أو نسخ محتواها قبل المغادرة.
+              </p>
               <div className="space-y-2">
                 {rejectedWrites.map((rec) => (
                   <div
                     key={rec.opId}
-                    className="bg-white border border-rose-200 rounded-lg p-2.5 flex items-start justify-between gap-2"
+                    className="bg-white border border-rose-200 rounded-lg p-2.5 flex flex-col sm:flex-row sm:items-start justify-between gap-2.5"
                   >
                     <div className="space-y-0.5 min-w-0">
                       <div className="font-bold text-stone-900 truncate">{rec.entityTitle}</div>
                       <p className="text-[11px] text-rose-800 leading-relaxed">{rec.messageArabic}</p>
                     </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
+                    <div className="flex items-center gap-1.5 flex-wrap shrink-0">
+                      <button
+                        type="button"
+                        data-testid="download-rejected-draft"
+                        onClick={() => handleDownloadRejectedDraft(rec)}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-stone-900 hover:bg-stone-800 text-white font-medium text-[11px]"
+                      >
+                        <Download className="w-3 h-3" />
+                        <span>تنزيل (JSON)</span>
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="copy-rejected-draft"
+                        onClick={() => void handleCopyRejectedDraft(rec)}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-stone-300 bg-stone-50 hover:bg-stone-100 text-stone-800 font-medium text-[11px]"
+                      >
+                        {copiedDraftOpId === rec.opId ? (
+                          <>
+                            <Check className="w-3 h-3 text-emerald-700" />
+                            <span className="text-emerald-800">تم النسخ</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3 h-3" />
+                            <span>نسخ المحتوى</span>
+                          </>
+                        )}
+                      </button>
                       <button
                         type="button"
                         onClick={() => handleRetryRejectedWrite(rec)}
@@ -999,6 +1101,7 @@ export function AuthenticatedSession({
           language={language}
           onTriggerSimulatedConflict={handleSimulateConflict}
           pendingOperationsCount={syncSummary.pendingOperationsCount}
+          rejectedWritesCount={rejectedWrites.length}
         />
       )}
 

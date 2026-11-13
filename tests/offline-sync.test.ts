@@ -12,12 +12,14 @@ import {
   isPersistentStorageEnabled,
   setPersistentStorageEnabled,
   initFirestoreInstanceWithPolicy,
+  executeSafeOptOutWithDeps,
 } from '../src/services/firebase';
 import {
   deriveCacheRuntimeState,
   evaluatePersistenceOptOut,
   formatOptOutExecutionResult,
   describeAuthVsCachePolicy,
+  canSafelyReload,
 } from '../src/utils/offlineStoragePolicy';
 
 test('Murafiq Task 003-Fix: Offline-First & Reliable Synchronization Policy Tests', async (t) => {
@@ -96,6 +98,122 @@ test('Murafiq Task 003-Fix: Offline-First & Reliable Synchronization Policy Test
     const policyDesc = describeAuthVsCachePolicy();
     assert.ok(policyDesc.authPersistenceArabic.includes('Firebase Auth'));
     assert.ok(policyDesc.firestoreCacheArabic.includes('IndexedDB'));
+  });
+
+  await t.test('4b. executeSafeOptOutWithDeps blocks disabling preference or clearing IndexedDB when pending/in-flight writes or other tabs exist', async () => {
+    let preferenceDisabled = false;
+    let terminated = false;
+    let cleared = false;
+
+    // Case 1: pendingOperationsCount > 0 -> must block BEFORE touching preference/terminate/clearIndexedDb
+    const blockedByPending = await executeSafeOptOutWithDeps({
+      pendingOperationsCount: 2,
+      hasPendingWrites: true,
+      inFlightWritesCount: 0,
+      detectOtherTabs: async () => false,
+      disablePreference: () => {
+        preferenceDisabled = true;
+      },
+      terminateDb: async () => {
+        terminated = true;
+      },
+      clearIndexedDb: async () => {
+        cleared = true;
+      },
+    });
+    assert.equal(blockedByPending.blockedByPendingWrites, true);
+    assert.equal(blockedByPending.clearedIndexedDb, false);
+    assert.equal(preferenceDisabled, false);
+    assert.equal(terminated, false);
+    assert.equal(cleared, false);
+
+    // Case 2: inFlightWritesCount > 0 -> must ALSO block inside execution function!
+    const blockedByInFlight = await executeSafeOptOutWithDeps({
+      pendingOperationsCount: 0,
+      hasPendingWrites: false,
+      inFlightWritesCount: 1,
+      detectOtherTabs: async () => false,
+      disablePreference: () => {
+        preferenceDisabled = true;
+      },
+      terminateDb: async () => {
+        terminated = true;
+      },
+      clearIndexedDb: async () => {
+        cleared = true;
+      },
+    });
+    assert.equal(blockedByInFlight.blockedByPendingWrites, true);
+    assert.equal(cleared, false);
+
+    // Case 3: another open tab detected -> blocks cleanly before terminate/clear
+    const blockedByTabs = await executeSafeOptOutWithDeps({
+      pendingOperationsCount: 0,
+      hasPendingWrites: false,
+      inFlightWritesCount: 0,
+      detectOtherTabs: async () => true,
+      disablePreference: () => {
+        preferenceDisabled = true;
+      },
+      terminateDb: async () => {
+        terminated = true;
+      },
+      clearIndexedDb: async () => {
+        cleared = true;
+      },
+    });
+    assert.equal(blockedByTabs.blockedByOtherTabs, true);
+    assert.equal(cleared, false);
+
+    // Case 4: zero pending writes and zero other tabs -> executes cleanly
+    const cleanOptOut = await executeSafeOptOutWithDeps({
+      pendingOperationsCount: 0,
+      hasPendingWrites: false,
+      inFlightWritesCount: 0,
+      detectOtherTabs: async () => false,
+      disablePreference: () => {
+        preferenceDisabled = true;
+      },
+      terminateDb: async () => {
+        terminated = true;
+      },
+      clearIndexedDb: async () => {
+        cleared = true;
+      },
+    });
+    assert.equal(cleanOptOut.preferenceDisabled, true);
+    assert.equal(cleanOptOut.clearedIndexedDb, true);
+    assert.equal(preferenceDisabled, true);
+    assert.equal(terminated, true);
+    assert.equal(cleared, true);
+  });
+
+  await t.test('4c. canSafelyReload blocks reload when memoryLocalCache has pending writes or rejected drafts exist', () => {
+    const blockedMemory = canSafelyReload({
+      activeMode: 'memory',
+      pendingOperationsCount: 2,
+      rejectedWritesCount: 0,
+    });
+    assert.equal(blockedMemory.safe, false);
+    assert.equal(blockedMemory.blocked, true);
+    assert.ok(blockedMemory.reasonArabic?.includes('الذاكرة المؤقتة'));
+
+    const blockedDrafts = canSafelyReload({
+      activeMode: 'persistent',
+      pendingOperationsCount: 0,
+      rejectedWritesCount: 1,
+    });
+    assert.equal(blockedDrafts.safe, false);
+    assert.equal(blockedDrafts.blocked, true);
+    assert.ok(blockedDrafts.reasonArabic?.includes('مسودات'));
+
+    const safeReload = canSafelyReload({
+      activeMode: 'memory',
+      pendingOperationsCount: 0,
+      rejectedWritesCount: 0,
+    });
+    assert.equal(safeReload.safe, true);
+    assert.equal(safeReload.blocked, false);
   });
 
   await t.test('5. Account sign-out safety check with pending writes & memory vs persistent warning', () => {

@@ -13,8 +13,16 @@ export interface OptOutExecutionResult {
   preferenceDisabled: boolean;
   clearedIndexedDb: boolean;
   requiresReload: boolean;
+  blockedByPendingWrites?: boolean;
+  blockedByOtherTabs?: boolean;
   errorCode?: string;
   messageArabic: string;
+}
+
+export interface ReloadSafetyCheck {
+  safe: boolean;
+  blocked: boolean;
+  reasonArabic: string | null;
 }
 
 /**
@@ -33,6 +41,39 @@ export function deriveCacheRuntimeState(params: {
     requiresReload: activeMode !== requestedMode,
     initError,
     isDefaultMemoryOnly: activeMode === 'memory' && requestedMode === 'memory',
+  };
+}
+
+/**
+ * Checks whether reloading the page/app is safe against losing unconfirmed memory writes or rejected drafts.
+ */
+export function canSafelyReload(params: {
+  activeMode: CacheMode;
+  pendingOperationsCount: number;
+  rejectedWritesCount?: number;
+}): ReloadSafetyCheck {
+  const { activeMode, pendingOperationsCount, rejectedWritesCount = 0 } = params;
+
+  if (activeMode === 'memory' && pendingOperationsCount > 0) {
+    return {
+      safe: false,
+      blocked: true,
+      reasonArabic: `تعذر إعادة التحميل الآن: التطبيق يعمل بوضع الذاكرة المؤقتة فقط (RAM) وتوجد ${pendingOperationsCount} عمليات لم تُؤكد سحابياً بعد. إعادة التحميل ستمحو هذه التعديلات نهائياً؛ انتظر اكتمال المزامنة أولاً.`,
+    };
+  }
+
+  if (rejectedWritesCount > 0) {
+    return {
+      safe: false,
+      blocked: true,
+      reasonArabic: `تم منع إعادة التحميل لوجود ${rejectedWritesCount} مسودات مرفوضة محفوظة في ذاكرة الجلسة المؤقتة فقط. نزّل المسودات أو انسخ محتواها أو أعد المحاولة أولاً لتجنب فقدانها.`,
+    };
+  }
+
+  return {
+    safe: true,
+    blocked: false,
+    reasonArabic: null,
   };
 }
 
@@ -87,7 +128,7 @@ export function evaluatePersistenceOptOut(params: {
     requiresConfirmation: true,
     pendingCount,
     pendingWarningArabic: hasPending
-      ? `تنبيه حرج: توجد حالياً ${pendingCount} عمليات تعديل محلية لم تصل للسحابة بعد. مسح التخزين المحلي قبل المزامنة قد يؤدي لفقدان هذه التعديلات نهائياً.`
+      ? `تم حظر التأكيد مؤقتاً: توجد حالياً ${pendingCount} عمليات حفظ أو حذف معلقة لم تصل للسحابة بعد. انتظر عودة الاتصال واكتمال المزامنة قبل تعطيل IndexedDB لمنع فقدان البيانات نهائياً.`
       : null,
     multiTabWarningArabic:
       'ملاحظة التبويبات المفتوحة: لمسح قاعدة IndexedDB بنجاح، يجب إغلاق جميع التبويبات الأخرى المفتوحة لتطبيق مُرافق في هذا المتصفح، وإلا ستبقى بقايا محلية حتى تُغلق التبويبات.',

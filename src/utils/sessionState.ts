@@ -1,4 +1,4 @@
-import { EntityType, WriteErrorCategory } from '../types';
+import { EntityType, RejectedWriteRecord, WriteErrorCategory } from '../types';
 
 export interface WriteErrorClassification {
   category: WriteErrorCategory;
@@ -14,15 +14,90 @@ export interface ScopedOperationHandle {
 }
 
 /**
+ * Extracts and normalizes Firestore/Firebase error codes from FirebaseError,
+ * wrapped JSON FirestoreErrorInfo errors, or gRPC/emulator error formats.
+ * Examples:
+ * - "permission-denied" -> "permission-denied"
+ * - "PERMISSION_DENIED" -> "permission-denied"
+ * - "firestore/permission-denied" -> "permission-denied"
+ */
+export function extractFirestoreErrorCode(error: unknown): string | undefined {
+  const normalize = (raw: unknown): string | undefined => {
+    if (typeof raw !== 'string') return undefined;
+    const trimmed = raw.trim().toLowerCase();
+    if (!trimmed) return undefined;
+    const withoutPrefix = trimmed.startsWith('firestore/')
+      ? trimmed.slice('firestore/'.length)
+      : trimmed;
+    return withoutPrefix.replace(/_/g, '-');
+  };
+
+  if (typeof error === 'object' && error !== null) {
+    const record = error as Record<string, unknown>;
+    const directCode = normalize(record.code);
+    if (directCode) return directCode;
+
+    if (typeof record.cause === 'object' && record.cause !== null) {
+      const causeCode = normalize((record.cause as Record<string, unknown>).code);
+      if (causeCode) return causeCode;
+    }
+  }
+
+  const rawMessage = error instanceof Error ? error.message : String(error ?? '');
+  if (rawMessage.startsWith('{') && rawMessage.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(rawMessage) as Record<string, unknown>;
+      const parsedCode = normalize(parsed.code);
+      if (parsedCode) return parsedCode;
+    } catch {
+      // Ignore invalid JSON
+    }
+  }
+
+  // Match gRPC/SDK inline codes such as "7 PERMISSION_DENIED" or "(permission-denied)"
+  const upperMatch = rawMessage.match(
+    /\b(PERMISSION_DENIED|UNAUTHENTICATED|INVALID_ARGUMENT|FAILED_PRECONDITION|UNAVAILABLE)\b/i
+  );
+  if (upperMatch) {
+    return normalize(upperMatch[1]);
+  }
+
+  const kebabMatch = rawMessage.match(
+    /\b(?:firestore\/)?(permission-denied|unauthenticated|invalid-argument|failed-precondition|unavailable)\b/i
+  );
+  if (kebabMatch) {
+    return normalize(kebabMatch[1]);
+  }
+
+  return undefined;
+}
+
+function extractCombinedErrorText(error: unknown): string {
+  const rawMessage = error instanceof Error ? error.message : String(error ?? '');
+  if (rawMessage.startsWith('{') && rawMessage.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(rawMessage) as Record<string, unknown>;
+      if (typeof parsed.error === 'string') {
+        return `${rawMessage} ${parsed.error}`.toLowerCase();
+      }
+    } catch {
+      // Ignore
+    }
+  }
+  return rawMessage.toLowerCase();
+}
+
+/**
  * Classifies Firestore or validation errors into clear categories without losing user context.
+ * Prioritizes error.code (supporting permission-denied, PERMISSION_DENIED, firestore/permission-denied, etc.).
  */
 export function classifyWriteError(
   error: unknown,
   entityType: EntityType,
   isDelete: boolean = false
 ): WriteErrorClassification {
-  const rawMessage = error instanceof Error ? error.message : String(error ?? '');
-  const lower = rawMessage.toLowerCase();
+  const normalizedCode = extractFirestoreErrorCode(error);
+  const lower = extractCombinedErrorText(error);
   const names: Record<EntityType, string> = {
     client: 'العميل',
     meeting: 'اللقاء',
@@ -32,7 +107,13 @@ export function classifyWriteError(
   const entityName = names[entityType];
   const actionVerb = isDelete ? 'حذف' : 'حفظ';
 
-  if (lower.includes('permission-denied') || lower.includes('missing or insufficient permissions')) {
+  if (
+    normalizedCode === 'permission-denied' ||
+    lower.includes('permission-denied') ||
+    lower.includes('permission_denied') ||
+    lower.includes('missing or insufficient permissions') ||
+    /false for '(create|update|delete|get|list|write)'/.test(lower)
+  ) {
     return {
       category: 'permission-denied',
       isPermanentServerRejection: true,
@@ -40,7 +121,11 @@ export function classifyWriteError(
     };
   }
 
-  if (lower.includes('unauthenticated') || lower.includes('authentication required')) {
+  if (
+    normalizedCode === 'unauthenticated' ||
+    lower.includes('unauthenticated') ||
+    lower.includes('authentication required')
+  ) {
     return {
       category: 'unauthenticated',
       isPermanentServerRejection: true,
@@ -48,7 +133,12 @@ export function classifyWriteError(
     };
   }
 
-  if (lower.includes('invalid-argument') || lower.includes('invalid data')) {
+  if (
+    normalizedCode === 'invalid-argument' ||
+    lower.includes('invalid-argument') ||
+    lower.includes('invalid_argument') ||
+    lower.includes('invalid data')
+  ) {
     return {
       category: 'invalid-argument',
       isPermanentServerRejection: true,
@@ -56,7 +146,11 @@ export function classifyWriteError(
     };
   }
 
-  if (lower.includes('failed-precondition')) {
+  if (
+    normalizedCode === 'failed-precondition' ||
+    lower.includes('failed-precondition') ||
+    lower.includes('failed_precondition')
+  ) {
     return {
       category: 'failed-precondition',
       isPermanentServerRejection: true,
@@ -64,7 +158,12 @@ export function classifyWriteError(
     };
   }
 
-  if (lower.includes('unavailable') || lower.includes('network') || lower.includes('offline')) {
+  if (
+    normalizedCode === 'unavailable' ||
+    lower.includes('unavailable') ||
+    lower.includes('network') ||
+    lower.includes('offline')
+  ) {
     return {
       category: 'unavailable',
       isPermanentServerRejection: false,
@@ -220,4 +319,81 @@ export function getArabicSaveErrorMessage(entityType: EntityType, isDelete: bool
     return `تعذر حذف ${entityName} من السحابة بسبب رفض الصلاحيات أو تعذر التنفيذ. تم استعادة السجل ومراجعته متاحة.`;
   }
   return `تعذر حفظ ${entityName} في السحابة. تمت استعادة الحالة السابقة للسجل والاحتفاظ بمسودتك للمراجعة.`;
+}
+
+/**
+ * Applies a server confirmation outcome to the rejected-writes recovery list ONLY if
+ * the operation has NOT been superseded by a newer operation on the same entity.
+ * Prevents an older operation succeeding from clearing a newer operation's failure alert.
+ */
+export function applyScopedConfirmation(
+  prev: RejectedWriteRecord[],
+  params: { entityType: EntityType; entityId: string; wasSuperseded: boolean }
+): RejectedWriteRecord[] {
+  if (params.wasSuperseded) {
+    return prev;
+  }
+  return prev.filter((r) => !(r.entityType === params.entityType && r.entityId === params.entityId));
+}
+
+/**
+ * Applies a server rejection outcome to the rejected-writes recovery list ONLY if
+ * the operation has NOT been superseded by a newer operation on the same entity.
+ * Prevents an older failure from overwriting or showing stale errors over a newer edit.
+ */
+export function applyScopedRejection(
+  prev: RejectedWriteRecord[],
+  params: { record: RejectedWriteRecord; wasSuperseded: boolean }
+): RejectedWriteRecord[] {
+  if (params.wasSuperseded) {
+    return prev;
+  }
+  return [
+    params.record,
+    ...prev.filter(
+      (r) => !(r.entityType === params.record.entityType && r.entityId === params.record.entityId)
+    ),
+  ];
+}
+
+/**
+ * Serializes a rejected draft record as portable JSON for safe user-initiated download.
+ * Never writes client PII automatically to localStorage.
+ */
+export function serializeRejectedDraftJson(rec: RejectedWriteRecord): string {
+  return JSON.stringify(
+    {
+      murafiq_draft_export: true,
+      exportedAt: new Date().toISOString(),
+      opId: rec.opId,
+      entityType: rec.entityType,
+      entityId: rec.entityId,
+      entityTitle: rec.entityTitle,
+      operation: rec.operation,
+      errorCategory: rec.category,
+      occurredAt: rec.occurredAt,
+      messageArabic: rec.messageArabic,
+      payload: rec.payload ?? null,
+    },
+    null,
+    2
+  );
+}
+
+/**
+ * Formats a rejected draft record into readable text for safe user-initiated clipboard copy.
+ */
+export function formatRejectedDraftClipboardText(rec: RejectedWriteRecord): string {
+  const lines = [
+    `مسودة مُرافق غير متزامنة (${rec.entityType} / ${rec.operation})`,
+    `العنوان: ${rec.entityTitle}`,
+    `المعرّف: ${rec.entityId}`,
+    `الوقت: ${rec.occurredAt}`,
+    `سبب الفشل: ${rec.messageArabic}`,
+  ];
+  if (rec.payload) {
+    lines.push('البيانات (JSON):');
+    lines.push(JSON.stringify(rec.payload, null, 2));
+  }
+  return lines.join('\n');
 }

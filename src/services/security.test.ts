@@ -262,8 +262,14 @@ import {
   OperationCoordinator,
   reconcileEntityFailure,
   classifyWriteError,
+  extractFirestoreErrorCode,
+  applyScopedConfirmation,
+  applyScopedRejection,
+  serializeRejectedDraftJson,
+  formatRejectedDraftClipboardText,
   getArabicSaveErrorMessage,
 } from '../utils/sessionState';
+import { RejectedWriteRecord } from '../types';
 
 // Task 003-Fix: Operation-Scoped Concurrent Recovery Tests (Replaces full-array snapshot rollback)
 test('OperationCoordinator applies optimistic state immediately while tracking serverPromise asynchronously', async () => {
@@ -418,6 +424,190 @@ test('Overlapping operations on the SAME entity: earlier Op A failure does NOT o
 
   assert.equal(opAWasSuperseded, true);
   assert.equal(clients.find((c) => c.id === 'c1')?.name, 'التعديل الأحدث الناجح');
+});
+
+test('Overlapping operations on the SAME entity: older Op 1 succeeding NEVER clears newer Op 2 failure alert (wasSuperseded)', async () => {
+  let clients: Client[] = [
+    { id: 'c1', name: 'النسخة الأساسية', createdAt: '2026-01-01', updatedAt: '2026-01-01' },
+  ];
+  const setClients = (updater: (prev: Client[]) => Client[]) => {
+    clients = updater(clients);
+  };
+  let rejectedWrites: RejectedWriteRecord[] = [];
+
+  const coord = new OperationCoordinator<Client>();
+
+  let resolveOp1!: () => void;
+  const op1Promise = new Promise<void>((res) => {
+    resolveOp1 = res;
+  });
+  let rejectOp2!: (err: Error) => void;
+  const op2Promise = new Promise<void>((_, rej) => {
+    rejectOp2 = rej;
+  });
+
+  // Op 1 starts on c1 (slow success)
+  const op1Draft: Client = { id: 'c1', name: 'تعديل ١ الأقدم', createdAt: '2026-01-01', updatedAt: '2026-01-02' };
+  const handle1 = coord.runScopedMutation({
+    entityId: 'c1',
+    entityType: 'client',
+    previousEntity: clients[0],
+    setState: setClients,
+    applyOptimistic: (prev) => prev.map((c) => (c.id === 'c1' ? op1Draft : c)),
+    dispatchWrite: () => ({ serverPromise: op1Promise }),
+    onServerConfirmed: ({ wasSuperseded }) => {
+      rejectedWrites = applyScopedConfirmation(rejectedWrites, {
+        entityType: 'client',
+        entityId: 'c1',
+        wasSuperseded,
+      });
+    },
+    onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+      rejectedWrites = applyScopedRejection(rejectedWrites, {
+        wasSuperseded,
+        record: {
+          opId,
+          entityType: 'client',
+          entityId: 'c1',
+          entityTitle: op1Draft.name,
+          operation: 'save',
+          category: classification.category,
+          messageArabic: classification.messageArabic,
+          rawMessage: error.message,
+          payload: op1Draft,
+          occurredAt: '2026-01-02T00:00:00Z',
+        },
+      });
+    },
+  });
+
+  // Op 2 supersedes Op 1 on the SAME c1 and fails with permission-denied
+  const op2Draft: Client = { id: 'c1', name: 'تعديل ٢ الأحدث', createdAt: '2026-01-01', updatedAt: '2026-01-03' };
+  const handle2 = coord.runScopedMutation({
+    entityId: 'c1',
+    entityType: 'client',
+    previousEntity: op1Draft,
+    setState: setClients,
+    applyOptimistic: (prev) => prev.map((c) => (c.id === 'c1' ? op2Draft : c)),
+    dispatchWrite: () => ({ serverPromise: op2Promise }),
+    onServerConfirmed: ({ wasSuperseded }) => {
+      rejectedWrites = applyScopedConfirmation(rejectedWrites, {
+        entityType: 'client',
+        entityId: 'c1',
+        wasSuperseded,
+      });
+    },
+    onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+      rejectedWrites = applyScopedRejection(rejectedWrites, {
+        wasSuperseded,
+        record: {
+          opId,
+          entityType: 'client',
+          entityId: 'c1',
+          entityTitle: op2Draft.name,
+          operation: 'save',
+          category: classification.category,
+          messageArabic: classification.messageArabic,
+          rawMessage: error.message,
+          payload: op2Draft,
+          occurredAt: '2026-01-03T00:00:00Z',
+        },
+      });
+    },
+  });
+
+  // Op 2 fails first (not superseded) -> failure alert recorded
+  rejectOp2(Object.assign(new Error("false for 'update' @ L152"), { code: 'permission-denied' }));
+  await handle2.serverPromise;
+  assert.equal(rejectedWrites.length, 1);
+  assert.equal(rejectedWrites[0].opId, handle2.opId);
+
+  // Now older Op 1 succeeds (wasSuperseded === true) -> MUST NOT clear Op 2's failure alert!
+  resolveOp1();
+  await handle1.serverPromise;
+  assert.equal(rejectedWrites.length, 1, 'Older Op 1 succeeding must NOT clear newer Op 2 failure alert');
+  assert.equal(rejectedWrites[0].opId, handle2.opId);
+});
+
+test('classifyWriteError recognizes Firestore error.code formats (permission-denied, PERMISSION_DENIED, emulator messages, wrapped JSON)', () => {
+  // 1. Emulator FirebaseError with code='permission-denied' and opaque rules message (exact CI failure case!)
+  const emulatorPermErr = Object.assign(new Error("false for 'create' @ L148"), {
+    code: 'permission-denied',
+  });
+  assert.equal(extractFirestoreErrorCode(emulatorPermErr), 'permission-denied');
+  assert.equal(classifyWriteError(emulatorPermErr, 'client').category, 'permission-denied');
+
+  // 2. Uppercase gRPC PERMISSION_DENIED
+  const grpcPermErr = Object.assign(new Error('7 PERMISSION_DENIED: evaluation error'), {
+    code: 'PERMISSION_DENIED',
+  });
+  assert.equal(classifyWriteError(grpcPermErr, 'client').category, 'permission-denied');
+
+  // 3. Prefixed firestore/permission-denied
+  const prefixedPermErr = Object.assign(new Error('Rejected'), {
+    code: 'firestore/permission-denied',
+  });
+  assert.equal(classifyWriteError(prefixedPermErr, 'meeting').category, 'permission-denied');
+
+  // 4. Wrapped JSON error from handleFirestoreError preserving code
+  const wrappedJsonErr = new Error(
+    JSON.stringify({
+      error: "false for 'create' @ L148",
+      code: 'permission-denied',
+      operationType: 'write',
+      path: 'users/u1/clients/c1',
+    })
+  );
+  assert.equal(classifyWriteError(wrappedJsonErr, 'client').category, 'permission-denied');
+
+  // 5. Other standard Firestore error codes
+  assert.equal(
+    classifyWriteError(Object.assign(new Error('Bad payload'), { code: 'INVALID_ARGUMENT' }), 'task').category,
+    'invalid-argument'
+  );
+  assert.equal(
+    classifyWriteError(Object.assign(new Error('No auth'), { code: 'UNAUTHENTICATED' }), 'note').category,
+    'unauthenticated'
+  );
+  assert.equal(
+    classifyWriteError(Object.assign(new Error('Precond'), { code: 'FAILED_PRECONDITION' }), 'client').category,
+    'failed-precondition'
+  );
+  assert.equal(
+    classifyWriteError(Object.assign(new Error('Offline'), { code: 'UNAVAILABLE' }), 'client').category,
+    'unavailable'
+  );
+});
+
+test('Rejected draft export formatters generate valid portable JSON/text without touching localStorage', () => {
+  const rec: RejectedWriteRecord = {
+    opId: 'client-c9-4',
+    entityType: 'client',
+    entityId: 'c9',
+    entityTitle: 'شركة المدار',
+    operation: 'save',
+    category: 'permission-denied',
+    messageArabic: 'رفض الخادم حفظ العميل',
+    rawMessage: 'permission-denied',
+    payload: {
+      id: 'c9',
+      name: 'شركة المدار',
+      phone: '+966500000001',
+      createdAt: '2026-11-13T10:00:00Z',
+      updatedAt: '2026-11-13T10:00:00Z',
+    },
+    occurredAt: '2026-11-13T10:05:00Z',
+  };
+
+  const json = serializeRejectedDraftJson(rec);
+  const parsed = JSON.parse(json);
+  assert.equal(parsed.murafiq_draft_export, true);
+  assert.equal(parsed.entityId, 'c9');
+  assert.equal(parsed.payload.name, 'شركة المدار');
+
+  const text = formatRejectedDraftClipboardText(rec);
+  assert.ok(text.includes('شركة المدار'));
+  assert.ok(text.includes('c9'));
 });
 
 test('reconcileEntityFailure and classifyWriteError handle single-entity recovery and Firestore error categories', () => {

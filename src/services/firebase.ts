@@ -189,21 +189,144 @@ export function requestPersistentStorageEnable(): CacheRuntimeState {
 }
 
 /**
- * Safely opts out of persistent IndexedDB storage:
- * 1. Clears the opt-in preference flag so future boots default to memoryLocalCache().
- * 2. Terminates the active Firestore instance and calls clearIndexedDbPersistence(db).
- * 3. Reports honestly if another open tab (failed-precondition) prevented full IndexedDB cleanup.
+ * Tracks in-flight Firestore write/delete promises dispatched in the current session
+ * so opt-out guards never clear IndexedDB while unconfirmed local mutations are active.
  */
-export async function optOutPersistentStorageAndClearCache(): Promise<OptOutExecutionResult> {
-  setPersistentStorageEnabled(false);
+let inFlightLocalWritesCount = 0;
+
+export function getInFlightLocalWritesCount(): number {
+  return inFlightLocalWritesCount;
+}
+
+function trackInFlightWrite(promise: Promise<void>): Promise<void> {
+  inFlightLocalWritesCount += 1;
+  return promise.finally(() => {
+    inFlightLocalWritesCount = Math.max(0, inFlightLocalWritesCount - 1);
+  });
+}
+
+// Multi-tab presence detection via BroadcastChannel (never blocks if unsupported)
+const TAB_PRESENCE_CHANNEL = 'murafiq_tab_presence';
+const TAB_INSTANCE_ID =
+  typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+if (typeof window !== 'undefined' && typeof BroadcastChannel !== 'undefined') {
+  try {
+    const presenceChannel = new BroadcastChannel(TAB_PRESENCE_CHANNEL);
+    presenceChannel.addEventListener('message', (event) => {
+      if (event.data?.type === 'PING' && event.data?.senderId !== TAB_INSTANCE_ID) {
+        presenceChannel.postMessage({ type: 'PONG', senderId: TAB_INSTANCE_ID });
+      }
+    });
+  } catch {
+    // Ignore restricted environment BroadcastChannel errors
+  }
+}
+
+export async function detectOtherOpenTabs(timeoutMs: number = 100): Promise<boolean> {
+  if (typeof window === 'undefined' || typeof BroadcastChannel === 'undefined') {
+    return false;
+  }
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    let channel: BroadcastChannel | null = null;
+    const finish = (detected: boolean) => {
+      if (settled) return;
+      settled = true;
+      try {
+        channel?.close();
+      } catch {
+        // Ignore close error
+      }
+      resolve(detected);
+    };
+
+    try {
+      channel = new BroadcastChannel(TAB_PRESENCE_CHANNEL);
+      channel.addEventListener('message', (event) => {
+        if (event.data?.type === 'PONG' && event.data?.senderId !== TAB_INSTANCE_ID) {
+          finish(true);
+        }
+      });
+      channel.postMessage({ type: 'PING', senderId: TAB_INSTANCE_ID });
+      setTimeout(() => finish(false), timeoutMs);
+    } catch {
+      finish(false);
+    }
+  });
+}
+
+/**
+ * Pure, dependency-injected opt-out executor that strictly enforces zero pending edits
+ * and multi-tab checks BEFORE modifying preference flags, terminating, or clearing IndexedDB.
+ */
+export async function executeSafeOptOutWithDeps(deps: {
+  pendingOperationsCount?: number;
+  hasPendingWrites?: boolean;
+  inFlightWritesCount: number;
+  detectOtherTabs: () => Promise<boolean>;
+  disablePreference: () => void;
+  terminateDb: () => Promise<void>;
+  clearIndexedDb: () => Promise<void>;
+}): Promise<OptOutExecutionResult> {
+  const effectivePendingCount = Math.max(deps.pendingOperationsCount ?? 0, deps.inFlightWritesCount);
+
+  if (deps.hasPendingWrites || effectivePendingCount > 0) {
+    return {
+      preferenceDisabled: false,
+      clearedIndexedDb: false,
+      requiresReload: false,
+      blockedByPendingWrites: true,
+      messageArabic: `تم إيقاف عملية التعطيل ومسح IndexedDB لأن هناك ${effectivePendingCount || 1} تعديلات محلية لم تُؤكد سحابياً بعد. أتمم المزامنة أولاً لتجنب فقدان البيانات.`,
+    };
+  }
+
+  const otherTabsDetected = await deps.detectOtherTabs();
+  if (otherTabsDetected) {
+    return {
+      preferenceDisabled: false,
+      clearedIndexedDb: false,
+      requiresReload: false,
+      blockedByOtherTabs: true,
+      errorCode: 'failed-precondition',
+      messageArabic:
+        'تم رصد تبويب آخر مفتوح لتطبيق مُرافق في هذا المتصفح. أغلق جميع التبويبات الأخرى أولاً حتى يتمكن التطبيق من مسح قاعدة IndexedDB بأمان دون تعارض.',
+    };
+  }
+
+  deps.disablePreference();
 
   try {
-    await terminate(db);
-    await clearIndexedDbPersistence(db);
+    await deps.terminateDb();
+    await deps.clearIndexedDb();
     return formatOptOutExecutionResult({ clearedIndexedDb: true });
   } catch (err) {
     return formatOptOutExecutionResult({ clearedIndexedDb: false, error: err });
   }
+}
+
+/**
+ * Safely opts out of persistent IndexedDB storage:
+ * 1. Enforces pending-write guard inside the execution function itself (never clears with pending edits).
+ * 2. Checks for other open tabs before terminating Firestore or clearing IndexedDB.
+ * 3. Only when safe: clears the opt-in preference flag, calls terminate(db), and clears IndexedDB.
+ * 4. Reports honestly if failed-precondition prevented IndexedDB cleanup.
+ */
+export async function optOutPersistentStorageAndClearCache(options?: {
+  pendingOperationsCount?: number;
+  hasPendingWrites?: boolean;
+}): Promise<OptOutExecutionResult> {
+  return executeSafeOptOutWithDeps({
+    pendingOperationsCount: options?.pendingOperationsCount,
+    hasPendingWrites: options?.hasPendingWrites,
+    inFlightWritesCount: inFlightLocalWritesCount,
+    detectOtherTabs: () => detectOtherOpenTabs(100),
+    disablePreference: () => setPersistentStorageEnabled(false),
+    terminateDb: () => terminate(db),
+    clearIndexedDb: () => clearIndexedDbPersistence(db),
+  });
 }
 
 export async function goOfflineFirestore(): Promise<void> {
@@ -225,6 +348,7 @@ export enum OperationType {
 
 export interface FirestoreErrorInfo {
   error: string;
+  code?: string;
   operationType: OperationType;
   path: string | null;
   authInfo: {
@@ -245,8 +369,14 @@ export function formatFirestoreError(
   operationType: OperationType,
   path: string | null
 ): FirestoreErrorInfo {
+  const code =
+    typeof error === 'object' && error !== null && 'code' in error && typeof (error as any).code === 'string'
+      ? (error as any).code
+      : undefined;
+
   return {
     error: error instanceof Error ? error.message : String(error),
+    code,
     authInfo: {
       userId: auth.currentUser?.uid,
       email: auth.currentUser?.email,
@@ -280,7 +410,11 @@ export function handleFirestoreError(
   path: string | null
 ): never {
   const errInfo = logFirestoreError(error, operationType, path);
-  throw new Error(JSON.stringify(errInfo));
+  const wrapped = new Error(JSON.stringify(errInfo));
+  if (errInfo.code) {
+    (wrapped as any).code = errInfo.code;
+  }
+  throw wrapped;
 }
 
 /**
@@ -542,8 +676,10 @@ export function saveClient(client: Client): QueuedWriteHandle {
     updatedAt: new Date().toISOString(),
   };
   const payload = sanitizeFirestorePayload(rawPayload);
-  const serverPromise = setDoc(doc(db, 'users', uid, 'clients', client.id), payload).catch((error) =>
-    handleFirestoreError(error, OperationType.WRITE, path)
+  const serverPromise = trackInFlightWrite(
+    setDoc(doc(db, 'users', uid, 'clients', client.id), payload).catch((error) =>
+      handleFirestoreError(error, OperationType.WRITE, path)
+    )
   );
   return { localAccepted: true, path, serverPromise };
 }
@@ -551,8 +687,10 @@ export function saveClient(client: Client): QueuedWriteHandle {
 export function deleteClient(clientId: string): QueuedWriteHandle {
   const uid = getAuthenticatedUid();
   const path = `users/${uid}/clients/${clientId}`;
-  const serverPromise = deleteDoc(doc(db, 'users', uid, 'clients', clientId)).catch((error) =>
-    handleFirestoreError(error, OperationType.DELETE, path)
+  const serverPromise = trackInFlightWrite(
+    deleteDoc(doc(db, 'users', uid, 'clients', clientId)).catch((error) =>
+      handleFirestoreError(error, OperationType.DELETE, path)
+    )
   );
   return { localAccepted: true, path, serverPromise };
 }
@@ -567,8 +705,10 @@ export function saveMeeting(meeting: Meeting): QueuedWriteHandle {
     updatedAt: new Date().toISOString(),
   };
   const payload = sanitizeFirestorePayload(rawPayload);
-  const serverPromise = setDoc(doc(db, 'users', uid, 'meetings', meeting.id), payload).catch((error) =>
-    handleFirestoreError(error, OperationType.WRITE, path)
+  const serverPromise = trackInFlightWrite(
+    setDoc(doc(db, 'users', uid, 'meetings', meeting.id), payload).catch((error) =>
+      handleFirestoreError(error, OperationType.WRITE, path)
+    )
   );
   return { localAccepted: true, path, serverPromise };
 }
@@ -576,8 +716,10 @@ export function saveMeeting(meeting: Meeting): QueuedWriteHandle {
 export function deleteMeeting(meetingId: string): QueuedWriteHandle {
   const uid = getAuthenticatedUid();
   const path = `users/${uid}/meetings/${meetingId}`;
-  const serverPromise = deleteDoc(doc(db, 'users', uid, 'meetings', meetingId)).catch((error) =>
-    handleFirestoreError(error, OperationType.DELETE, path)
+  const serverPromise = trackInFlightWrite(
+    deleteDoc(doc(db, 'users', uid, 'meetings', meetingId)).catch((error) =>
+      handleFirestoreError(error, OperationType.DELETE, path)
+    )
   );
   return { localAccepted: true, path, serverPromise };
 }
@@ -591,8 +733,10 @@ export function saveTask(task: ActionItem): QueuedWriteHandle {
     createdAt: task.createdAt || new Date().toISOString(),
   };
   const payload = sanitizeFirestorePayload(rawPayload);
-  const serverPromise = setDoc(doc(db, 'users', uid, 'tasks', task.id), payload).catch((error) =>
-    handleFirestoreError(error, OperationType.WRITE, path)
+  const serverPromise = trackInFlightWrite(
+    setDoc(doc(db, 'users', uid, 'tasks', task.id), payload).catch((error) =>
+      handleFirestoreError(error, OperationType.WRITE, path)
+    )
   );
   return { localAccepted: true, path, serverPromise };
 }
@@ -600,8 +744,10 @@ export function saveTask(task: ActionItem): QueuedWriteHandle {
 export function deleteTask(taskId: string): QueuedWriteHandle {
   const uid = getAuthenticatedUid();
   const path = `users/${uid}/tasks/${taskId}`;
-  const serverPromise = deleteDoc(doc(db, 'users', uid, 'tasks', taskId)).catch((error) =>
-    handleFirestoreError(error, OperationType.DELETE, path)
+  const serverPromise = trackInFlightWrite(
+    deleteDoc(doc(db, 'users', uid, 'tasks', taskId)).catch((error) =>
+      handleFirestoreError(error, OperationType.DELETE, path)
+    )
   );
   return { localAccepted: true, path, serverPromise };
 }
@@ -615,8 +761,10 @@ export function saveNote(note: Note): QueuedWriteHandle {
     createdAt: note.createdAt || new Date().toISOString(),
   };
   const payload = sanitizeFirestorePayload(rawPayload);
-  const serverPromise = setDoc(doc(db, 'users', uid, 'notes', note.id), payload).catch((error) =>
-    handleFirestoreError(error, OperationType.WRITE, path)
+  const serverPromise = trackInFlightWrite(
+    setDoc(doc(db, 'users', uid, 'notes', note.id), payload).catch((error) =>
+      handleFirestoreError(error, OperationType.WRITE, path)
+    )
   );
   return { localAccepted: true, path, serverPromise };
 }
@@ -624,8 +772,10 @@ export function saveNote(note: Note): QueuedWriteHandle {
 export function deleteNote(noteId: string): QueuedWriteHandle {
   const uid = getAuthenticatedUid();
   const path = `users/${uid}/notes/${noteId}`;
-  const serverPromise = deleteDoc(doc(db, 'users', uid, 'notes', noteId)).catch((error) =>
-    handleFirestoreError(error, OperationType.DELETE, path)
+  const serverPromise = trackInFlightWrite(
+    deleteDoc(doc(db, 'users', uid, 'notes', noteId)).catch((error) =>
+      handleFirestoreError(error, OperationType.DELETE, path)
+    )
   );
   return { localAccepted: true, path, serverPromise };
 }
