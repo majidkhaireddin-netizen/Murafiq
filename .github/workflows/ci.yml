@@ -41,3 +41,6 @@ jobs:
 
       - name: Run Mandatory Firebase Emulator Security Integration Tests
         run: npm run test:rules
+
+      - name: Run Offline-First Emulator Integration Tests
+        run: npm run test:offline

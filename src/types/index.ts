@@ -75,6 +75,8 @@ export type EntityType = 'client' | 'meeting' | 'task' | 'note';
 
 export type ResolutionChoice = 'keep_local' | 'keep_remote' | 'merge';
 
+export type ConflictDetectionSource = 'simulated_dev' | 'manual_review' | 'field_diff';
+
 export interface ConflictItem {
   id: string;
   entityType: EntityType;
@@ -88,6 +90,45 @@ export interface ConflictItem {
     remoteValue: any;
   }[];
   detectedAt: string;
+  isSimulated?: boolean;
+  detectionSource?: ConflictDetectionSource;
+}
+
+export type CacheMode = 'memory' | 'persistent';
+
+export interface CacheInitError {
+  code?: string;
+  messageArabic: string;
+  detail: string;
+}
+
+export interface CacheRuntimeState {
+  activeMode: CacheMode;
+  requestedMode: CacheMode;
+  requiresReload: boolean;
+  initError: CacheInitError | null;
+  isDefaultMemoryOnly: boolean;
+}
+
+export type WriteErrorCategory =
+  | 'permission-denied'
+  | 'unauthenticated'
+  | 'invalid-argument'
+  | 'failed-precondition'
+  | 'unavailable'
+  | 'unknown';
+
+export interface RejectedWriteRecord {
+  opId: string;
+  entityType: EntityType;
+  entityId: string;
+  entityTitle: string;
+  operation: 'save' | 'delete';
+  category: WriteErrorCategory;
+  messageArabic: string;
+  rawMessage: string;
+  payload?: Client | Meeting | ActionItem | Note;
+  occurredAt: string;
 }
 
 export interface AppState {

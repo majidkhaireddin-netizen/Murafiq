@@ -42,7 +42,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSuccess, language }) =
 
           <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-950/80 text-emerald-300 border border-emerald-800/80 text-[11px] font-semibold mb-2">
             <Shield className="w-3 h-3 text-emerald-400" />
-            <span>{language === 'ar' ? 'بيئة سحابية مشفرة ومعزولة' : 'Encrypted & Isolated Cloud'}</span>
+            <span>{language === 'ar' ? 'بيئة سحابية معزولة لكل مستخدم' : 'Isolated Per-User Cloud'}</span>
           </div>
 
           <h2 className="font-heading font-extrabold text-xl sm:text-2xl tracking-tight text-white">
@@ -127,8 +127,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSuccess, language }) =
 
             <p className="text-[11px] text-center text-stone-500 leading-relaxed px-2">
               {language === 'ar'
-                ? 'تسجيل الدخول الإلزامي بحساب Google يضمن عزل بيانات عملائك واجتماعاتك في مسارك الخاص المشفر ومنع وصول أي أطراف أخرى إليها.'
-                : 'Mandatory Google authentication guarantees isolated per-user Firestore storage and cryptographic data protection.'}
+                ? 'تسجيل الدخول الإلزامي بحساب Google يضمن عزل بيانات عملائك واجتماعاتك في مسارك الخاص ومنع وصول أي أطراف أخرى إليها.'
+                : 'Mandatory Google authentication guarantees isolated per-user Firestore storage and access control.'}
             </p>
           </div>
         </div>

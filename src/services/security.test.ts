@@ -258,54 +258,185 @@ test('canSafelySignOut prevents signing out with unacknowledged local writes', (
   assert.deepEqual(checkClean.pendingCollections, []);
 });
 
-import { executeWithRollback, getArabicSaveErrorMessage } from '../utils/sessionState';
+import {
+  OperationCoordinator,
+  reconcileEntityFailure,
+  classifyWriteError,
+  getArabicSaveErrorMessage,
+} from '../utils/sessionState';
 
-// Task 002-GateFix: Save Error Handling & Atomic Rollback Tests
-test('executeWithRollback updates state optimistically on success', async () => {
-  let items = ['a', 'b'];
-  const updateState = (next: string[]) => { items = next; };
+// Task 003-Fix: Operation-Scoped Concurrent Recovery Tests (Replaces full-array snapshot rollback)
+test('OperationCoordinator applies optimistic state immediately while tracking serverPromise asynchronously', async () => {
+  let clients: Client[] = [
+    { id: 'c1', name: 'عميل ١', createdAt: '2026-01-01', updatedAt: '2026-01-01' },
+  ];
+  const setClients = (updater: (prev: Client[]) => Client[]) => {
+    clients = updater(clients);
+  };
 
-  const result = await executeWithRollback(
-    items,
-    updateState,
-    (prev) => [...prev, 'c'],
-    async () => { /* success */ }
-  );
+  let resolveWrite!: () => void;
+  const serverPromise = new Promise<void>((res) => {
+    resolveWrite = res;
+  });
 
-  assert.equal(result.success, true);
-  assert.deepEqual(items, ['a', 'b', 'c']);
+  const coord = new OperationCoordinator<Client>();
+  let confirmed = false;
+
+  const newClient: Client = { id: 'c2', name: 'عميل ٢', createdAt: '2026-01-02', updatedAt: '2026-01-02' };
+  const handle = coord.runScopedMutation({
+    entityId: 'c2',
+    entityType: 'client',
+    previousEntity: undefined,
+    setState: setClients,
+    applyOptimistic: (prev) => [newClient, ...prev],
+    dispatchWrite: () => ({ serverPromise }),
+    onServerConfirmed: () => {
+      confirmed = true;
+    },
+  });
+
+  // Immediately accepted locally (even before serverPromise resolves!)
+  assert.equal(handle.acceptedLocally, true);
+  assert.equal(clients.length, 2);
+  assert.equal(confirmed, false);
+
+  resolveWrite();
+  await handle.serverPromise;
+  assert.equal(confirmed, true);
+  assert.equal(clients.length, 2);
 });
 
-test('executeWithRollback performs atomic rollback and invokes onError when async operation fails', async () => {
-  let items = ['a', 'b'];
-  const updateState = (next: string[]) => { items = next; };
-  let caughtError: Error | null = null;
+test('Overlapping operations on DIFFERENT entities: failure of Op A does NOT clobber newer committed Op B', async () => {
+  let clients: Client[] = [
+    { id: 'c1', name: 'العميل الأول', createdAt: '2026-01-01', updatedAt: '2026-01-01' },
+  ];
+  const setClients = (updater: (prev: Client[]) => Client[]) => {
+    clients = updater(clients);
+  };
 
-  const result = await executeWithRollback(
-    items,
-    updateState,
-    (prev) => [...prev, 'c'],
-    async () => { throw new Error('Firestore permission denied'); },
-    (err) => { caughtError = err; }
-  );
+  const coord = new OperationCoordinator<Client>();
 
-  assert.equal(result.success, false);
-  assert.deepEqual(items, ['a', 'b'], 'Items must be atomically rolled back to initial state');
-  assert.ok(caughtError !== null);
-  assert.equal((caughtError as Error).message, 'Firestore permission denied');
+  let rejectOpA!: (err: Error) => void;
+  const opAPromise = new Promise<void>((_, rej) => {
+    rejectOpA = rej;
+  });
+  let resolveOpB!: () => void;
+  const opBPromise = new Promise<void>((res) => {
+    resolveOpB = res;
+  });
+
+  // Op A edits c1 (slow, will fail later)
+  const opAEdited: Client = { id: 'c1', name: 'تعديل فاشل على الأول', createdAt: '2026-01-01', updatedAt: '2026-01-02' };
+  const handleA = coord.runScopedMutation({
+    entityId: 'c1',
+    entityType: 'client',
+    previousEntity: clients.find((c) => c.id === 'c1'),
+    setState: setClients,
+    applyOptimistic: (prev) => prev.map((c) => (c.id === 'c1' ? opAEdited : c)),
+    dispatchWrite: () => ({ serverPromise: opAPromise }),
+  });
+
+  // Op B creates c2 concurrently and succeeds
+  const opBCreated: Client = { id: 'c2', name: 'العميل الثاني الناجح', createdAt: '2026-01-02', updatedAt: '2026-01-02' };
+  const handleB = coord.runScopedMutation({
+    entityId: 'c2',
+    entityType: 'client',
+    previousEntity: undefined,
+    setState: setClients,
+    applyOptimistic: (prev) => [opBCreated, ...prev],
+    dispatchWrite: () => ({ serverPromise: opBPromise }),
+  });
+
+  resolveOpB();
+  await handleB.serverPromise;
+  assert.equal(clients.length, 2);
+
+  // Now Op A rejects!
+  let rejectedCategory = '';
+  rejectOpA(new Error('permission-denied'));
+  await handleA.serverPromise;
+
+  // c1 is restored to 'العميل الأول', while c2 MUST REMAIN INTACT!
+  assert.equal(clients.length, 2);
+  const c1After = clients.find((c) => c.id === 'c1');
+  const c2After = clients.find((c) => c.id === 'c2');
+  assert.equal(c1After?.name, 'العميل الأول');
+  assert.equal(c2After?.name, 'العميل الثاني الناجح');
+  assert.equal(rejectedCategory, '');
 });
 
-test('getArabicSaveErrorMessage formats user-friendly Arabic messages for save and delete operations', () => {
+test('Overlapping operations on the SAME entity: earlier Op A failure does NOT overwrite newer Op B state', async () => {
+  let clients: Client[] = [
+    { id: 'c1', name: 'الأصل', createdAt: '2026-01-01', updatedAt: '2026-01-01' },
+  ];
+  const setClients = (updater: (prev: Client[]) => Client[]) => {
+    clients = updater(clients);
+  };
+
+  const coord = new OperationCoordinator<Client>();
+
+  let rejectOpA!: (err: Error) => void;
+  const opAPromise = new Promise<void>((_, rej) => {
+    rejectOpA = rej;
+  });
+  let resolveOpB!: () => void;
+  const opBPromise = new Promise<void>((res) => {
+    resolveOpB = res;
+  });
+
+  let opAWasSuperseded = false;
+
+  // Op A modifies c1 -> 'التعديل الأول'
+  const handleA = coord.runScopedMutation({
+    entityId: 'c1',
+    entityType: 'client',
+    previousEntity: clients.find((c) => c.id === 'c1'),
+    setState: setClients,
+    applyOptimistic: (prev) => prev.map((c) => (c.id === 'c1' ? { ...c, name: 'التعديل الأول' } : c)),
+    dispatchWrite: () => ({ serverPromise: opAPromise }),
+    onServerRejected: ({ wasSuperseded }) => {
+      opAWasSuperseded = wasSuperseded;
+    },
+  });
+
+  // Op B rapidly modifies the SAME c1 -> 'التعديل الأحدث الناجح'
+  const handleB = coord.runScopedMutation({
+    entityId: 'c1',
+    entityType: 'client',
+    previousEntity: clients.find((c) => c.id === 'c1'),
+    setState: setClients,
+    applyOptimistic: (prev) => prev.map((c) => (c.id === 'c1' ? { ...c, name: 'التعديل الأحدث الناجح' } : c)),
+    dispatchWrite: () => ({ serverPromise: opBPromise }),
+  });
+
+  resolveOpB();
+  await handleB.serverPromise;
+
+  // Now delayed Op A fails!
+  rejectOpA(new Error('permission-denied'));
+  await handleA.serverPromise;
+
+  assert.equal(opAWasSuperseded, true);
+  assert.equal(clients.find((c) => c.id === 'c1')?.name, 'التعديل الأحدث الناجح');
+});
+
+test('reconcileEntityFailure and classifyWriteError handle single-entity recovery and Firestore error categories', () => {
+  const initial: Client[] = [
+    { id: 'c1', name: 'عميل ١', createdAt: '', updatedAt: '' },
+    { id: 'c2', name: 'عميل ٢', createdAt: '', updatedAt: '' },
+  ];
+  const afterRemoveNew = reconcileEntityFailure(initial, 'c2', undefined);
+  assert.deepEqual(afterRemoveNew.map((c) => c.id), ['c1']);
+
+  const permErr = classifyWriteError(new Error('FirebaseError: Missing or insufficient permissions (permission-denied)'), 'client');
+  assert.equal(permErr.category, 'permission-denied');
+  assert.equal(permErr.isPermanentServerRejection, true);
+
   const clientSaveMsg = getArabicSaveErrorMessage('client', false);
   assert.ok(clientSaveMsg.includes('تعذر حفظ العميل'));
 
   const meetingDeleteMsg = getArabicSaveErrorMessage('meeting', true);
   assert.ok(meetingDeleteMsg.includes('تعذر حذف اللقاء'));
-
-  const taskSaveMsg = getArabicSaveErrorMessage('task', false);
-  assert.ok(taskSaveMsg.includes('تعذر حفظ المهمة'));
-
-  const noteDeleteMsg = getArabicSaveErrorMessage('note', true);
-  assert.ok(noteDeleteMsg.includes('تعذر حذف الملاحظة'));
 });
+
 

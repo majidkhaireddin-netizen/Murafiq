@@ -45,18 +45,28 @@ export const ConflictResolutionModal: React.FC<ConflictResolutionModalProps> = (
               <AlertTriangle className="w-5 h-5 text-white" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="font-heading font-extrabold text-base sm:text-lg">
-                  {language === 'ar' ? 'معالجة تعارض البيانات (Conflict Resolution)' : 'Data Conflict Detected'}
+                  {language === 'ar' ? 'معالجة تعارض البيانات (Conflict Resolution)' : 'Data Conflict Resolution'}
                 </h3>
                 <span className="text-[10px] bg-white/25 px-2 py-0.5 rounded-full font-bold">
                   {getEntityTypeLabel(conflict.entityType)}
                 </span>
+                {conflict.isSimulated && (
+                  <span
+                    data-testid="simulated-conflict-badge"
+                    className="text-[10px] bg-stone-900/75 text-amber-200 px-2 py-0.5 rounded-full font-bold"
+                  >
+                    محاكاة تطويرية (DEV_TEST)
+                  </span>
+                )}
               </div>
               <p className="text-xs text-white/90 mt-0.5">
-                {language === 'ar'
-                  ? 'تم تعديل هذا السجل محلياً أوفلاين بينما تم تحديثه على السحابة بالتزامن.'
-                  : 'This record was modified offline while also updated remotely on the cloud.'}
+                {conflict.isSimulated
+                  ? 'هذه معاينة اختبارية لواجهة فض التعارض فقط؛ المزامنة الفعلية في الإصدار الأول تستخدم Last-Write-Wins.'
+                  : language === 'ar'
+                  ? 'تم رصد اختلاف بين نسختين للمراجعة اليدوية قبل الحفظ.'
+                  : 'Differences detected for manual comparison and resolution.'}
               </p>
             </div>
           </div>
@@ -70,7 +80,7 @@ export const ConflictResolutionModal: React.FC<ConflictResolutionModalProps> = (
 
         {/* Entity Title Banner */}
         <div className="bg-stone-50 border-b border-stone-200 px-5 py-2.5 flex items-center justify-between text-xs">
-          <span className="text-stone-500 font-medium">العنصر المتعارض:</span>
+          <span className="text-stone-500 font-medium">العنصر المعروض:</span>
           <span className="font-bold text-stone-900 font-heading text-sm">
             {conflict.entityTitle}
           </span>

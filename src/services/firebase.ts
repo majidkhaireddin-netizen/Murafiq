@@ -5,6 +5,7 @@ import {
   signInWithPopup,
   signOut,
   onAuthStateChanged,
+  connectAuthEmulator,
   User,
 } from 'firebase/auth';
 import {
@@ -13,65 +14,205 @@ import {
   memoryLocalCache,
   persistentLocalCache,
   persistentMultipleTabManager,
+  terminate,
+  clearIndexedDbPersistence,
+  connectFirestoreEmulator,
+  disableNetwork,
+  enableNetwork,
   doc,
   collection,
-  getDocFromServer,
   onSnapshot,
   setDoc,
   deleteDoc,
-  writeBatch,
-  DocumentData,
-  SnapshotMetadata,
+  Firestore,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
-import { Client, Meeting, ActionItem, Note } from '../types';
+import {
+  CacheInitError,
+  CacheMode,
+  CacheRuntimeState,
+  Client,
+  Meeting,
+  ActionItem,
+  Note,
+} from '../types';
+import {
+  deriveCacheRuntimeState,
+  formatOptOutExecutionResult,
+  formatPersistenceInitErrorArabic,
+  OptOutExecutionResult,
+} from '../utils/offlineStoragePolicy';
 
 // Initialize Firebase App
 const app = initializeApp(firebaseConfig);
 
+const PERSISTENCE_STORAGE_KEY = 'murafiq_persist_offline';
 let memoryLocalStorage: Record<string, string> = {};
 
 /**
- * Check whether persistent offline storage (IndexedDB) is enabled by the user.
+ * Check whether persistent offline storage (IndexedDB) is requested by the user.
  * Default: false (memory-only cache for shared/untrusted devices).
  */
 export function isPersistentStorageEnabled(): boolean {
   try {
     if (typeof window !== 'undefined' && window.localStorage) {
-      return window.localStorage.getItem('murafiq_persist_offline') === 'true';
+      return window.localStorage.getItem(PERSISTENCE_STORAGE_KEY) === 'true';
     }
   } catch {}
-  return memoryLocalStorage['murafiq_persist_offline'] === 'true';
+  return memoryLocalStorage[PERSISTENCE_STORAGE_KEY] === 'true';
 }
 
 /**
- * Enable or disable persistent offline storage.
+ * Update the persistent offline storage preference flag (takes effect on Firestore initialization / reload).
  */
 export function setPersistentStorageEnabled(enabled: boolean): void {
   try {
     if (typeof window !== 'undefined' && window.localStorage) {
-      window.localStorage.setItem('murafiq_persist_offline', enabled ? 'true' : 'false');
+      window.localStorage.setItem(PERSISTENCE_STORAGE_KEY, enabled ? 'true' : 'false');
       return;
     }
   } catch {}
-  memoryLocalStorage['murafiq_persist_offline'] = enabled ? 'true' : 'false';
+  memoryLocalStorage[PERSISTENCE_STORAGE_KEY] = enabled ? 'true' : 'false';
 }
 
-// Initialize Firestore with memory or persistent cache
-let dbInstance: any;
-try {
-  const localCache = isPersistentStorageEnabled()
-    ? persistentLocalCache({ tabManager: persistentMultipleTabManager() })
-    : memoryLocalCache();
-  dbInstance = initializeFirestore(app, { localCache }, firebaseConfig.firestoreDatabaseId);
-} catch {
-  dbInstance = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+let activeCacheMode: CacheMode = 'memory';
+let cacheInitError: CacheInitError | null = null;
+
+/**
+ * Initializes Firestore with either persistentLocalCache or memoryLocalCache BEFORE use.
+ * Never claims persistence is active if initialization fails and falls back to memory.
+ */
+export function initFirestoreInstanceWithPolicy(params: {
+  preferPersistent: boolean;
+  initPersistent: () => Firestore;
+  initMemory: () => Firestore;
+  getExisting: () => Firestore;
+}): {
+  db: Firestore;
+  activeMode: CacheMode;
+  initError: CacheInitError | null;
+} {
+  const { preferPersistent, initPersistent, initMemory, getExisting } = params;
+
+  if (preferPersistent) {
+    try {
+      const instance = initPersistent();
+      return { db: instance, activeMode: 'persistent', initError: null };
+    } catch (err) {
+      const formattedError = formatPersistenceInitErrorArabic(err);
+      let fallbackDb: Firestore;
+      try {
+        fallbackDb = initMemory();
+      } catch {
+        fallbackDb = getExisting();
+      }
+      return {
+        db: fallbackDb,
+        activeMode: 'memory',
+        initError: formattedError,
+      };
+    }
+  }
+
+  try {
+    const instance = initMemory();
+    return { db: instance, activeMode: 'memory', initError: null };
+  } catch (err) {
+    return {
+      db: getExisting(),
+      activeMode: 'memory',
+      initError: formatPersistenceInitErrorArabic(err),
+    };
+  }
 }
 
-export const db = dbInstance;
+const initResult = initFirestoreInstanceWithPolicy({
+  preferPersistent: isPersistentStorageEnabled(),
+  initPersistent: () =>
+    initializeFirestore(
+      app,
+      { localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }) },
+      firebaseConfig.firestoreDatabaseId
+    ),
+  initMemory: () =>
+    initializeFirestore(
+      app,
+      { localCache: memoryLocalCache() },
+      firebaseConfig.firestoreDatabaseId
+    ),
+  getExisting: () => getFirestore(app, firebaseConfig.firestoreDatabaseId),
+});
 
-// Initialize Auth
+activeCacheMode = initResult.activeMode;
+cacheInitError = initResult.initError;
+
+export const db: Firestore = initResult.db;
+
+// Initialize Auth (Firebase Auth uses browser session persistence independently of Firestore document cache)
 export const auth = getAuth(app);
+
+// Strictly opt-in local emulator wiring for automated browser testing only
+const isEmulatorEnv =
+  typeof import.meta !== 'undefined' &&
+  (import.meta as any).env?.VITE_USE_FIREBASE_EMULATOR === 'true';
+
+if (isEmulatorEnv && typeof window !== 'undefined') {
+  const fsHost = ((import.meta as any).env?.VITE_FIRESTORE_EMULATOR_HOST as string) || '127.0.0.1:8088';
+  const [host, portStr] = fsHost.split(':');
+  const authUrl = ((import.meta as any).env?.VITE_AUTH_EMULATOR_URL as string) || 'http://127.0.0.1:9099';
+  try {
+    connectFirestoreEmulator(db, host || '127.0.0.1', parseInt(portStr || '8088', 10));
+  } catch {}
+  try {
+    connectAuthEmulator(auth, authUrl, { disableWarnings: true });
+  } catch {}
+}
+
+/**
+ * Exposes actual active Firestore cache runtime state vs requested preference.
+ */
+export function getCacheRuntimeState(): CacheRuntimeState {
+  const requestedMode: CacheMode = isPersistentStorageEnabled() ? 'persistent' : 'memory';
+  return deriveCacheRuntimeState({
+    activeMode: activeCacheMode,
+    requestedMode,
+    initError: cacheInitError,
+  });
+}
+
+/**
+ * Requests enabling persistent IndexedDB caching (requires application reload to initialize).
+ */
+export function requestPersistentStorageEnable(): CacheRuntimeState {
+  setPersistentStorageEnabled(true);
+  return getCacheRuntimeState();
+}
+
+/**
+ * Safely opts out of persistent IndexedDB storage:
+ * 1. Clears the opt-in preference flag so future boots default to memoryLocalCache().
+ * 2. Terminates the active Firestore instance and calls clearIndexedDbPersistence(db).
+ * 3. Reports honestly if another open tab (failed-precondition) prevented full IndexedDB cleanup.
+ */
+export async function optOutPersistentStorageAndClearCache(): Promise<OptOutExecutionResult> {
+  setPersistentStorageEnabled(false);
+
+  try {
+    await terminate(db);
+    await clearIndexedDbPersistence(db);
+    return formatOptOutExecutionResult({ clearedIndexedDb: true });
+  } catch (err) {
+    return formatOptOutExecutionResult({ clearedIndexedDb: false, error: err });
+  }
+}
+
+export async function goOfflineFirestore(): Promise<void> {
+  await disableNetwork(db);
+}
+
+export async function goOnlineFirestore(): Promise<void> {
+  await enableNetwork(db);
+}
 
 export enum OperationType {
   CREATE = 'create',
@@ -99,7 +240,11 @@ export interface FirestoreErrorInfo {
   };
 }
 
-export function formatFirestoreError(error: unknown, operationType: OperationType, path: string | null): FirestoreErrorInfo {
+export function formatFirestoreError(
+  error: unknown,
+  operationType: OperationType,
+  path: string | null
+): FirestoreErrorInfo {
   return {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
@@ -119,20 +264,27 @@ export function formatFirestoreError(error: unknown, operationType: OperationTyp
   };
 }
 
-export function logFirestoreError(error: unknown, operationType: OperationType, path: string | null): FirestoreErrorInfo {
+export function logFirestoreError(
+  error: unknown,
+  operationType: OperationType,
+  path: string | null
+): FirestoreErrorInfo {
   const errInfo = formatFirestoreError(error, operationType, path);
   console.error('Firestore Error: ', JSON.stringify(errInfo));
   return errInfo;
 }
 
-export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+export function handleFirestoreError(
+  error: unknown,
+  operationType: OperationType,
+  path: string | null
+): never {
   const errInfo = logFirestoreError(error, operationType, path);
   throw new Error(JSON.stringify(errInfo));
 }
 
 /**
  * Ensures caller is authenticated and returns the current user's UID.
- * Caller cannot supply an arbitrary UID to bypass authentication identity.
  */
 export function getAuthenticatedUid(): string {
   const user = auth.currentUser;
@@ -144,7 +296,6 @@ export function getAuthenticatedUid(): string {
 
 /**
  * Returns user-scoped collection path.
- * Enforces /users/{uid}/{subcollection} structure.
  */
 export function getUserCollectionPath(subcollection: 'clients' | 'meetings' | 'tasks' | 'notes'): string {
   const uid = getAuthenticatedUid();
@@ -159,10 +310,10 @@ export async function signInWithGoogle(): Promise<User> {
   provider.setCustomParameters({ prompt: 'select_account' });
   try {
     const result = await signInWithPopup(auth, provider);
-    // Optionally ensure user profile document exists
     if (result.user) {
       const userRef = doc(db, 'users', result.user.uid);
-      await setDoc(
+      // Do not block sign-in completion on network ack if offline/slow
+      void setDoc(
         userRef,
         {
           uid: result.user.uid,
@@ -173,7 +324,6 @@ export async function signInWithGoogle(): Promise<User> {
         },
         { merge: true }
       ).catch((err) => {
-        // Non-fatal if user document creation fails offline
         console.warn('Could not write user profile doc:', err);
       });
     }
@@ -183,9 +333,11 @@ export async function signInWithGoogle(): Promise<User> {
     if (error?.code === 'auth/popup-closed-by-user') {
       friendlyMessage = 'تم إغلاق نافذة تسجيل الدخول من قِبل المستخدم قبل إتمام العملية.';
     } else if (error?.code === 'auth/popup-blocked') {
-      friendlyMessage = 'حظر المتصفح النافذة المنبثقة. يُرجى السماح بالنوافذ المنبثقة لموقع التطبيق والمحاولة مجدداً.';
+      friendlyMessage =
+        'حظر المتصفح النافذة المنبثقة. يُرجى السماح بالنوافذ المنبثقة لموقع التطبيق والمحاولة مجدداً.';
     } else if (error?.code === 'auth/unauthorized-domain') {
-      friendlyMessage = 'نطاق التطبيق غير مصرح به في إعدادات Firebase Authentication. يُرجى إضافة نطاق التطبيق إلى Authorized Domains في Firebase Console.';
+      friendlyMessage =
+        'نطاق التطبيق غير مصرح به في إعدادات Firebase Authentication. يُرجى إضافة نطاق التطبيق إلى Authorized Domains في Firebase Console.';
     } else if (error?.code === 'auth/network-request-failed') {
       friendlyMessage = 'تعذر الاتصال بخدمة المصادقة. تحقق من اتصالك بشبكة الإنترنت.';
     } else if (error?.message) {
@@ -221,9 +373,16 @@ export async function testConnection(): Promise<boolean> {
 export interface SyncMetadata {
   fromCache: boolean;
   hasPendingWrites: boolean;
+  pendingDocIds: string[];
 }
 
-// User-Scoped Subscriptions
+export interface QueuedWriteHandle {
+  localAccepted: true;
+  path: string;
+  serverPromise: Promise<void>;
+}
+
+// User-Scoped Subscriptions with Per-Document Pending Write Metadata
 export function subscribeClients(
   onData: (clients: Client[], metadata: SyncMetadata) => void,
   onError?: (err: Error) => void
@@ -235,10 +394,17 @@ export function subscribeClients(
     { includeMetadataChanges: true },
     (snapshot) => {
       const items: Client[] = [];
-      snapshot.forEach((d) => items.push(d.data() as Client));
+      const pendingDocIds: string[] = [];
+      snapshot.forEach((d) => {
+        items.push(d.data() as Client);
+        if (d.metadata.hasPendingWrites) {
+          pendingDocIds.push(d.id);
+        }
+      });
       onData(items, {
         fromCache: snapshot.metadata.fromCache,
         hasPendingWrites: snapshot.metadata.hasPendingWrites,
+        pendingDocIds,
       });
     },
     (error) => {
@@ -259,10 +425,17 @@ export function subscribeMeetings(
     { includeMetadataChanges: true },
     (snapshot) => {
       const items: Meeting[] = [];
-      snapshot.forEach((d) => items.push(d.data() as Meeting));
+      const pendingDocIds: string[] = [];
+      snapshot.forEach((d) => {
+        items.push(d.data() as Meeting);
+        if (d.metadata.hasPendingWrites) {
+          pendingDocIds.push(d.id);
+        }
+      });
       onData(items, {
         fromCache: snapshot.metadata.fromCache,
         hasPendingWrites: snapshot.metadata.hasPendingWrites,
+        pendingDocIds,
       });
     },
     (error) => {
@@ -283,10 +456,17 @@ export function subscribeTasks(
     { includeMetadataChanges: true },
     (snapshot) => {
       const items: ActionItem[] = [];
-      snapshot.forEach((d) => items.push(d.data() as ActionItem));
+      const pendingDocIds: string[] = [];
+      snapshot.forEach((d) => {
+        items.push(d.data() as ActionItem);
+        if (d.metadata.hasPendingWrites) {
+          pendingDocIds.push(d.id);
+        }
+      });
       onData(items, {
         fromCache: snapshot.metadata.fromCache,
         hasPendingWrites: snapshot.metadata.hasPendingWrites,
+        pendingDocIds,
       });
     },
     (error) => {
@@ -307,10 +487,17 @@ export function subscribeNotes(
     { includeMetadataChanges: true },
     (snapshot) => {
       const items: Note[] = [];
-      snapshot.forEach((d) => items.push(d.data() as Note));
+      const pendingDocIds: string[] = [];
+      snapshot.forEach((d) => {
+        items.push(d.data() as Note);
+        if (d.metadata.hasPendingWrites) {
+          pendingDocIds.push(d.id);
+        }
+      });
       onData(items, {
         fromCache: snapshot.metadata.fromCache,
         hasPendingWrites: snapshot.metadata.hasPendingWrites,
+        pendingDocIds,
       });
     },
     (error) => {
@@ -344,109 +531,101 @@ export function sanitizeFirestorePayload<T extends Record<string, any>>(obj: T):
   return result;
 }
 
-// User-Scoped Protected Mutations
-export async function saveClient(client: Client): Promise<void> {
+// User-Scoped Non-Blocking Local-First Mutations (separates local acceptance from server ack)
+export function saveClient(client: Client): QueuedWriteHandle {
   const uid = getAuthenticatedUid();
   const path = `users/${uid}/clients/${client.id}`;
-  try {
-    const rawPayload: Client = {
-      ...client,
-      userId: uid,
-      createdAt: client.createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    const payload = sanitizeFirestorePayload(rawPayload);
-    await setDoc(doc(db, 'users', uid, 'clients', client.id), payload);
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
-  }
+  const rawPayload: Client = {
+    ...client,
+    userId: uid,
+    createdAt: client.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  const payload = sanitizeFirestorePayload(rawPayload);
+  const serverPromise = setDoc(doc(db, 'users', uid, 'clients', client.id), payload).catch((error) =>
+    handleFirestoreError(error, OperationType.WRITE, path)
+  );
+  return { localAccepted: true, path, serverPromise };
 }
 
-export async function deleteClient(clientId: string): Promise<void> {
+export function deleteClient(clientId: string): QueuedWriteHandle {
   const uid = getAuthenticatedUid();
   const path = `users/${uid}/clients/${clientId}`;
-  try {
-    await deleteDoc(doc(db, 'users', uid, 'clients', clientId));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
-  }
+  const serverPromise = deleteDoc(doc(db, 'users', uid, 'clients', clientId)).catch((error) =>
+    handleFirestoreError(error, OperationType.DELETE, path)
+  );
+  return { localAccepted: true, path, serverPromise };
 }
 
-export async function saveMeeting(meeting: Meeting): Promise<void> {
+export function saveMeeting(meeting: Meeting): QueuedWriteHandle {
   const uid = getAuthenticatedUid();
   const path = `users/${uid}/meetings/${meeting.id}`;
-  try {
-    const rawPayload: Meeting = {
-      ...meeting,
-      userId: uid,
-      createdAt: meeting.createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    const payload = sanitizeFirestorePayload(rawPayload);
-    await setDoc(doc(db, 'users', uid, 'meetings', meeting.id), payload);
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
-  }
+  const rawPayload: Meeting = {
+    ...meeting,
+    userId: uid,
+    createdAt: meeting.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  const payload = sanitizeFirestorePayload(rawPayload);
+  const serverPromise = setDoc(doc(db, 'users', uid, 'meetings', meeting.id), payload).catch((error) =>
+    handleFirestoreError(error, OperationType.WRITE, path)
+  );
+  return { localAccepted: true, path, serverPromise };
 }
 
-export async function deleteMeeting(meetingId: string): Promise<void> {
+export function deleteMeeting(meetingId: string): QueuedWriteHandle {
   const uid = getAuthenticatedUid();
   const path = `users/${uid}/meetings/${meetingId}`;
-  try {
-    await deleteDoc(doc(db, 'users', uid, 'meetings', meetingId));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
-  }
+  const serverPromise = deleteDoc(doc(db, 'users', uid, 'meetings', meetingId)).catch((error) =>
+    handleFirestoreError(error, OperationType.DELETE, path)
+  );
+  return { localAccepted: true, path, serverPromise };
 }
 
-export async function saveTask(task: ActionItem): Promise<void> {
+export function saveTask(task: ActionItem): QueuedWriteHandle {
   const uid = getAuthenticatedUid();
   const path = `users/${uid}/tasks/${task.id}`;
-  try {
-    const rawPayload: ActionItem = {
-      ...task,
-      userId: uid,
-      createdAt: task.createdAt || new Date().toISOString(),
-    };
-    const payload = sanitizeFirestorePayload(rawPayload);
-    await setDoc(doc(db, 'users', uid, 'tasks', task.id), payload);
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
-  }
+  const rawPayload: ActionItem = {
+    ...task,
+    userId: uid,
+    createdAt: task.createdAt || new Date().toISOString(),
+  };
+  const payload = sanitizeFirestorePayload(rawPayload);
+  const serverPromise = setDoc(doc(db, 'users', uid, 'tasks', task.id), payload).catch((error) =>
+    handleFirestoreError(error, OperationType.WRITE, path)
+  );
+  return { localAccepted: true, path, serverPromise };
 }
 
-export async function deleteTask(taskId: string): Promise<void> {
+export function deleteTask(taskId: string): QueuedWriteHandle {
   const uid = getAuthenticatedUid();
   const path = `users/${uid}/tasks/${taskId}`;
-  try {
-    await deleteDoc(doc(db, 'users', uid, 'tasks', taskId));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
-  }
+  const serverPromise = deleteDoc(doc(db, 'users', uid, 'tasks', taskId)).catch((error) =>
+    handleFirestoreError(error, OperationType.DELETE, path)
+  );
+  return { localAccepted: true, path, serverPromise };
 }
 
-export async function saveNote(note: Note): Promise<void> {
+export function saveNote(note: Note): QueuedWriteHandle {
   const uid = getAuthenticatedUid();
   const path = `users/${uid}/notes/${note.id}`;
-  try {
-    const rawPayload: Note = {
-      ...note,
-      userId: uid,
-      createdAt: note.createdAt || new Date().toISOString(),
-    };
-    const payload = sanitizeFirestorePayload(rawPayload);
-    await setDoc(doc(db, 'users', uid, 'notes', note.id), payload);
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
-  }
+  const rawPayload: Note = {
+    ...note,
+    userId: uid,
+    createdAt: note.createdAt || new Date().toISOString(),
+  };
+  const payload = sanitizeFirestorePayload(rawPayload);
+  const serverPromise = setDoc(doc(db, 'users', uid, 'notes', note.id), payload).catch((error) =>
+    handleFirestoreError(error, OperationType.WRITE, path)
+  );
+  return { localAccepted: true, path, serverPromise };
 }
 
-export async function deleteNote(noteId: string): Promise<void> {
+export function deleteNote(noteId: string): QueuedWriteHandle {
   const uid = getAuthenticatedUid();
   const path = `users/${uid}/notes/${noteId}`;
-  try {
-    await deleteDoc(doc(db, 'users', uid, 'notes', noteId));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
-  }
+  const serverPromise = deleteDoc(doc(db, 'users', uid, 'notes', noteId)).catch((error) =>
+    handleFirestoreError(error, OperationType.DELETE, path)
+  );
+  return { localAccepted: true, path, serverPromise };
 }

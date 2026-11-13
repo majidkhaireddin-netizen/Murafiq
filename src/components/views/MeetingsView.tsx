@@ -38,6 +38,7 @@ interface MeetingsViewProps {
   clients: Client[];
   tasks: ActionItem[];
   onSaveMeeting: (meeting: Meeting) => Promise<void> | void;
+  onSaveTask?: (task: ActionItem) => Promise<void> | void;
   onOpenPdfModal: (meeting: Meeting) => void;
   onNewTaskFromMeeting: (meeting: Meeting) => void;
   selectedMeetingId?: string | null;
@@ -51,6 +52,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
   clients,
   tasks,
   onSaveMeeting,
+  onSaveTask,
   onOpenPdfModal,
   onNewTaskFromMeeting,
   selectedMeetingId,
@@ -267,10 +269,10 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
             provenance: 'approved',
             createdAt: new Date().toISOString(),
           };
-          // Call the task creation via prop if needed, or dispatch to onNewTaskFromMeeting flow
-          onSaveMeeting(activeMeeting); // Ensures meeting is fresh
-          // Save task to app
-          tasks.push(newTask);
+          onSaveMeeting(activeMeeting);
+          if (onSaveTask) {
+            void onSaveTask(newTask);
+          }
           count++;
         }
       }
@@ -657,8 +659,8 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
                       </div>
                       <div className="flex items-center gap-2">
                         {liveSavedNotice && (
-                          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-300 bg-emerald-800/80 px-2 py-0.5 rounded-full animate-pulse">
-                            <Check className="w-3 h-3" /> تم الحفظ في قاعدة البيانات
+                          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-300 bg-emerald-800/80 px-2 py-0.5 rounded-full">
+                            <Check className="w-3 h-3" /> تم الحفظ في قائمة المزامنة
                           </span>
                         )}
                         <button

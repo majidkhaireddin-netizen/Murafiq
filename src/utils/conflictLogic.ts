@@ -20,12 +20,20 @@ export const FIELD_LABELS_ARABIC: Record<string, string> = {
 };
 
 /**
- * Detect differences between a local offline version and a remote cloud version
+ * Conflict Policy (v1.0):
+ * - Native Firestore offline synchronization uses Last-Write-Wins (LWW) at the server upon reconnect.
+ * - Automatic detection of concurrent multi-device edits before overwrite requires schema versioning
+ *   (e.g., monotonic revision/version fields checked via Firestore transactions), which is NOT implemented in v1.0.
+ * - `detectEntityConflict` performs a field-level diff for manual comparison or simulated UI testing (`DEV_TEST`).
  */
 export function detectEntityConflict(
   local: Record<string, any>,
   remote: Record<string, any>,
-  entityType: EntityType
+  entityType: EntityType,
+  options?: {
+    isSimulated?: boolean;
+    detectionSource?: ConflictItem['detectionSource'];
+  }
 ): ConflictItem | null {
   if (!local || !remote || local.id !== remote.id) return null;
 
@@ -76,6 +84,8 @@ export function detectEntityConflict(
     remoteVersion: remote as any,
     differingFields,
     detectedAt: new Date().toISOString(),
+    isSimulated: options?.isSimulated ?? false,
+    detectionSource: options?.detectionSource ?? 'field_diff',
   };
 }
 

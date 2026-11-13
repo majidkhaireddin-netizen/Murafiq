@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { SyncState } from '../types';
+import { CacheMode, SyncState } from '../types';
+import { DetailedSyncSummary } from '../utils/syncLogic';
 import {
   Search,
   Lock,
@@ -11,14 +12,16 @@ import {
   AlertTriangle,
   XCircle,
   HelpCircle,
-  Languages,
   LogOut,
-  User as UserIcon,
+  WifiOff,
+  Database,
 } from 'lucide-react';
 import { User } from 'firebase/auth';
 
 interface HeaderProps {
   syncState: SyncState;
+  syncSummary?: DetailedSyncSummary;
+  activeCacheMode?: CacheMode;
   onSyncStateChange: (state: SyncState) => void;
   onOpenSearch: () => void;
   onTriggerLock: () => void;
@@ -35,7 +38,8 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({
   syncState,
-  onSyncStateChange,
+  syncSummary,
+  activeCacheMode = 'memory',
   onOpenSearch,
   onTriggerLock,
   isMobileFrame,
@@ -50,18 +54,37 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const [showSyncPopover, setShowSyncPopover] = useState(false);
 
+  const isOnline = syncSummary?.isOnline ?? true;
+  const pendingCount = syncSummary?.pendingOperationsCount ?? 0;
+
   const getSyncBadge = () => {
     switch (syncState) {
       case 'local':
         return {
-          icon: <HardDrive className="w-3.5 h-3.5 text-stone-600" />,
-          label: language === 'ar' ? 'محلي فقط' : 'Local Only',
-          className: 'bg-stone-100 text-stone-700 border-stone-200 hover:bg-stone-200',
+          icon: !isOnline ? (
+            <WifiOff className="w-3.5 h-3.5 text-amber-700" />
+          ) : (
+            <HardDrive className="w-3.5 h-3.5 text-stone-600" />
+          ),
+          label:
+            language === 'ar'
+              ? syncSummary?.labelArabic || (!isOnline ? 'غير متصل' : 'محلي فقط')
+              : syncSummary?.labelEnglish || (!isOnline ? 'Offline' : 'Local Only'),
+          className: !isOnline
+            ? 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100'
+            : 'bg-stone-100 text-stone-700 border-stone-200 hover:bg-stone-200',
         };
       case 'pending':
         return {
-          icon: <RefreshCw className="w-3.5 h-3.5 text-amber-600 animate-spin" />,
-          label: language === 'ar' ? 'قيد المزامنة' : 'Syncing...',
+          icon: !isOnline ? (
+            <WifiOff className="w-3.5 h-3.5 text-amber-700" />
+          ) : (
+            <RefreshCw className="w-3.5 h-3.5 text-amber-600 animate-spin" />
+          ),
+          label:
+            language === 'ar'
+              ? syncSummary?.labelArabic || `قيد المزامنة (${pendingCount || 1})`
+              : syncSummary?.labelEnglish || `Syncing (${pendingCount || 1})`,
           className: 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100',
         };
       case 'synced':
@@ -72,14 +95,20 @@ export const Header: React.FC<HeaderProps> = ({
         };
       case 'conflict':
         return {
-          icon: <AlertTriangle className="w-3.5 h-3.5 text-orange-600 animate-bounce" />,
-          label: language === 'ar' ? `تعارض بيانات (${conflictCount || 1})` : `Conflict (${conflictCount || 1})`,
+          icon: <AlertTriangle className="w-3.5 h-3.5 text-orange-600" />,
+          label:
+            language === 'ar'
+              ? `تعارض (${conflictCount || 1})`
+              : `Conflict (${conflictCount || 1})`,
           className: 'bg-orange-100 text-orange-900 border-orange-300 hover:bg-orange-200 ring-2 ring-orange-400/50',
         };
       case 'failed':
         return {
           icon: <XCircle className="w-3.5 h-3.5 text-rose-600" />,
-          label: language === 'ar' ? 'فشل المزامنة' : 'Sync Failed',
+          label:
+            language === 'ar'
+              ? syncSummary?.labelArabic || 'خطأ مزامنة'
+              : syncSummary?.labelEnglish || 'Sync Failed',
           className: 'bg-rose-50 text-rose-800 border-rose-200 hover:bg-rose-100',
         };
     }
@@ -112,9 +141,11 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Action Controls & Sync State */}
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-          {/* Offline/Sync State Badge with Popover */}
+          {/* Real Firestore Offline/Sync State Badge with Popover */}
           <div className="relative">
             <button
+              type="button"
+              data-testid="sync-status-badge"
               onClick={() => {
                 if (syncState === 'conflict' && onOpenConflictModal) {
                   onOpenConflictModal();
@@ -126,11 +157,11 @@ export const Header: React.FC<HeaderProps> = ({
                 syncState === 'conflict'
                   ? 'انقر لمعالجة تعارض البيانات'
                   : language === 'ar'
-                  ? 'حالة التخزين والمزامنة (انقر للتغيير)'
-                  : 'Storage & Sync status (Click to toggle)'
+                  ? 'تفاصيل حالة الاتصال والمزامنة'
+                  : 'Connection & Sync Details'
               }
               className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${syncBadge.className}`}
-              aria-label="Toggle sync states"
+              aria-label="Sync status details"
             >
               {syncBadge.icon}
               <span className="hidden xs:inline">{syncBadge.label}</span>
@@ -138,12 +169,13 @@ export const Header: React.FC<HeaderProps> = ({
 
             {showSyncPopover && (
               <div
-                className="absolute top-full mt-2 rtl:right-0 ltr:left-0 w-72 max-w-[290px] bg-white rounded-xl shadow-xl border border-stone-200 p-3.5 z-50 animate-in fade-in zoom-in-95"
+                data-testid="sync-status-popover"
+                className="absolute top-full mt-2 rtl:right-0 ltr:left-0 w-76 max-w-[305px] bg-white rounded-xl shadow-xl border border-stone-200 p-3.5 z-50 animate-in fade-in zoom-in-95"
                 onMouseLeave={() => setShowSyncPopover(false)}
               >
                 <div className="flex items-center justify-between mb-2 pb-1.5 border-b border-stone-100">
                   <span className="text-xs font-bold text-stone-800">
-                    {language === 'ar' ? 'حالة التزامن اللحظية' : 'Real-time Sync Status'}
+                    {language === 'ar' ? 'حالة التزامن والاتصال' : 'Sync & Connectivity Status'}
                   </span>
                   <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${syncBadge.className}`}>
                     {syncBadge.label}
@@ -151,26 +183,47 @@ export const Header: React.FC<HeaderProps> = ({
                 </div>
                 <div className="text-[11px] text-stone-600 space-y-2 leading-relaxed">
                   <p>
-                    {syncState === 'synced' && (language === 'ar'
-                      ? 'كافة التعديلات والبيانات مؤكدة ومحفوظة بنجاح على خادم السحابة الآمن.'
-                      : 'All changes and records are confirmed and synchronized with the cloud server.')}
-                    {syncState === 'pending' && (language === 'ar'
-                      ? 'توجد تعديلات محلية بانتظار التأكيد من الخادم السحابي. لا تغلق التطبيق أو تسجل الخروج.'
-                      : 'Local changes are queued and waiting for server confirmation.')}
-                    {syncState === 'local' && (language === 'ar'
-                      ? 'البيانات تُعرض من الذاكرة المحلية المؤقتة بانتظار استجابة الخادم.'
-                      : 'Data is loaded from local memory cache awaiting server response.')}
-                    {syncState === 'conflict' && (language === 'ar'
-                      ? 'تم رصد اختلاف بين نسختك والنسخة السحابية. انقر على الشارة لحسم التعارض.'
-                      : 'A conflict was detected between local and remote versions. Click badge to resolve.')}
-                    {syncState === 'failed' && (language === 'ar'
-                      ? 'تعذر الاتصال بخادم السحابة. تحقق من اتصال الإنترنت.'
-                      : 'Could not connect to the cloud server. Check your network connection.')}
-                  </p>
-                  <div className="pt-2 border-t border-stone-100 text-[10px] text-stone-400">
                     {language === 'ar'
-                      ? 'يتم تتبع حالة المزامنة تلقائياً عبر مراقبة مجموعات العملاء واللقاءات والمهام والملاحظات.'
-                      : 'Sync state is monitored automatically across clients, meetings, tasks, and notes.'}
+                      ? syncSummary?.descriptionArabic
+                      : syncSummary?.descriptionEnglish}
+                  </p>
+
+                  <div className="bg-stone-50 border border-stone-200/80 rounded-lg p-2 space-y-1 text-[10px]">
+                    <div className="flex items-center justify-between">
+                      <span className="text-stone-500">حالة الشبكة:</span>
+                      <span className={`font-bold ${isOnline ? 'text-emerald-700' : 'text-amber-700'}`}>
+                        {isOnline ? 'متصل بالشبكة' : 'غير متصل (Offline)'}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-stone-500">التخزين المحلي النشط:</span>
+                      <span className="font-semibold text-stone-800 flex items-center gap-1">
+                        <Database className="w-3 h-3 text-stone-500" />
+                        {activeCacheMode === 'persistent'
+                          ? 'دائم (IndexedDB)'
+                          : 'الذاكرة فقط (RAM)'}
+                      </span>
+                    </div>
+                    {pendingCount > 0 && (
+                      <div className="flex items-center justify-between">
+                        <span className="text-stone-500">تعديلات بانتظار السحابة:</span>
+                        <span className="font-bold text-amber-700">{pendingCount}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="pt-1 flex items-center justify-between border-t border-stone-100 text-[10px]">
+                    <span className="text-stone-400">مراقبة تلقائية عبر Firestore</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowSyncPopover(false);
+                        onOpenSettings();
+                      }}
+                      className="text-emerald-700 hover:text-emerald-800 font-semibold"
+                    >
+                      إعدادات التخزين
+                    </button>
                   </div>
                 </div>
               </div>
@@ -187,7 +240,7 @@ export const Header: React.FC<HeaderProps> = ({
             <Search className="w-4 h-4" />
           </button>
 
-          {/* Biometric Security Lock (Clearly labeled as Demo Screen Lock per Requirement 7) */}
+          {/* Biometric Security Lock (Demo Only) */}
           <button
             onClick={onTriggerLock}
             className="p-1.5 text-stone-600 hover:text-amber-700 hover:bg-amber-50 rounded-lg transition-colors"
@@ -206,7 +259,7 @@ export const Header: React.FC<HeaderProps> = ({
             {language === 'ar' ? 'EN' : 'عربي'}
           </button>
 
-          {/* Frame Toggle (Phone mockup vs Fluid desktop) */}
+          {/* Frame Toggle */}
           <button
             onClick={onToggleFrame}
             className="p-1.5 text-stone-600 hover:text-stone-900 hover:bg-stone-100 rounded-lg transition-colors hidden md:flex items-center gap-1 text-xs"
@@ -226,11 +279,12 @@ export const Header: React.FC<HeaderProps> = ({
             )}
           </button>
 
-          {/* Help / Settings */}
+          {/* Settings */}
           <button
             onClick={onOpenSettings}
+            data-testid="open-settings-button"
             className="p-1.5 text-stone-500 hover:text-stone-800 hover:bg-stone-100 rounded-lg transition-colors"
-            title={language === 'ar' ? 'الإعدادات وفرضيات التصميم' : 'Settings & Design Assumptions'}
+            title={language === 'ar' ? 'الإعدادات والتخزين المحلي' : 'Settings & Offline Storage'}
             aria-label="Settings"
           >
             <HelpCircle className="w-4 h-4" />
@@ -258,6 +312,7 @@ export const Header: React.FC<HeaderProps> = ({
               {onLogOut && (
                 <button
                   onClick={onLogOut}
+                  data-testid="signout-button"
                   className="p-1.5 text-stone-500 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
                   title={language === 'ar' ? 'تسجيل الخروج' : 'Sign out'}
                   aria-label="Sign out"
