@@ -66,6 +66,21 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
 
   for (const dbId of dbTargets) {
     await t.test(`Database Target [${dbId}]: Security & Data Isolation Assertions`, async (st) => {
+      // 0. Explicit Strict Security Enforcement Guard (Requirement B.5)
+      await st.test(`0. Explicit security rules enforcement check (detects wide-open rules)`, async () => {
+        const unauthCtx = testEnv.unauthenticatedContext();
+        const unauthDb = getDbInstance(unauthCtx, dbId);
+        const forbiddenRef = doc(unauthDb, `users/${USER_A_UID}/clients/guard_test`);
+        try {
+          await setDoc(forbiddenRef, { id: 'guard_test', userId: USER_A_UID, name: 'should fail' });
+          throw new Error('SECURITY_RULES_NOT_ENFORCED: Firestore emulator allowed unauthenticated write. Rules were not loaded or are wide open.');
+        } catch (err: any) {
+          if (err.message && err.message.includes('SECURITY_RULES_NOT_ENFORCED')) {
+            throw err;
+          }
+        }
+      });
+
       // 1. Unauthenticated access denied
       await st.test(`1. Unauthenticated users cannot read or write protected records on ${dbId}`, async () => {
         const unauthCtx = testEnv.unauthenticatedContext();
@@ -384,6 +399,19 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
         await assertFails(getDoc(doc(bobDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_server_1`)));
         await assertFails(getDocs(collection(bobDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments`)));
         await assertFails(deleteDoc(doc(bobDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_server_1`)));
+
+        // Unauthenticated user CANNOT read, list, write, or delete attachments or uploadIntents
+        const unauthCtx = testEnv.unauthenticatedContext();
+        const unauthDb = getDbInstance(unauthCtx, dbId);
+        await assertFails(getDoc(doc(unauthDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_server_1`)));
+        await assertFails(getDocs(collection(unauthDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments`)));
+        await assertFails(
+          setDoc(doc(unauthDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_unauth`), {
+            id: 'att_unauth',
+          })
+        );
+        await assertFails(deleteDoc(doc(unauthDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_server_1`)));
+        await assertFails(getDoc(doc(unauthDb, `users/${USER_A_UID}/meetings/meet_att_1/uploadIntents/att_server_1`)));
       });
     });
   }

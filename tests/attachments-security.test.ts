@@ -1176,13 +1176,13 @@ test('Task 004-A & Fix-01 Security, Integrity & Reliability Suite (Backblaze B2 
           sizeBytes: JPEG_HEADER.byteLength,
         }),
       });
-      const concurrentCleanupPromise = fetch(`${baseUrl}/api/attachments/cleanup-uncommitted`, {
+      await new Promise((r) => setTimeout(r, 10));
+      const cleanRes = await fetch(`${baseUrl}/api/attachments/cleanup-uncommitted`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
         body: JSON.stringify({ meetingId: MEETING_A, attachmentId: d2.attachmentId }),
       });
-
-      const [compRes, cleanRes] = await Promise.all([completePromise, concurrentCleanupPromise]);
+      const compRes = await completePromise;
       setSlowCommitMs(0);
 
       assert.equal(compRes.status, 200);

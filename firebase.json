@@ -3,10 +3,6 @@
     {
       "database": "ai-studio-murafiq-cb988db3-5a07-40b7-b1ca-8eaaae894475",
       "rules": "firestore.rules"
-    },
-    {
-      "database": "(default)",
-      "rules": "firestore.rules"
     }
   ],
   "emulators": {
