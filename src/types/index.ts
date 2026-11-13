@@ -144,3 +144,27 @@ export interface AppState {
   showHijri: boolean;
   language: 'ar' | 'en';
 }
+
+export type AllowedAttachmentMimeType =
+  | 'image/jpeg'
+  | 'image/png'
+  | 'image/webp'
+  | 'application/pdf';
+
+export type AttachmentUploadStatus = 'completed';
+
+export interface MeetingAttachment {
+  id: string;
+  userId: string;
+  meetingId: string;
+  fileName: string;
+  contentType: AllowedAttachmentMimeType;
+  sizeBytes: number;
+  storageKey: string;
+  storageProvider: 'backblaze_b2';
+  uploadStatus: AttachmentUploadStatus;
+  etag?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+

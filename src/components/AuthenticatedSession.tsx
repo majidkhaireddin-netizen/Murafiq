@@ -1019,6 +1019,7 @@ export function AuthenticatedSession({
               onSelectMeetingChange={(m: Meeting | null) => setSelectedMeetingId(m ? m.id : null)}
               preselectedClientId={preselectedClientIdForMeeting}
               language={language}
+              isOnline={isOnline}
             />
           )}
 

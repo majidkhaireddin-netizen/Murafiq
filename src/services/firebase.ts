@@ -35,6 +35,7 @@ import {
   Meeting,
   ActionItem,
   Note,
+  MeetingAttachment,
 } from '../types';
 import {
   deriveCacheRuntimeState,
@@ -429,6 +430,17 @@ export function getAuthenticatedUid(): string {
 }
 
 /**
+ * Returns a Firebase ID Token for authenticating backend API requests.
+ */
+export async function getCurrentUserIdToken(forceRefresh: boolean = false): Promise<string> {
+  const user = auth.currentUser;
+  if (!user || !user.uid) {
+    throw new Error('يجب تسجيل الدخول بحساب Google أولاً لتنفيذ هذه العملية.');
+  }
+  return user.getIdToken(forceRefresh);
+}
+
+/**
  * Returns user-scoped collection path.
  */
 export function getUserCollectionPath(subcollection: 'clients' | 'meetings' | 'tasks' | 'notes'): string {
@@ -778,4 +790,70 @@ export function deleteNote(noteId: string): QueuedWriteHandle {
     )
   );
   return { localAccepted: true, path, serverPromise };
+}
+
+// =========================================================================
+// Meeting Attachments Metadata (Backblaze B2 metadata only — no secrets/URLs)
+// =========================================================================
+
+export function subscribeMeetingAttachments(
+  meetingId: string,
+  onData: (attachments: MeetingAttachment[]) => void,
+  onError?: (err: Error) => void
+) {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/meetings/${meetingId}/attachments`;
+  const colRef = collection(db, 'users', uid, 'meetings', meetingId, 'attachments');
+
+  return onSnapshot(
+    colRef,
+    (snapshot) => {
+      const items: MeetingAttachment[] = [];
+      snapshot.forEach((d) => {
+        items.push(d.data() as MeetingAttachment);
+      });
+      items.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+      onData(items);
+    },
+    (error) => {
+      logFirestoreError(error, OperationType.LIST, path);
+      if (onError) onError(error as Error);
+    }
+  );
+}
+
+/**
+ * Persists verified Backblaze B2 attachment metadata to Firestore named DB.
+ * Must ONLY be called AFTER the backend confirms the object exists and passed validation in B2.
+ */
+export async function saveMeetingAttachmentMetadata(attachment: MeetingAttachment): Promise<void> {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/meetings/${attachment.meetingId}/attachments/${attachment.id}`;
+  const payload = sanitizeFirestorePayload({
+    ...attachment,
+    userId: uid,
+  });
+
+  await trackInFlightWrite(
+    setDoc(doc(db, 'users', uid, 'meetings', attachment.meetingId, 'attachments', attachment.id), payload).catch(
+      (error) => handleFirestoreError(error, OperationType.CREATE, path)
+    )
+  );
+}
+
+/**
+ * Removes attachment metadata from Firestore named DB.
+ * Must ONLY be called AFTER backend confirms deletion from Backblaze B2 succeeded.
+ */
+export async function deleteMeetingAttachmentMetadata(
+  meetingId: string,
+  attachmentId: string
+): Promise<void> {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/meetings/${meetingId}/attachments/${attachmentId}`;
+  await trackInFlightWrite(
+    deleteDoc(doc(db, 'users', uid, 'meetings', meetingId, 'attachments', attachmentId)).catch((error) =>
+      handleFirestoreError(error, OperationType.DELETE, path)
+    )
+  );
 }

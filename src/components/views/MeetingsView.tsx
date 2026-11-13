@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Meeting, Client, ActionItem, MeetingType, MeetingStatus, TaskPriority } from '../../types';
 import { formatArabicDate, applyMeetingTemplate, insertMeetingSnippet } from '../../utils/logic';
 import { ProvenanceBadge } from '../ProvenanceBadge';
+import { MeetingAttachmentsSection } from '../MeetingAttachmentsSection';
 import {
   MEETING_TEMPLATES,
   FAST_SNIPPETS,
@@ -45,6 +46,7 @@ interface MeetingsViewProps {
   onSelectMeetingChange?: (meeting: Meeting | null) => void;
   preselectedClientId?: string | null;
   language: 'ar' | 'en';
+  isOnline?: boolean;
 }
 
 export const MeetingsView: React.FC<MeetingsViewProps> = ({
@@ -59,6 +61,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
   onSelectMeetingChange,
   preselectedClientId,
   language,
+  isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true,
 }) => {
   const [filterStatus, setFilterStatus] = useState<'all' | 'draft' | 'confirmed' | 'completed'>('all');
   const [viewMode, setViewMode] = useState<'timeline' | 'calendar'>('timeline');
@@ -314,20 +317,6 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
     } catch (err) {
       console.warn('MeetingsView: Save meeting failed, keeping modal open for retry:', err);
     }
-  };
-
-  const handleAddSamplePhoto = () => {
-    if (!editingMeeting) return;
-    const samplePhotos = [
-      'https://images.unsplash.com/photo-1531403009284-440f080d1e12?w=600&auto=format&fit=crop&q=80',
-      'https://images.unsplash.com/photo-1542744094-3a31f272c490?w=600&auto=format&fit=crop&q=80',
-      'https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?w=600&auto=format&fit=crop&q=80',
-    ];
-    const nextPhoto = samplePhotos[(editingMeeting.photoPaths?.length || 0) % samplePhotos.length];
-    setEditingMeeting({
-      ...editingMeeting,
-      photoPaths: [...(editingMeeting.photoPaths || []), nextPhoto],
-    });
   };
 
   return (
@@ -954,6 +943,12 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
                   </div>
                 </div>
               )}
+
+              {/* Real Backblaze B2 Meeting Attachments (Images & PDF Documents) */}
+              <MeetingAttachmentsSection
+                meetingId={activeMeeting.id}
+                isOnline={isOnline}
+              />
             </div>
           </div>
         </div>
@@ -1175,39 +1170,31 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
                 />
               </div>
 
-              {/* Photo attachments */}
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="font-semibold text-stone-700">الصور المرفقة (لوحات بيضاء / ملاحظات ورقية)</label>
-                  <button
-                    type="button"
-                    onClick={handleAddSamplePhoto}
-                    className="text-[11px] font-semibold text-emerald-700 hover:text-emerald-800"
-                  >
-                    + إرفاق صورة تجريبية
-                  </button>
+              {/* Attachments Guidance & Legacy Photo Cleanup */}
+              <div className="p-2.5 rounded-xl bg-stone-50 border border-stone-200 space-y-2">
+                <div className="text-[11px] text-stone-700 leading-relaxed">
+                  <strong>المرفقات والملفات الخاصة:</strong> بعد حفظ اللقاء، يمكنك إرفاق الصور ومستندات PDF مباشرة عبر زر «إضافة مرفق» في نافذة تفاصيل اللقاء.
                 </div>
-                <div className="flex items-center gap-2 overflow-x-auto py-1">
-                  {editingMeeting.photoPaths?.map((p, i) => (
-                    <div key={i} className="relative w-14 h-14 rounded-lg overflow-hidden border border-stone-200 shrink-0">
-                      <img src={p} alt="attached" className="w-full h-full object-cover" />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const updated = [...(editingMeeting.photoPaths || [])];
-                          updated.splice(i, 1);
-                          setEditingMeeting({ ...editingMeeting, photoPaths: updated });
-                        }}
-                        className="absolute top-0.5 right-0.5 p-0.5 bg-rose-600 text-white rounded-full"
-                      >
-                        <X className="w-2.5 h-2.5" />
-                      </button>
-                    </div>
-                  ))}
-                  {(!editingMeeting.photoPaths || editingMeeting.photoPaths.length === 0) && (
-                    <span className="text-[11px] text-stone-400">لا توجد صور مرفقة بعد.</span>
-                  )}
-                </div>
+                {editingMeeting.photoPaths && editingMeeting.photoPaths.length > 0 && (
+                  <div className="flex items-center gap-2 overflow-x-auto py-1">
+                    {editingMeeting.photoPaths.map((p, i) => (
+                      <div key={i} className="relative w-14 h-14 rounded-lg overflow-hidden border border-stone-200 shrink-0">
+                        <img src={p} alt="attached" className="w-full h-full object-cover" />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const updated = [...(editingMeeting.photoPaths || [])];
+                            updated.splice(i, 1);
+                            setEditingMeeting({ ...editingMeeting, photoPaths: updated });
+                          }}
+                          className="absolute top-0.5 right-0.5 p-0.5 bg-rose-600 text-white rounded-full"
+                        >
+                          <X className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div className="flex items-center justify-end gap-2 pt-3 border-t border-stone-100">

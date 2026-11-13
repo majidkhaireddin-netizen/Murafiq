@@ -287,6 +287,123 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
         const clientsSnap = await assertSucceeds(getDocs(collection(aliceDb, `users/${USER_A_UID}/clients`)));
         assert.equal(clientsSnap.empty, true);
       });
+
+      // 8b. Meeting Attachments Subcollection Security Rules
+      await st.test(`8b. Meeting attachments subcollection isolation & validation on ${dbId}`, async () => {
+        const aliceCtx = testEnv.authenticatedContext(USER_A_UID);
+        const aliceDb = getDbInstance(aliceCtx, dbId);
+        const bobCtx = testEnv.authenticatedContext(USER_B_UID);
+        const bobDb = getDbInstance(bobCtx, dbId);
+
+        // Master Gate: attachment creation fails if parent meeting does not exist
+        const orphanAttRef = doc(aliceDb, `users/${USER_A_UID}/meetings/missing_meet/attachments/att_1`);
+        await assertFails(
+          setDoc(orphanAttRef, {
+            id: 'att_1',
+            userId: USER_A_UID,
+            meetingId: 'missing_meet',
+            fileName: 'notes.jpg',
+            contentType: 'image/jpeg',
+            sizeBytes: 2048,
+            storageKey: `users/${USER_A_UID}/meetings/missing_meet/attachments/att_1`,
+            storageProvider: 'backblaze_b2',
+            uploadStatus: 'completed',
+            createdAt: '2026-11-13T10:00:00.000Z',
+          })
+        );
+
+        // Create parent meeting first
+        await assertSucceeds(
+          setDoc(doc(aliceDb, `users/${USER_A_UID}/meetings/meet_att_1`), {
+            id: 'meet_att_1',
+            userId: USER_A_UID,
+            clientId: 'client_1',
+            title: 'لقاء مرفقات Backblaze',
+            dateTime: '2026-11-15T10:00:00.000Z',
+            type: 'in_person',
+            status: 'confirmed',
+            notes: 'توثيق المرفقات',
+            createdAt: '2026-11-13T10:00:00.000Z',
+          })
+        );
+
+        // Valid attachment metadata succeeds
+        const validAttRef = doc(aliceDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_valid_1`);
+        await assertSucceeds(
+          setDoc(validAttRef, {
+            id: 'att_valid_1',
+            userId: USER_A_UID,
+            meetingId: 'meet_att_1',
+            fileName: 'contract.pdf',
+            contentType: 'application/pdf',
+            sizeBytes: 4096,
+            storageKey: `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_valid_1`,
+            storageProvider: 'backblaze_b2',
+            uploadStatus: 'completed',
+            createdAt: '2026-11-13T10:05:00.000Z',
+          })
+        );
+        await assertSucceeds(getDoc(validAttRef));
+        await assertSucceeds(getDocs(collection(aliceDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments`)));
+
+        // Immutable update denied
+        await assertFails(updateDoc(validAttRef, { fileName: 'tampered.pdf' }));
+
+        // Cross-user Bob denied
+        await assertFails(getDoc(doc(bobDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_valid_1`)));
+        await assertFails(
+          deleteDoc(doc(bobDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_valid_1`))
+        );
+
+        // Disallowed MIME / size > 10MB / forged storageKey denied
+        await assertFails(
+          setDoc(doc(aliceDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_bad_mime`), {
+            id: 'att_bad_mime',
+            userId: USER_A_UID,
+            meetingId: 'meet_att_1',
+            fileName: 'evil.html',
+            contentType: 'text/html',
+            sizeBytes: 1024,
+            storageKey: `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_bad_mime`,
+            storageProvider: 'backblaze_b2',
+            uploadStatus: 'completed',
+            createdAt: '2026-11-13T10:05:00.000Z',
+          })
+        );
+
+        await assertFails(
+          setDoc(doc(aliceDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_too_big`), {
+            id: 'att_too_big',
+            userId: USER_A_UID,
+            meetingId: 'meet_att_1',
+            fileName: 'big.pdf',
+            contentType: 'application/pdf',
+            sizeBytes: 10485761,
+            storageKey: `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_too_big`,
+            storageProvider: 'backblaze_b2',
+            uploadStatus: 'completed',
+            createdAt: '2026-11-13T10:05:00.000Z',
+          })
+        );
+
+        await assertFails(
+          setDoc(doc(aliceDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_bad_key`), {
+            id: 'att_bad_key',
+            userId: USER_A_UID,
+            meetingId: 'meet_att_1',
+            fileName: 'ok.jpg',
+            contentType: 'image/jpeg',
+            sizeBytes: 1024,
+            storageKey: `users/${USER_B_UID}/meetings/meet_att_1/attachments/att_bad_key`,
+            storageProvider: 'backblaze_b2',
+            uploadStatus: 'completed',
+            createdAt: '2026-11-13T10:05:00.000Z',
+          })
+        );
+
+        // Owner delete succeeds
+        await assertSucceeds(deleteDoc(validAttRef));
+      });
     });
   }
 

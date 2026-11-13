@@ -80,6 +80,26 @@
         "createdAt": { "type": "string", "maxLength": 50 }
       },
       "required": ["id", "title", "content", "createdAt"]
+    },
+    "MeetingAttachment": {
+      "title": "MeetingAttachment",
+      "description": "Metadata for an attachment stored in Backblaze B2 under a user's meeting.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "meetingId": { "type": "string", "maxLength": 128 },
+        "fileName": { "type": "string", "maxLength": 255 },
+        "contentType": { "type": "string", "enum": ["image/jpeg", "image/png", "image/webp", "application/pdf"] },
+        "sizeBytes": { "type": "number" },
+        "storageKey": { "type": "string", "maxLength": 512 },
+        "storageProvider": { "type": "string", "enum": ["backblaze_b2"] },
+        "uploadStatus": { "type": "string", "enum": ["completed"] },
+        "etag": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "userId", "meetingId", "fileName", "contentType", "sizeBytes", "storageKey", "storageProvider", "uploadStatus", "createdAt"]
     }
   },
   "firestore": {
@@ -90,6 +110,10 @@
     "/users/{userId}/meetings/{meetingId}": {
       "schema": { "$ref": "entities/Meeting" },
       "description": "Stores user-isolated meetings, agendas, minutes, and photos"
+    },
+    "/users/{userId}/meetings/{meetingId}/attachments/{attachmentId}": {
+      "schema": { "$ref": "entities/MeetingAttachment" },
+      "description": "Stores user-isolated Backblaze B2 attachment metadata scoped to a meeting"
     },
     "/users/{userId}/tasks/{taskId}": {
       "schema": { "$ref": "entities/Task" },
