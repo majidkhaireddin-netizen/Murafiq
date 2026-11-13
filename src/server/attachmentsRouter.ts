@@ -4,9 +4,11 @@ import type { Request, Response, NextFunction } from 'express';
 import {
   buildAttachmentStorageKey,
   isValidResourceId,
+  MAX_ATTACHMENT_SIZE_BYTES,
   PRESIGNED_DOWNLOAD_TTL_SECONDS,
   PRESIGNED_UPLOAD_TTL_SECONDS,
   validateAttachmentFileRequest,
+  verifyMagicBytes,
 } from '../utils/attachmentPolicy.ts';
 import { createBackblazeB2StorageService, type B2StorageService } from './b2Storage.ts';
 import {
@@ -55,6 +57,79 @@ function rejectIfCallerTriedPathOrUidSpoofing(
   return null;
 }
 
+function encodeRfc5987HeaderValue(fileName: string): string {
+  return encodeURIComponent(fileName).replace(
+    /['()*!]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`
+  );
+}
+
+async function readBinaryBodyCapped(req: Request, maxBytes: number): Promise<Uint8Array> {
+  if (Buffer.isBuffer(req.body)) {
+    if (req.body.byteLength > maxBytes) {
+      const err: any = new Error('FILE_TOO_LARGE');
+      err.statusCode = 413;
+      throw err;
+    }
+    return new Uint8Array(req.body);
+  }
+  if (req.body instanceof Uint8Array) {
+    if (req.body.byteLength > maxBytes) {
+      const err: any = new Error('FILE_TOO_LARGE');
+      err.statusCode = 413;
+      throw err;
+    }
+    return req.body;
+  }
+
+  return new Promise<Uint8Array>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    let settled = false;
+
+    const cleanup = () => {
+      req.off('data', onData);
+      req.off('end', onEnd);
+      req.off('error', onError);
+    };
+
+    const fail = (err: any) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    };
+
+    const onData = (chunk: Buffer | string) => {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += buf.byteLength;
+      if (totalBytes > maxBytes) {
+        req.pause();
+        const err: any = new Error('FILE_TOO_LARGE');
+        err.statusCode = 413;
+        fail(err);
+        return;
+      }
+      chunks.push(buf);
+    };
+
+    const onEnd = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(new Uint8Array(Buffer.concat(chunks, totalBytes)));
+    };
+
+    const onError = (err: Error) => {
+      fail(err);
+    };
+
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onError);
+  });
+}
+
 export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) {
   const router = express.Router();
   const verifyToken = customDeps.verifyBearerToken ?? verifyFirebaseBearerToken;
@@ -72,10 +147,25 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
       req.authUser = user;
       next();
     } catch (err: any) {
-      res.status(401).json({
-        error: 'UNAUTHENTICATED',
-        messageArabic: 'يجب تسجيل الدخول بحساب Google الموثّق للوصول إلى مرفقات اللقاءات.',
-        detail: process.env.NODE_ENV === 'test' ? String(err?.message || '') : undefined,
+      const code = String(err?.code || '');
+      const msg = String(err?.message || '');
+      const isAuthFailure =
+        msg.startsWith('UNAUTHENTICATED:') ||
+        (code.startsWith('auth/') && code !== 'auth/internal-error');
+
+      if (isAuthFailure) {
+        res.status(401).json({
+          error: 'UNAUTHENTICATED',
+          messageArabic: 'يجب تسجيل الدخول بحساب Google الموثّق للوصول إلى مرفقات اللقاءات.',
+          detail: process.env.NODE_ENV === 'test' ? msg : undefined,
+        });
+        return;
+      }
+
+      res.status(500).json({
+        error: 'AUTH_VERIFICATION_UNAVAILABLE',
+        messageArabic: 'تعذر التحقق من جلسة المصادقة على الخادم مؤقتاً. يرجى المحاولة مرة أخرى.',
+        detail: process.env.NODE_ENV === 'test' ? msg : undefined,
       });
     }
   };
@@ -521,6 +611,256 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
       res.status(502).json({
         error: 'CLEANUP_FAILED',
         messageArabic: 'تعذر تنظيف الملف المؤقت من Backblaze B2.',
+      });
+    }
+  });
+
+  // 6. Same-origin authenticated upload relay fallback (used when B2 bucket CORS blocks direct browser PUT)
+  router.put('/relay-upload', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const uid = req.authUser!.uid;
+      const queryObj = (req.query || {}) as Record<string, unknown>;
+      const spoofCheckObj: Record<string, unknown> = {
+        ...queryObj,
+        storageKey: req.headers['x-storage-key'] ?? queryObj.storageKey,
+        objectKey: req.headers['x-object-key'] ?? queryObj.objectKey,
+        path: req.headers['x-path'] ?? queryObj.path,
+        bucket: req.headers['x-bucket'] ?? queryObj.bucket,
+        uid: req.headers['x-uid'] ?? queryObj.uid,
+        userId: req.headers['x-user-id'] ?? queryObj.userId,
+      };
+      const spoofError = rejectIfCallerTriedPathOrUidSpoofing(spoofCheckObj, uid);
+      if (spoofError) {
+        res.status(403).json({ error: 'FORBIDDEN', messageArabic: spoofError });
+        return;
+      }
+
+      const meetingId = req.header('x-meeting-id');
+      const attachmentId = req.header('x-attachment-id');
+      const rawEncodedName = req.header('x-file-name') || '';
+      let decodedFileName = '';
+      try {
+        decodedFileName = rawEncodedName ? decodeURIComponent(rawEncodedName) : '';
+      } catch {
+        res.status(400).json({
+          error: 'INVALID_FILENAME',
+          messageArabic: 'اسم الملف في الترويسة غير صالح.',
+        });
+        return;
+      }
+
+      if (!isValidResourceId(meetingId) || !isValidResourceId(attachmentId)) {
+        res.status(400).json({
+          error: 'INVALID_RESOURCE_ID',
+          messageArabic: 'معرّف اللقاء أو المرفق غير صالح.',
+        });
+        return;
+      }
+
+      const contentTypeHeader = req.header('content-type') || '';
+      const declaredSizeHeader = Number(req.header('content-length') || '0');
+      const sizeForPrecheck =
+        Number.isFinite(declaredSizeHeader) && declaredSizeHeader > 0
+          ? declaredSizeHeader
+          : 1;
+
+      const preValidation = validateAttachmentFileRequest({
+        fileName: decodedFileName,
+        contentType: contentTypeHeader,
+        sizeBytes: sizeForPrecheck,
+      });
+
+      if (!preValidation.valid || !preValidation.normalizedContentType || !preValidation.sanitizedFileName) {
+        const status = preValidation.errorCode === 'FILE_TOO_LARGE' ? 413 : 400;
+        res.status(status).json({
+          error: preValidation.errorCode || 'VALIDATION_FAILED',
+          messageArabic: preValidation.errorArabic || 'بيانات الملف المرفوع غير صالحة.',
+        });
+        return;
+      }
+
+      const ownsMeeting = await verifyMeetingOwner({
+        uid,
+        meetingId,
+        idToken: req.authUser!.idToken,
+      });
+
+      if (!ownsMeeting) {
+        res.status(403).json({
+          error: 'MEETING_ACCESS_DENIED',
+          messageArabic: 'اللقاء غير موجود أو لا تملك صلاحية إضافة مرفقات إليه.',
+        });
+        return;
+      }
+
+      if (!storage.isConfigured()) {
+        res.status(503).json({
+          error: 'STORAGE_NOT_CONFIGURED',
+          messageArabic: 'خدمة Backblaze B2 غير مفعّلة على الخادم.',
+        });
+        return;
+      }
+
+      const bodyBytes = await readBinaryBodyCapped(req, MAX_ATTACHMENT_SIZE_BYTES);
+      const actualValidation = validateAttachmentFileRequest({
+        fileName: preValidation.sanitizedFileName,
+        contentType: preValidation.normalizedContentType,
+        sizeBytes: bodyBytes.byteLength,
+      });
+
+      if (!actualValidation.valid) {
+        const status = actualValidation.errorCode === 'FILE_TOO_LARGE' ? 413 : 400;
+        res.status(status).json({
+          error: actualValidation.errorCode || 'VALIDATION_FAILED',
+          messageArabic: actualValidation.errorArabic || 'حجم الملف غير صالح.',
+        });
+        return;
+      }
+
+      if (!verifyMagicBytes(bodyBytes.subarray(0, 16), preValidation.normalizedContentType)) {
+        res.status(422).json({
+          error: 'MAGIC_BYTES_MISMATCH',
+          messageArabic:
+            'المحتوى الفعلي للملف لا يطابق صيغته المعلنة (JPEG/PNG/WebP/PDF). تم حظر الرفع لحماية النظام.',
+        });
+        return;
+      }
+
+      const storageKey = buildAttachmentStorageKey({
+        uid,
+        meetingId,
+        attachmentId,
+      });
+
+      const uploaded = await storage.uploadObject({
+        key: storageKey,
+        contentType: preValidation.normalizedContentType,
+        body: bodyBytes,
+      });
+
+      res.json({
+        uploaded: true,
+        attachmentId,
+        storageKey,
+        sizeBytes: bodyBytes.byteLength,
+        etag: uploaded.etag,
+      });
+    } catch (err: any) {
+      if (err?.statusCode === 413 || err?.message === 'FILE_TOO_LARGE') {
+        res.status(413).json({
+          error: 'FILE_TOO_LARGE',
+          messageArabic: 'يتجاوز حجم الملف الحد الأقصى المسموح به وهو 10 ميجابايت (10 MB).',
+        });
+        return;
+      }
+      res.status(502).json({
+        error: 'RELAY_UPLOAD_FAILED',
+        messageArabic: 'تعذر تمرير الملف إلى خادم التخزين السحابي. يرجى المحاولة مرة أخرى.',
+      });
+    }
+  });
+
+  // 7. Same-origin authenticated download/view relay fallback
+  router.post('/relay-download', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const uid = req.authUser!.uid;
+      const body = (req.body || {}) as Record<string, unknown>;
+
+      const spoofError = rejectIfCallerTriedPathOrUidSpoofing(body, uid);
+      if (spoofError) {
+        res.status(403).json({ error: 'FORBIDDEN', messageArabic: spoofError });
+        return;
+      }
+
+      if (!isValidResourceId(body.meetingId) || !isValidResourceId(body.attachmentId)) {
+        res.status(400).json({
+          error: 'INVALID_RESOURCE_ID',
+          messageArabic: 'معرّف اللقاء أو المرفق غير صالح.',
+        });
+        return;
+      }
+
+      const ownsMeeting = await verifyMeetingOwner({
+        uid,
+        meetingId: body.meetingId,
+        idToken: req.authUser!.idToken,
+      });
+      if (!ownsMeeting) {
+        res.status(403).json({
+          error: 'MEETING_ACCESS_DENIED',
+          messageArabic: 'مرفوض: لا تملك صلاحية الوصول إلى مرفقات هذا اللقاء.',
+        });
+        return;
+      }
+
+      const attCheck = await verifyAttachmentOwner({
+        uid,
+        meetingId: body.meetingId,
+        attachmentId: body.attachmentId,
+        idToken: req.authUser!.idToken,
+      });
+
+      if (!attCheck.exists) {
+        res.status(404).json({
+          error: 'ATTACHMENT_NOT_FOUND',
+          messageArabic: 'المرفق المطلوب غير موجود أو لا يخص حسابك.',
+        });
+        return;
+      }
+
+      if (!storage.isConfigured()) {
+        res.status(503).json({
+          error: 'STORAGE_NOT_CONFIGURED',
+          messageArabic: 'خدمة Backblaze B2 غير مفعّلة على الخادم.',
+        });
+        return;
+      }
+
+      const expectedKey = buildAttachmentStorageKey({
+        uid,
+        meetingId: body.meetingId,
+        attachmentId: body.attachmentId,
+      });
+
+      if (attCheck.storageKey && attCheck.storageKey !== expectedKey) {
+        res.status(403).json({
+          error: 'STORAGE_KEY_MISMATCH',
+          messageArabic: 'مسار الملف المحفوظ لا يطابق مسار الحساب المصرح به.',
+        });
+        return;
+      }
+
+      const validatedMeta = validateAttachmentFileRequest({
+        fileName: attCheck.fileName || 'attachment.pdf',
+        contentType: attCheck.contentType || 'application/pdf',
+        sizeBytes: 1024,
+      });
+
+      if (!validatedMeta.valid || !validatedMeta.normalizedContentType) {
+        res.status(403).json({
+          error: 'UNSUPPORTED_STORED_TYPE',
+          messageArabic: 'نوع المرفق المسجل غير مسموح بعرضه.',
+        });
+        return;
+      }
+
+      const obj = await storage.downloadObject(expectedKey);
+      const disp = body.disposition === 'attachment' ? 'attachment' : 'inline';
+      const fileName = attCheck.fileName || validatedMeta.sanitizedFileName || 'attachment';
+      const safeFallbackName = fileName.replace(/[^\w.\- ]+/g, '_') || 'attachment';
+
+      res.setHeader('Content-Type', validatedMeta.normalizedContentType);
+      res.setHeader(
+        'Content-Disposition',
+        `${disp}; filename="${safeFallbackName}"; filename*=UTF-8''${encodeRfc5987HeaderValue(fileName)}`
+      );
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+      res.status(200).send(Buffer.from(obj.bytes));
+    } catch {
+      res.status(502).json({
+        error: 'RELAY_DOWNLOAD_FAILED',
+        messageArabic: 'تعذر جلب المرفق من التخزين السحابي عبر الخادم.',
       });
     }
   });

@@ -39,6 +39,16 @@ export interface AttachmentUploadDeps {
     onProgress?: (percent: number) => void;
     signal?: AbortSignal;
   }) => Promise<{ etag?: string }>;
+  putFileViaRelay?: (params: {
+    meetingId: string;
+    attachmentId: string;
+    fileName: string;
+    file: File;
+    contentType: string;
+    idToken: string;
+    onProgress?: (percent: number) => void;
+    signal?: AbortSignal;
+  }) => Promise<{ etag?: string }>;
   saveMetadata: (attachment: MeetingAttachment) => Promise<void>;
 }
 
@@ -169,6 +179,97 @@ function uploadFileViaXhr(params: {
   });
 }
 
+function uploadFileViaRelayXhr(params: {
+  meetingId: string;
+  attachmentId: string;
+  fileName: string;
+  file: File;
+  contentType: string;
+  idToken: string;
+  onProgress?: (percent: number) => void;
+  signal?: AbortSignal;
+}): Promise<{ etag?: string }> {
+  const { meetingId, attachmentId, fileName, file, contentType, idToken, onProgress, signal } = params;
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', '/api/attachments/relay-upload', true);
+    xhr.setRequestHeader('Authorization', `Bearer ${idToken}`);
+    xhr.setRequestHeader('Content-Type', contentType);
+    xhr.setRequestHeader('x-meeting-id', meetingId);
+    xhr.setRequestHeader('x-attachment-id', attachmentId);
+    xhr.setRequestHeader('x-file-name', encodeURIComponent(fileName));
+    xhr.timeout = 120_000;
+
+    const onAbort = () => {
+      try {
+        xhr.abort();
+      } catch {
+        // Ignore abort errors
+      }
+      reject(new AttachmentClientError('UPLOAD_ABORTED', 'تم إلغاء رفع المرفق.'));
+    };
+
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && onProgress) {
+        const pct = Math.min(100, Math.max(0, Math.round((event.loaded / event.total) * 100)));
+        onProgress(pct);
+      }
+    };
+
+    xhr.onload = () => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      let payload: any = null;
+      try {
+        payload = JSON.parse(xhr.responseText);
+      } catch {
+        payload = null;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve({ etag: payload?.etag });
+        return;
+      }
+      reject(
+        new AttachmentClientError(
+          payload?.error || 'RELAY_UPLOAD_FAILED',
+          payload?.messageArabic || `فشل رفع الملف عبر الخادم (${xhr.status}).`,
+          xhr.status
+        )
+      );
+    };
+
+    xhr.onerror = () => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      reject(
+        new AttachmentClientError(
+          'NETWORK_ERROR',
+          'تعذر الاتصال بخادم التطبيق لرفع المرفق. تحقق من اتصالك بالإنترنت ثم أعد المحاولة.'
+        )
+      );
+    };
+
+    xhr.ontimeout = () => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      reject(
+        new AttachmentClientError(
+          'UPLOAD_TIMEOUT',
+          'انتهت مهلة رفع الملف. يرجى التحقق من سرعة الإنترنت والمحاولة مرة أخرى.'
+        )
+      );
+    };
+
+    xhr.send(file);
+  });
+}
+
 async function parseJsonApiResponse<T>(res: Response): Promise<T> {
   let payload: any = null;
   try {
@@ -198,6 +299,7 @@ const defaultUploadDeps: AttachmentUploadDeps = {
   fetchApi: (...args) => fetch(...args),
   readHeaderBytes: readBrowserFileHeaderBytes,
   putFileToPresignedUrl: uploadFileViaXhr,
+  putFileViaRelay: uploadFileViaRelayXhr,
   saveMetadata: saveMeetingAttachmentMetadata,
 };
 
@@ -289,13 +391,38 @@ export async function uploadMeetingAttachmentWithDeps(
   onStageChange?.('uploading');
   onProgress?.(0);
 
-  await deps.putFileToPresignedUrl({
-    uploadUrl: presign.uploadUrl,
-    file,
-    contentType: presign.requiredHeaders['Content-Type'],
-    onProgress,
-    signal,
-  });
+  try {
+    await deps.putFileToPresignedUrl({
+      uploadUrl: presign.uploadUrl,
+      file,
+      contentType: presign.requiredHeaders['Content-Type'],
+      onProgress,
+      signal,
+    });
+  } catch (uploadErr: any) {
+    const isCorsOrDirectNetworkFailure =
+      uploadErr instanceof AttachmentClientError &&
+      uploadErr.code === 'NETWORK_ERROR' &&
+      deps.isOnline() &&
+      typeof deps.putFileViaRelay === 'function';
+
+    if (!isCorsOrDirectNetworkFailure) {
+      throw uploadErr;
+    }
+
+    // Seamless same-origin authenticated upload relay fallback when B2 CORS blocks direct browser PUT
+    onProgress?.(0);
+    await deps.putFileViaRelay!({
+      meetingId,
+      attachmentId: presign.attachmentId,
+      fileName: validation.sanitizedFileName,
+      file,
+      contentType: validation.normalizedContentType,
+      idToken,
+      onProgress,
+      signal,
+    });
+  }
 
   onProgress?.(100);
   onStageChange?.('verifying');
@@ -415,6 +542,46 @@ export async function getFreshPresignedDownloadUrl(params: {
     downloadUrl: data.downloadUrl,
     expiresAt: data.expiresAt,
     disposition,
+  };
+}
+
+export async function fetchAttachmentBlobViaRelay(params: {
+  meetingId: string;
+  attachmentId: string;
+  disposition: 'inline' | 'attachment';
+}): Promise<{ blobUrl: string; revoke: () => void }> {
+  const { meetingId, attachmentId, disposition } = params;
+
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    throw new AttachmentClientError(
+      'OFFLINE_BLOCKED',
+      'عرض أو تنزيل المرفقات يتطلب اتصالاً نشطاً بالإنترنت.'
+    );
+  }
+
+  const idToken = await getCurrentUserIdToken();
+  const res = await fetch('/api/attachments/relay-download', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+    },
+    body: JSON.stringify({
+      meetingId,
+      attachmentId,
+      disposition,
+    }),
+  });
+
+  if (!res.ok) {
+    return parseJsonApiResponse<never>(res);
+  }
+
+  const blob = await res.blob();
+  const blobUrl = URL.createObjectURL(blob);
+  return {
+    blobUrl,
+    revoke: () => URL.revokeObjectURL(blobUrl),
   };
 }
 

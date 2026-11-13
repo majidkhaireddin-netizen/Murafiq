@@ -6,6 +6,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createAttachmentsRouter } from '../src/server/attachmentsRouter.ts';
 import type { B2StorageService } from '../src/server/b2Storage.ts';
+import { verifyFirebaseTokenWithFallback } from '../src/server/firebaseServerAuth.ts';
 import {
   buildAttachmentStorageKey,
   isPresignedUrlExpired,
@@ -16,6 +17,7 @@ import {
   verifyMagicBytes,
 } from '../src/utils/attachmentPolicy.ts';
 import {
+  AttachmentClientError,
   deleteMeetingAttachmentWithDeps,
   uploadMeetingAttachmentWithDeps,
 } from '../src/services/attachments.ts';
@@ -78,6 +80,26 @@ function createMockTestServer(options?: {
         };
       }
       return { verified: true, sizeBytes: obj.sizeBytes, contentType: obj.contentType, etag: obj.etag };
+    },
+    uploadObject: async ({ key, contentType, body }) => {
+      b2Objects.set(key, {
+        sizeBytes: body.byteLength,
+        contentType,
+        headerBytes: body.subarray(0, 16),
+        etag: 'etag-relay',
+      });
+      return { etag: 'etag-relay' };
+    },
+    downloadObject: async (key) => {
+      const obj = b2Objects.get(key);
+      if (!obj) {
+        throw new Error('Object not found');
+      }
+      return {
+        bytes: obj.headerBytes,
+        contentType: obj.contentType,
+        contentLength: obj.headerBytes.byteLength,
+      };
     },
     deleteObject: async (key) => {
       if (failDelete) {
@@ -541,6 +563,236 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
         false,
         'Firestore metadata must NOT be deleted if Backblaze B2 delete fails'
       );
+    });
+  });
+
+  await t.test('9. Host ADC auth/internal-error falls back safely without masking genuine expired/revoked tokens', async () => {
+    // 9a. Cross-project IdentityToolkit auth/internal-error falls back to checkRevoked=false signature verification
+    const decodedFallback = await verifyFirebaseTokenWithFallback({
+      idToken: 'valid-jwt',
+      preferRevocationCheck: true,
+      verifyIdTokenFn: async (_token, checkRevoked) => {
+        if (checkRevoked) {
+          const err: any = new Error('identitytoolkit.googleapis.com disabled on project 537419615721');
+          err.code = 'auth/internal-error';
+          throw err;
+        }
+        return { uid: USER_A, email: 'alice@example.com', email_verified: true };
+      },
+    });
+    assert.equal(decodedFallback.uid, USER_A);
+
+    // 9b. When preferRevocationCheck is false (no explicit Firebase SA key), uses checkRevoked=false directly
+    let calledWithRevokedFlag: boolean | null = null;
+    const decodedDirect = await verifyFirebaseTokenWithFallback({
+      idToken: 'valid-jwt',
+      preferRevocationCheck: false,
+      verifyIdTokenFn: async (_token, checkRevoked) => {
+        calledWithRevokedFlag = checkRevoked;
+        return { uid: USER_A, email_verified: true };
+      },
+    });
+    assert.equal(calledWithRevokedFlag, false);
+    assert.equal(decodedDirect.uid, USER_A);
+
+    // 9c. Expired/revoked/malformed tokens MUST NOT fall back
+    for (const tokenCode of ['auth/id-token-expired', 'auth/id-token-revoked', 'auth/argument-error']) {
+      let fallbackCalled = false;
+      await assert.rejects(
+        () =>
+          verifyFirebaseTokenWithFallback({
+            idToken: 'bad-jwt',
+            preferRevocationCheck: true,
+            verifyIdTokenFn: async (_token, checkRevoked) => {
+              if (!checkRevoked) fallbackCalled = true;
+              const err: any = new Error(`Token error: ${tokenCode}`);
+              err.code = tokenCode;
+              throw err;
+            },
+          }),
+        (err: any) => err.code === tokenCode
+      );
+      assert.equal(fallbackCalled, false, `${tokenCode} must fail immediately without fallback`);
+    }
+
+    // 9d. Unexpected internal verifier error returns 500 AUTH_VERIFICATION_UNAVAILABLE instead of misleading 401
+    const outageRouter = createAttachmentsRouter({
+      verifyBearerToken: async () => {
+        const err: any = new Error('Temporary verifier outage');
+        err.code = 'auth/internal-error';
+        throw err;
+      },
+    });
+    const outageApp = express();
+    outageApp.use(express.json());
+    outageApp.use('/api/attachments', outageRouter);
+
+    await withServer(outageApp, async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/attachments/presign-upload`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer any-token',
+        },
+        body: JSON.stringify({ meetingId: MEETING_A }),
+      });
+      assert.equal(res.status, 500);
+      const data = (await res.json()) as any;
+      assert.equal(data.error, 'AUTH_VERIFICATION_UNAVAILABLE');
+    });
+  });
+
+  await t.test('10. Same-origin relay upload and download fallbacks enforce auth, ownership, size, magic bytes, and security headers', async () => {
+    const { app, b2Objects, attachmentsOwned } = createMockTestServer();
+
+    await withServer(app, async (baseUrl) => {
+      // 10a. Unauthenticated relay upload & download rejected (401)
+      const unauthRelayUp = await fetch(`${baseUrl}/api/attachments/relay-upload`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'image/jpeg',
+          'x-meeting-id': MEETING_A,
+          'x-attachment-id': 'att_unauth',
+          'x-file-name': 'photo.jpg',
+        },
+        body: JPEG_HEADER,
+      });
+      assert.equal(unauthRelayUp.status, 401);
+
+      const unauthRelayDown = await fetch(`${baseUrl}/api/attachments/relay-download`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ meetingId: MEETING_A, attachmentId: 'att_unauth' }),
+      });
+      assert.equal(unauthRelayDown.status, 401);
+
+      // 10b. Cross-user Bob relay upload rejected (403)
+      const bobRelayUp = await fetch(`${baseUrl}/api/attachments/relay-upload`, {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer token-bob',
+          'Content-Type': 'image/jpeg',
+          'x-meeting-id': MEETING_A,
+          'x-attachment-id': 'att_bob',
+          'x-file-name': 'photo.jpg',
+        },
+        body: JPEG_HEADER,
+      });
+      assert.equal(bobRelayUp.status, 403);
+
+      // 10c. Spoofing x-storage-key rejected (403)
+      const spoofRelayUp = await fetch(`${baseUrl}/api/attachments/relay-upload`, {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer token-alice',
+          'Content-Type': 'image/jpeg',
+          'x-meeting-id': MEETING_A,
+          'x-attachment-id': 'att_spoof',
+          'x-file-name': 'photo.jpg',
+          'x-storage-key': `users/${USER_B}/meetings/${MEETING_A}/attachments/evil`,
+        },
+        body: JPEG_HEADER,
+      });
+      assert.equal(spoofRelayUp.status, 403);
+
+      // 10d. Disguised HTML payload sent to /relay-upload as image/jpeg rejected (422) & never stored in B2
+      const disguisedRelayUp = await fetch(`${baseUrl}/api/attachments/relay-upload`, {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer token-alice',
+          'Content-Type': 'image/jpeg',
+          'x-meeting-id': MEETING_A,
+          'x-attachment-id': 'att_html_spoof',
+          'x-file-name': 'sneaky.jpg',
+        },
+        body: HTML_DISGUISED,
+      });
+      assert.equal(disguisedRelayUp.status, 422);
+      assert.equal(b2Objects.size, 0);
+
+      // 10e. Automatic client fallback from CORS NETWORK_ERROR on presigned PUT to same-origin /relay-upload
+      const savedRecords: MeetingAttachment[] = [];
+      let relayUsed = false;
+      const fakeJpegFile = {
+        name: 'ملاحظات_اللقاء.jpg',
+        type: 'image/jpeg',
+        size: JPEG_HEADER.byteLength,
+      } as File;
+
+      const uploaded = await uploadMeetingAttachmentWithDeps(
+        { meetingId: MEETING_A, file: fakeJpegFile },
+        {
+          isOnline: () => true,
+          getIdToken: async () => 'token-alice',
+          fetchApi: (input, init) => {
+            const url = typeof input === 'string' ? `${baseUrl}${input}` : input;
+            return fetch(url, init);
+          },
+          readHeaderBytes: async () => JPEG_HEADER,
+          putFileToPresignedUrl: async () => {
+            throw new AttachmentClientError('NETWORK_ERROR', 'Simulated CORS failure');
+          },
+          putFileViaRelay: async ({ meetingId, attachmentId, fileName, contentType, idToken }) => {
+            relayUsed = true;
+            const relayRes = await fetch(`${baseUrl}/api/attachments/relay-upload`, {
+              method: 'PUT',
+              headers: {
+                Authorization: `Bearer ${idToken}`,
+                'Content-Type': contentType,
+                'x-meeting-id': meetingId,
+                'x-attachment-id': attachmentId,
+                'x-file-name': encodeURIComponent(fileName),
+              },
+              body: JPEG_HEADER,
+            });
+            assert.equal(relayRes.status, 200);
+            return (await relayRes.json()) as { etag?: string };
+          },
+          saveMetadata: async (record) => {
+            savedRecords.push(record);
+            attachmentsOwned.set(`${USER_A}:${MEETING_A}:${record.id}`, record);
+          },
+        }
+      );
+
+      assert.equal(relayUsed, true, 'Client must fall back automatically to same-origin relay when CORS blocks direct PUT');
+      assert.equal(savedRecords.length, 1);
+      assert.equal(uploaded.storageProvider, 'backblaze_b2');
+      assert.equal(uploaded.uploadStatus, 'completed');
+
+      // 10f. Authenticated /relay-download serves attachment with strict security headers and blocks User B
+      const bobRelayDown = await fetch(`${baseUrl}/api/attachments/relay-download`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer token-bob',
+        },
+        body: JSON.stringify({
+          meetingId: MEETING_A,
+          attachmentId: uploaded.id,
+          disposition: 'inline',
+        }),
+      });
+      assert.equal(bobRelayDown.status, 403);
+
+      const aliceRelayDown = await fetch(`${baseUrl}/api/attachments/relay-download`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer token-alice',
+        },
+        body: JSON.stringify({
+          meetingId: MEETING_A,
+          attachmentId: uploaded.id,
+          disposition: 'inline',
+        }),
+      });
+      assert.equal(aliceRelayDown.status, 200);
+      assert.equal(aliceRelayDown.headers.get('x-content-type-options'), 'nosniff');
+      assert.ok(aliceRelayDown.headers.get('cache-control')?.includes('no-store'));
+      assert.equal(aliceRelayDown.headers.get('content-type'), 'image/jpeg');
+      const returnedBytes = new Uint8Array(await aliceRelayDown.arrayBuffer());
+      assert.deepEqual(returnedBytes, JPEG_HEADER);
     });
   });
 });

@@ -27,6 +27,7 @@ import { subscribeMeetingAttachments } from '../services/firebase';
 import {
   AttachmentClientError,
   deleteMeetingAttachment,
+  fetchAttachmentBlobViaRelay,
   getFreshPresignedDownloadUrl,
   uploadMeetingAttachment,
   type UploadStage,
@@ -81,7 +82,16 @@ export const MeetingAttachmentsSection: React.FC<MeetingAttachmentsSectionProps>
     attachment: MeetingAttachment;
     url: string;
     loadFailed?: boolean;
+    usedRelayFallback?: boolean;
+    revokeBlob?: () => void;
   } | null>(null);
+
+  const closeViewer = () => {
+    setViewerState((prev) => {
+      prev?.revokeBlob?.();
+      return null;
+    });
+  };
 
   // Subscribe to Firestore attachment metadata for this meeting
   useEffect(() => {
@@ -125,6 +135,12 @@ export const MeetingAttachmentsSection: React.FC<MeetingAttachmentsSectionProps>
       }
     };
   }, [pendingPreviewUrl]);
+
+  useEffect(() => {
+    return () => {
+      viewerState?.revokeBlob?.();
+    };
+  }, [viewerState]);
 
   const clearPendingFile = () => {
     if (pendingPreviewUrl) {
@@ -244,6 +260,40 @@ export const MeetingAttachmentsSection: React.FC<MeetingAttachmentsSectionProps>
     uploadAbortRef.current?.abort();
   };
 
+  const handleOpenViewerViaRelay = async (attachment: MeetingAttachment) => {
+    setActionError(null);
+    if (!isOnline) {
+      setActionError('عرض المرفقات يتطلب اتصالاً نشطاً بالإنترنت.');
+      return;
+    }
+
+    setLoadingUrlForId(attachment.id);
+    try {
+      const relayRes = await fetchAttachmentBlobViaRelay({
+        meetingId,
+        attachmentId: attachment.id,
+        disposition: 'inline',
+      });
+      setViewerState((prev) => {
+        prev?.revokeBlob?.();
+        return {
+          attachment,
+          url: relayRes.blobUrl,
+          loadFailed: false,
+          usedRelayFallback: true,
+          revokeBlob: relayRes.revoke,
+        };
+      });
+    } catch (err: any) {
+      setViewerState((prev) =>
+        prev ? { ...prev, loadFailed: true, usedRelayFallback: true } : null
+      );
+      setActionError(err?.message || 'تعذر عرض المرفق عبر الخادم.');
+    } finally {
+      setLoadingUrlForId(null);
+    }
+  };
+
   const handleOpenViewer = async (attachment: MeetingAttachment, forceRefresh: boolean = false) => {
     setActionError(null);
     if (!isOnline) {
@@ -259,9 +309,18 @@ export const MeetingAttachmentsSection: React.FC<MeetingAttachmentsSectionProps>
         disposition: 'inline',
         forceRefresh,
       });
-      setViewerState({ attachment, url: res.downloadUrl, loadFailed: false });
-    } catch (err: any) {
-      setActionError(err?.message || 'تعذر الحصول على رابط عرض مؤقت للمرفق.');
+      setViewerState((prev) => {
+        prev?.revokeBlob?.();
+        return {
+          attachment,
+          url: res.downloadUrl,
+          loadFailed: false,
+          usedRelayFallback: false,
+        };
+      });
+    } catch {
+      // Fallback automatically to same-origin authenticated relay
+      await handleOpenViewerViaRelay(attachment);
     } finally {
       setLoadingUrlForId(null);
     }
@@ -290,8 +349,23 @@ export const MeetingAttachmentsSection: React.FC<MeetingAttachmentsSectionProps>
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
-    } catch (err: any) {
-      setActionError(err?.message || 'تعذر تنزيل المرفق.');
+    } catch {
+      try {
+        const relayRes = await fetchAttachmentBlobViaRelay({
+          meetingId,
+          attachmentId: attachment.id,
+          disposition: 'attachment',
+        });
+        const anchor = document.createElement('a');
+        anchor.href = relayRes.blobUrl;
+        anchor.download = attachment.fileName;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(() => relayRes.revoke(), 2000);
+      } catch (relayErr: any) {
+        setActionError(relayErr?.message || 'تعذر تنزيل المرفق.');
+      }
     } finally {
       setLoadingUrlForId(null);
     }
@@ -667,7 +741,7 @@ export const MeetingAttachmentsSection: React.FC<MeetingAttachmentsSectionProps>
         <div
           data-testid="attachment-viewer-modal"
           className="fixed inset-0 z-70 bg-stone-950/85 flex items-center justify-center p-3 sm:p-6"
-          onClick={() => setViewerState(null)}
+          onClick={closeViewer}
         >
           <div
             className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full max-h-[90vh] flex flex-col overflow-hidden"
@@ -683,7 +757,18 @@ export const MeetingAttachmentsSection: React.FC<MeetingAttachmentsSectionProps>
                   {formatFileSizeArabic(viewerState.attachment.sizeBytes)}
                 </p>
               </div>
-              <div className="flex items-center gap-1.5 shrink-0">
+              <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+                {!viewerState.usedRelayFallback && (
+                  <button
+                    type="button"
+                    onClick={() => void handleOpenViewerViaRelay(viewerState.attachment)}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-medium bg-stone-200 hover:bg-stone-300 text-stone-800"
+                    title="عرض الملف عبر خادم التطبيق إذا حظر المتصفح الرابط المباشر"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    <span>عرض بديل</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => void handleOpenViewer(viewerState.attachment, true)}
@@ -703,7 +788,7 @@ export const MeetingAttachmentsSection: React.FC<MeetingAttachmentsSectionProps>
                 </button>
                 <button
                   type="button"
-                  onClick={() => setViewerState(null)}
+                  onClick={closeViewer}
                   className="p-1.5 text-stone-500 hover:text-stone-900 rounded-lg"
                   aria-label="إغلاق المعاينة"
                 >
@@ -719,22 +804,35 @@ export const MeetingAttachmentsSection: React.FC<MeetingAttachmentsSectionProps>
                   <p className="text-xs text-stone-800 font-semibold">
                     تعذر عرض الملف. قد تكون صلاحية الرابط المؤقت قد انتهت.
                   </p>
-                  <button
-                    type="button"
-                    onClick={() => void handleOpenViewer(viewerState.attachment, true)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-700 text-white text-xs font-semibold hover:bg-emerald-800"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    <span>تحديث رابط العرض</span>
-                  </button>
+                  <div className="flex items-center justify-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => void handleOpenViewer(viewerState.attachment, true)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-700 text-white text-xs font-semibold hover:bg-emerald-800"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>تحديث رابط العرض</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleOpenViewerViaRelay(viewerState.attachment)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-stone-800 text-white text-xs font-semibold hover:bg-stone-900"
+                    >
+                      <span>عرض عبر الخادم</span>
+                    </button>
+                  </div>
                 </div>
               ) : isImageMimeType(viewerState.attachment.contentType) ? (
                 <img
                   src={viewerState.url}
                   alt={viewerState.attachment.fileName}
-                  onError={() =>
-                    setViewerState((prev) => (prev ? { ...prev, loadFailed: true } : null))
-                  }
+                  onError={() => {
+                    if (!viewerState.usedRelayFallback && isOnline) {
+                      void handleOpenViewerViaRelay(viewerState.attachment);
+                    } else {
+                      setViewerState((prev) => (prev ? { ...prev, loadFailed: true } : null));
+                    }
+                  }}
                   className="max-h-[72vh] max-w-full object-contain rounded-lg shadow-lg"
                 />
               ) : (

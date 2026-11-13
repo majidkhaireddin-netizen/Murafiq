@@ -203,12 +203,13 @@ service cloud.firestore {
 
         // Scoped Subcollection: Meeting Attachments (Metadata for private Backblaze B2 objects)
         match /attachments/{attachmentId} {
-          allow get, list: if isOwner(userId) && isValidId(meetingId);
+          allow get: if isOwner(userId) && isValidId(meetingId) && isValidId(attachmentId);
+          allow list: if isOwner(userId) && isValidId(meetingId);
           allow create: if isOwner(userId)
             && isValidId(meetingId)
             && isValidId(attachmentId)
-            && exists(/databases/$(database)/documents/users/$(userId)/meetings/$(meetingId))
-            && isValidMeetingAttachment(incoming(), userId, meetingId, attachmentId);
+            && isValidMeetingAttachment(incoming(), userId, meetingId, attachmentId)
+            && exists(/databases/$(database)/documents/users/$(userId)/meetings/$(meetingId));
           allow update: if false;
           allow delete: if isOwner(userId) && isValidId(meetingId) && isValidId(attachmentId);
         }

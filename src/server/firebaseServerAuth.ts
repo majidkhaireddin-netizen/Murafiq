@@ -39,6 +39,56 @@ export interface VerifiedFirebaseUser {
   idToken: string;
 }
 
+export interface DecodedTokenShape {
+  uid: string;
+  email?: string;
+  email_verified?: boolean;
+}
+
+export async function verifyFirebaseTokenWithFallback(params: {
+  idToken: string;
+  preferRevocationCheck: boolean;
+  verifyIdTokenFn: (token: string, checkRevoked: boolean) => Promise<DecodedTokenShape>;
+}): Promise<DecodedTokenShape> {
+  const { idToken, preferRevocationCheck, verifyIdTokenFn } = params;
+
+  if (!preferRevocationCheck) {
+    return verifyIdTokenFn(idToken, false);
+  }
+
+  try {
+    return await verifyIdTokenFn(idToken, true);
+  } catch (err: any) {
+    const code = String(err?.code || '');
+    const msg = String(err?.message || '');
+
+    // Never fall back if the token itself is invalid, expired, revoked, or user disabled
+    const isTokenProblem =
+      code === 'auth/id-token-expired' ||
+      code === 'auth/id-token-revoked' ||
+      code === 'auth/argument-error' ||
+      code === 'auth/user-disabled' ||
+      code === 'auth/user-not-found';
+
+    const isHostOrAdminApiIssue =
+      !isTokenProblem &&
+      (code === 'auth/internal-error' ||
+        code === 'auth/insufficient-permission' ||
+        code === 'app/invalid-credential' ||
+        msg.includes('identitytoolkit') ||
+        msg.includes('credential') ||
+        msg.includes('PERMISSION_DENIED') ||
+        msg.includes('insufficient'));
+
+    if (!isHostOrAdminApiIssue) {
+      throw err;
+    }
+
+    // Fall back to cryptographic RS256 public-certificate verification (signature, aud, iss, exp, uid)
+    return verifyIdTokenFn(idToken, false);
+  }
+}
+
 /**
  * Verifies the Firebase ID Token via firebase-admin Auth and extracts uid strictly from verified token claims.
  */
@@ -54,7 +104,13 @@ export async function verifyFirebaseBearerToken(
   }
 
   const app = getOrInitAdminApp();
-  const decoded = await getAuth(app).verifyIdToken(idToken, true);
+  const hasExplicitServiceAccount = Boolean(process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim());
+  const decoded = await verifyFirebaseTokenWithFallback({
+    idToken,
+    preferRevocationCheck: hasExplicitServiceAccount,
+    verifyIdTokenFn: (token, checkRevoked) => getAuth(app).verifyIdToken(token, checkRevoked),
+  });
+
   if (!decoded.uid || !isValidResourceId(decoded.uid)) {
     throw new Error('UNAUTHENTICATED: لم يتم العثور على معرّف مستخدم صالح في الرمز الموثق.');
   }
@@ -150,12 +206,14 @@ export async function verifyMeetingOwnershipInNamedDb(params: {
     if (data?.userId && data.userId !== uid) return false;
     return true;
   } catch (adminErr: any) {
-    // Fall back to user-authenticated REST query against the named database ONLY when Admin ADC is absent
+    // Fall back to user-authenticated REST query against the named database when Admin ADC is absent or cross-project
     const msg = String(adminErr?.message || '');
     const isCredentialIssue =
       msg.includes('Could not load the default credentials') ||
       msg.includes('credential') ||
       msg.includes('UNAUTHENTICATED') ||
+      msg.includes('PERMISSION_DENIED') ||
+      adminErr?.code === 7 ||
       adminErr?.code === 16;
 
     if (!isCredentialIssue) {
@@ -202,6 +260,8 @@ export async function verifyAttachmentOwnershipInNamedDb(params: {
       msg.includes('Could not load the default credentials') ||
       msg.includes('credential') ||
       msg.includes('UNAUTHENTICATED') ||
+      msg.includes('PERMISSION_DENIED') ||
+      adminErr?.code === 7 ||
       adminErr?.code === 16;
 
     if (!isCredentialIssue) {

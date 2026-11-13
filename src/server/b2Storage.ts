@@ -62,6 +62,16 @@ export interface B2StorageService {
     expectedContentType: AllowedAttachmentMimeType;
     expectedSizeBytes: number;
   }): Promise<VerifiedB2Object>;
+  uploadObject(params: {
+    key: string;
+    contentType: AllowedAttachmentMimeType;
+    body: Uint8Array;
+  }): Promise<{ etag?: string }>;
+  downloadObject(key: string): Promise<{
+    bytes: Uint8Array;
+    contentType?: string;
+    contentLength: number;
+  }>;
   deleteObject(key: string): Promise<void>;
 }
 
@@ -120,6 +130,44 @@ async function readStreamFirstBytes(body: unknown, maxBytes: number = 16): Promi
       merged.set(c.subarray(0, take), offset);
       offset += take;
       if (offset >= merged.length) break;
+    }
+    return merged;
+  }
+
+  return new Uint8Array(0);
+}
+
+async function readStreamAllBytes(body: unknown, maxBytes: number = MAX_ATTACHMENT_SIZE_BYTES): Promise<Uint8Array> {
+  if (!body) return new Uint8Array(0);
+  const typedBody = body as {
+    transformToByteArray?: () => Promise<Uint8Array>;
+    [Symbol.asyncIterator]?: () => AsyncIterator<Uint8Array | Buffer>;
+  };
+
+  if (typeof typedBody.transformToByteArray === 'function') {
+    const arr = await typedBody.transformToByteArray();
+    if (arr.length > maxBytes) {
+      throw new Error('FILE_TOO_LARGE: حجم الملف المستلم يتجاوز الحد الأقصى المسموح به.');
+    }
+    return arr;
+  }
+
+  if (typeof typedBody[Symbol.asyncIterator] === 'function') {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for await (const chunk of typedBody as AsyncIterable<Uint8Array | Buffer>) {
+      const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+      total += bytes.length;
+      if (total > maxBytes) {
+        throw new Error('FILE_TOO_LARGE: حجم الملف المستلم يتجاوز الحد الأقصى المسموح به.');
+      }
+      chunks.push(bytes);
+    }
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const c of chunks) {
+      merged.set(c, offset);
+      offset += c.length;
     }
     return merged;
   }
@@ -270,6 +318,46 @@ export function createBackblazeB2StorageService(env: NodeJS.ProcessEnv = process
         sizeBytes: actualSize,
         contentType: headRes.ContentType || params.expectedContentType,
         etag: headRes.ETag ? headRes.ETag.replace(/"/g, '').slice(0, 128) : undefined,
+      };
+    },
+
+    async uploadObject(params: {
+      key: string;
+      contentType: AllowedAttachmentMimeType;
+      body: Uint8Array;
+    }): Promise<{ etag?: string }> {
+      const { client, config } = getClientAndConfig();
+      const putRes = await client.send(
+        new PutObjectCommand({
+          Bucket: config.bucketName,
+          Key: params.key,
+          ContentType: params.contentType,
+          ContentLength: params.body.byteLength,
+          Body: params.body,
+        })
+      );
+      return {
+        etag: putRes.ETag ? putRes.ETag.replace(/"/g, '').slice(0, 128) : undefined,
+      };
+    },
+
+    async downloadObject(key: string): Promise<{
+      bytes: Uint8Array;
+      contentType?: string;
+      contentLength: number;
+    }> {
+      const { client, config } = getClientAndConfig();
+      const getRes = await client.send(
+        new GetObjectCommand({
+          Bucket: config.bucketName,
+          Key: key,
+        })
+      );
+      const bytes = await readStreamAllBytes(getRes.Body, MAX_ATTACHMENT_SIZE_BYTES);
+      return {
+        bytes,
+        contentType: getRes.ContentType || undefined,
+        contentLength: bytes.byteLength,
       };
     },
 
