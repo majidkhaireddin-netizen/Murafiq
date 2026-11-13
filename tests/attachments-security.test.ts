@@ -6,7 +6,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createAttachmentsRouter } from '../src/server/attachmentsRouter.ts';
 import type { B2StorageService } from '../src/server/b2Storage.ts';
-import { verifyFirebaseTokenWithFallback } from '../src/server/firebaseServerAuth.ts';
+import {
+  getFirebaseServerConfig,
+  verifyFirebaseTokenWithFallback,
+  type AttachmentMetadataStore,
+} from '../src/server/firebaseServerAuth.ts';
 import {
   buildAttachmentStorageKey,
   isPresignedUrlExpired,
@@ -17,11 +21,16 @@ import {
   verifyMagicBytes,
 } from '../src/utils/attachmentPolicy.ts';
 import {
+  clearAttachmentDownloadCache,
+  getDownloadCacheSnapshotForTesting,
+} from '../src/utils/attachmentDownloadCache.ts';
+import {
   AttachmentClientError,
   deleteMeetingAttachmentWithDeps,
+  getFreshPresignedDownloadUrlWithDeps,
   uploadMeetingAttachmentWithDeps,
 } from '../src/services/attachments.ts';
-import type { MeetingAttachment } from '../src/types/index.ts';
+import type { MeetingAttachment, UploadIntentRecord } from '../src/types/index.ts';
 
 const USER_A = 'user_alice_001';
 const USER_B = 'user_bob_002';
@@ -36,7 +45,10 @@ const EXE_DISGUISED = new Uint8Array([0x4d, 0x5a, 0x90, 0x00, 0x03, 0x00, 0x00, 
 
 function createMockTestServer(options?: {
   b2Configured?: boolean;
+  adminConfigured?: boolean;
   failB2Delete?: boolean;
+  failFinalizeDeletion?: boolean;
+  slowCommitMs?: number;
   uploadedObjects?: Map<
     string,
     { sizeBytes: number; contentType: string; headerBytes: Uint8Array; etag: string }
@@ -48,9 +60,23 @@ function createMockTestServer(options?: {
 
   const meetingsOwned = new Map<string, { uid: string }>([[MEETING_A, { uid: USER_A }]]);
   const attachmentsOwned = new Map<string, MeetingAttachment>();
+  const uploadIntents = new Map<string, UploadIntentRecord>();
+
   let failDelete = options?.failB2Delete ?? false;
+  let failFinalize = options?.failFinalizeDeletion ?? false;
+  let slowCommitMs = options?.slowCommitMs ?? 0;
+  let adminConfigured = options?.adminConfigured ?? true;
+
+  const ensureAdminConfigured = () => {
+    if (!adminConfigured) {
+      throw new Error(
+        'FIREBASE_ADMIN_NOT_CONFIGURED: يتطلب توفير مفتاح حساب خدمة Firebase Admin.'
+      );
+    }
+  };
 
   const mockStorage: B2StorageService = {
+    getBucketName: () => 'Murafiq',
     isConfigured: () => options?.b2Configured ?? true,
     createPresignedUploadUrl: async ({ key }) => ({
       uploadUrl: `https://s3.us-east-005.backblazeb2.com/Murafiq/${key}?X-Amz-Expires=${PRESIGNED_UPLOAD_TTL_SECONDS}`,
@@ -58,7 +84,7 @@ function createMockTestServer(options?: {
       expiresInSeconds: PRESIGNED_UPLOAD_TTL_SECONDS,
     }),
     createPresignedDownloadUrl: async ({ key, disposition }) => ({
-      downloadUrl: `https://s3.us-east-005.backblazeb2.com/Murafiq/${key}?disposition=${disposition}&X-Amz-Expires=${PRESIGNED_DOWNLOAD_TTL_SECONDS}`,
+      downloadUrl: `https://s3.us-east-005.backblazeb2.com/Murafiq/${key}?disposition=${disposition}&X-Amz-Expires=${PRESIGNED_DOWNLOAD_TTL_SECONDS}&nonce=${Math.random()}`,
       expiresAt: new Date(Date.now() + PRESIGNED_DOWNLOAD_TTL_SECONDS * 1000).toISOString(),
       expiresInSeconds: PRESIGNED_DOWNLOAD_TTL_SECONDS,
     }),
@@ -109,8 +135,140 @@ function createMockTestServer(options?: {
     },
   };
 
+  const metadataStore: AttachmentMetadataStore = {
+    createUploadIntent: async (intent) => {
+      ensureAdminConfigured();
+      uploadIntents.set(`${intent.userId}:${intent.meetingId}:${intent.attachmentId}`, { ...intent });
+    },
+    getUploadIntent: async ({ uid, meetingId, attachmentId }) => {
+      ensureAdminConfigured();
+      const item = uploadIntents.get(`${uid}:${meetingId}:${attachmentId}`);
+      return item ? { ...item } : null;
+    },
+    getAttachmentRecord: async ({ uid, meetingId, attachmentId }) => {
+      ensureAdminConfigured();
+      const att = attachmentsOwned.get(`${uid}:${meetingId}:${attachmentId}`);
+      if (!att) return { exists: false };
+      return {
+        exists: true,
+        record: { ...att },
+        fileName: att.fileName,
+        contentType: att.contentType,
+        storageKey: att.storageKey,
+        deleteStatus: att.deleteStatus,
+      };
+    },
+    commitAttachmentFromIntent: async ({ uid, meetingId, attachmentId, attachment, nowIso }) => {
+      ensureAdminConfigured();
+      if (slowCommitMs > 0) {
+        await new Promise((r) => setTimeout(r, slowCommitMs));
+      }
+      const key = `${uid}:${meetingId}:${attachmentId}`;
+      const existing = attachmentsOwned.get(key);
+      if (existing) {
+        return { outcome: 'already_committed', record: { ...existing } };
+      }
+      const intent = uploadIntents.get(key);
+      if (!intent) return { outcome: 'intent_not_found' };
+      if (intent.userId !== uid || intent.meetingId !== meetingId) {
+        return { outcome: 'intent_mismatch' };
+      }
+      if (intent.status === 'abandoned' || intent.status === 'deleted' || intent.status === 'committed') {
+        return { outcome: 'intent_abandoned' };
+      }
+      const record: MeetingAttachment = {
+        ...attachment,
+        id: attachmentId,
+        userId: uid,
+        meetingId,
+        fileName: intent.fileName,
+        contentType: intent.contentType,
+        storageKey: intent.storageKey,
+        storageProvider: 'backblaze_b2',
+        uploadStatus: 'completed',
+        deleteStatus: 'active',
+      };
+      attachmentsOwned.set(key, record);
+      uploadIntents.set(key, {
+        ...intent,
+        status: 'committed',
+        committedAt: nowIso,
+        updatedAt: nowIso,
+      });
+      return { outcome: 'committed', record: { ...record } };
+    },
+    markUploadIntentAbandonedIfPending: async ({ uid, meetingId, attachmentId, nowIso }) => {
+      ensureAdminConfigured();
+      const key = `${uid}:${meetingId}:${attachmentId}`;
+      const existing = attachmentsOwned.get(key);
+      if (existing) {
+        return { outcome: 'already_committed', record: { ...existing } };
+      }
+      const intent = uploadIntents.get(key);
+      if (!intent) return { outcome: 'not_found' };
+      if (intent.status === 'committed' || intent.status === 'deleted') {
+        return { outcome: 'already_committed' };
+      }
+      if (intent.status === 'abandoned') {
+        return { outcome: 'already_abandoned' };
+      }
+      uploadIntents.set(key, {
+        ...intent,
+        status: 'abandoned',
+        updatedAt: nowIso,
+      });
+      return { outcome: 'abandoned' };
+    },
+    updateAttachmentDeleteStatus: async ({
+      uid,
+      meetingId,
+      attachmentId,
+      deleteStatus,
+      deleteErrorArabic,
+      updatedAt,
+    }) => {
+      ensureAdminConfigured();
+      const key = `${uid}:${meetingId}:${attachmentId}`;
+      const att = attachmentsOwned.get(key);
+      if (!att) throw new Error('Attachment not found');
+      attachmentsOwned.set(key, {
+        ...att,
+        deleteStatus,
+        deleteErrorArabic,
+        updatedAt,
+      });
+    },
+    finalizeAttachmentDeletion: async ({ uid, meetingId, attachmentId, nowIso }) => {
+      ensureAdminConfigured();
+      if (failFinalize) {
+        throw new Error('Simulated Firestore deletion failure');
+      }
+      const key = `${uid}:${meetingId}:${attachmentId}`;
+      attachmentsOwned.delete(key);
+      const intent = uploadIntents.get(key);
+      if (intent) {
+        uploadIntents.set(key, { ...intent, status: 'deleted', updatedAt: nowIso });
+      } else {
+        uploadIntents.set(key, {
+          attachmentId,
+          userId: uid,
+          meetingId,
+          fileName: 'deleted',
+          contentType: 'application/pdf',
+          sizeBytes: 1,
+          storageKey: buildAttachmentStorageKey({ uid, meetingId, attachmentId }),
+          status: 'deleted',
+          expiresAt: nowIso,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        });
+      }
+    },
+  };
+
   const router = createAttachmentsRouter({
     storageService: mockStorage,
+    metadataStore,
     verifyBearerToken: async (authHeader) => {
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
         throw new Error('UNAUTHENTICATED: Missing Bearer token');
@@ -129,9 +287,11 @@ function createMockTestServer(options?: {
       if (!att) return { exists: false };
       return {
         exists: true,
-        storageKey: att.storageKey,
+        record: { ...att },
         fileName: att.fileName,
         contentType: att.contentType,
+        storageKey: att.storageKey,
+        deleteStatus: att.deleteStatus,
       };
     },
   });
@@ -144,8 +304,18 @@ function createMockTestServer(options?: {
     app,
     b2Objects,
     attachmentsOwned,
+    uploadIntents,
     setFailDelete: (v: boolean) => {
       failDelete = v;
+    },
+    setFailFinalize: (v: boolean) => {
+      failFinalize = v;
+    },
+    setSlowCommitMs: (ms: number) => {
+      slowCommitMs = ms;
+    },
+    setAdminConfigured: (v: boolean) => {
+      adminConfigured = v;
     },
   };
 }
@@ -167,7 +337,7 @@ async function withServer(
   }
 }
 
-test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async (t) => {
+test('Task 004-A & Fix-01 Security, Integrity & Reliability Suite (Backblaze B2 Attachments)', async (t) => {
   await t.test('1. Unauthenticated upload, download, delete, and cleanup requests are rejected (401)', async () => {
     const { app } = createMockTestServer();
     await withServer(app, async (baseUrl) => {
@@ -213,6 +383,7 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
       storageKey: key,
       storageProvider: 'backblaze_b2',
       uploadStatus: 'completed',
+      deleteStatus: 'active',
       createdAt: new Date().toISOString(),
     });
 
@@ -261,7 +432,7 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
     });
   });
 
-  await t.test('3. Client-supplied storageKey / uid / userId spoofing attempts are rejected (403)', async () => {
+  await t.test('3. Client-supplied storageKey / uid / userId / status spoofing attempts are rejected (403)', async () => {
     const { app } = createMockTestServer();
     await withServer(app, async (baseUrl) => {
       const spoofedUidRes = await fetch(`${baseUrl}/api/attachments/presign-upload`, {
@@ -295,6 +466,23 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
         }),
       });
       assert.equal(spoofedKeyRes.status, 403);
+
+      const spoofedStatusRes = await fetch(`${baseUrl}/api/attachments/complete-upload`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer token-alice',
+        },
+        body: JSON.stringify({
+          meetingId: MEETING_A,
+          attachmentId: 'att_fake',
+          fileName: 'doc.pdf',
+          contentType: 'application/pdf',
+          sizeBytes: 2048,
+          uploadStatus: 'completed',
+        }),
+      });
+      assert.equal(spoofedStatusRes.status, 403);
     });
   });
 
@@ -314,18 +502,14 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
       assert.equal(result.valid, false, `Expected ${c.fileName} (${c.contentType}) to fail`);
     }
 
-    // Valid MIME + extension checks
     assert.equal(verifyMagicBytes(JPEG_HEADER, 'image/jpeg'), true);
     assert.equal(verifyMagicBytes(PNG_HEADER, 'image/png'), true);
     assert.equal(verifyMagicBytes(WEBP_HEADER, 'image/webp'), true);
     assert.equal(verifyMagicBytes(PDF_HEADER, 'application/pdf'), true);
-
-    // Disguised files fail magic-byte verification
     assert.equal(verifyMagicBytes(HTML_DISGUISED, 'image/jpeg'), false);
     assert.equal(verifyMagicBytes(EXE_DISGUISED, 'application/pdf'), false);
 
-    // Server complete-upload rejects & deletes disguised file from B2 if uploaded directly via signed URL
-    const { app, b2Objects } = createMockTestServer();
+    const { app, b2Objects, attachmentsOwned } = createMockTestServer();
     await withServer(app, async (baseUrl) => {
       const presignRes = await fetch(`${baseUrl}/api/attachments/presign-upload`, {
         method: 'POST',
@@ -344,7 +528,6 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
       const presignData = (await presignRes.json()) as any;
       assert.equal(presignData.storageKey.startsWith(`users/${USER_A}/meetings/${MEETING_A}/attachments/`), true);
 
-      // Attacker uploads HTML bytes instead of real JPEG
       b2Objects.set(presignData.storageKey, {
         sizeBytes: HTML_DISGUISED.length,
         contentType: 'image/jpeg',
@@ -368,6 +551,7 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
       });
       assert.equal(completeRes.status, 422);
       assert.equal(b2Objects.has(presignData.storageKey), false, 'Invalid B2 file must be deleted immediately');
+      assert.equal(attachmentsOwned.size, 0, 'Disguised file must never be committed to Firestore');
     });
   });
 
@@ -416,6 +600,7 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
     const forbiddenClientTokens = [
       'B2_APPLICATION_KEY',
       'B2_APPLICATION_KEY_ID',
+      'FIREBASE_SERVICE_ACCOUNT_JSON',
       '@aws-sdk/client-s3',
       '@aws-sdk/s3-request-presigner',
     ];
@@ -444,7 +629,7 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
     clientDirs.forEach(scanDir);
   });
 
-  await t.test('8. Offline blocking, upload failure rollback, and B2 delete failure safety', async () => {
+  await t.test('8. Offline blocking, upload abort cleanup, and recoverable B2 delete failure safety', async () => {
     const fakeFile = {
       name: 'notes.jpg',
       type: 'image/jpeg',
@@ -462,15 +647,14 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
             fetchApi: fetch,
             readHeaderBytes: async () => JPEG_HEADER,
             putFileToPresignedUrl: async () => ({}),
-            saveMetadata: async () => {},
           }
         ),
       (err: any) => err.code === 'OFFLINE_BLOCKED'
     );
 
-    // 8b. Firestore save failure triggers B2 cleanup-uncommitted so no orphan remains
+    // 8b. Direct PUT abort/failure before complete-upload cleans up uncommitted B2 file & marks intent abandoned
     const cleanupCalls: Array<{ meetingId: string; attachmentId: string }> = [];
-    const { app, b2Objects } = createMockTestServer();
+    const { app, b2Objects, attachmentsOwned } = createMockTestServer();
 
     await withServer(app, async (baseUrl) => {
       await assert.rejects(
@@ -495,25 +679,27 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
                   sizeBytes: fakeFile.size,
                   contentType: 'image/jpeg',
                   headerBytes: JPEG_HEADER,
-                  etag: 'etag-ok',
+                  etag: 'etag-partial',
                 });
-                return { etag: 'etag-ok' };
-              },
-              saveMetadata: async () => {
-                throw new Error('Simulated Firestore write failure');
+                throw new AttachmentClientError('B2_UPLOAD_FAILED', 'Simulated upload failure');
               },
             }
           ),
-        (err: any) => err.code === 'FIRESTORE_METADATA_SAVE_FAILED'
+        (err: any) => err.code === 'B2_UPLOAD_FAILED'
       );
 
-      assert.equal(cleanupCalls.length, 1, 'Cleanup endpoint must be called after Firestore save failure');
-      assert.equal(b2Objects.size, 0, 'Orphaned B2 object must be deleted when Firestore save fails');
+      assert.equal(cleanupCalls.length, 1, 'Cleanup endpoint must be called after failed PUT before commit');
+      assert.equal(b2Objects.size, 0, 'Uncommitted B2 object must be deleted after PUT failure');
+      assert.equal(attachmentsOwned.size, 0, 'Uncommitted attachment must not appear in Firestore');
     });
 
-    // 8c. B2 delete failure keeps Firestore metadata intact so no orphaned hidden file remains untracked
-    const { app: deleteFailApp, setFailDelete, attachmentsOwned, b2Objects: objs2 } =
-      createMockTestServer();
+    // 8c. B2 delete failure keeps Firestore metadata in recoverable delete_failed state; retry succeeds cleanly
+    const {
+      app: deleteFailApp,
+      setFailDelete,
+      attachmentsOwned: delOwned,
+      b2Objects: objs2,
+    } = createMockTestServer();
     const attId = 'att-del-test';
     const key = buildAttachmentStorageKey({
       uid: USER_A,
@@ -526,7 +712,7 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
       headerBytes: PDF_HEADER,
       etag: 'etag-pdf',
     });
-    attachmentsOwned.set(`${USER_A}:${MEETING_A}:${attId}`, {
+    delOwned.set(`${USER_A}:${MEETING_A}:${attId}`, {
       id: attId,
       userId: USER_A,
       meetingId: MEETING_A,
@@ -536,38 +722,53 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
       storageKey: key,
       storageProvider: 'backblaze_b2',
       uploadStatus: 'completed',
+      deleteStatus: 'active',
       createdAt: new Date().toISOString(),
     });
     setFailDelete(true);
 
-    let metadataDeleted = false;
     await withServer(deleteFailApp, async (baseUrl) => {
-      await assert.rejects(() =>
-        deleteMeetingAttachmentWithDeps(
-          { meetingId: MEETING_A, attachmentId: attId },
-          {
-            isOnline: () => true,
-            getIdToken: async () => 'token-alice',
-            fetchApi: (input, init) => {
-              const url = typeof input === 'string' ? `${baseUrl}${input}` : input;
-              return fetch(url, init);
-            },
-            deleteMetadata: async () => {
-              metadataDeleted = true;
-            },
-          }
-        )
+      await assert.rejects(
+        () =>
+          deleteMeetingAttachmentWithDeps(
+            { meetingId: MEETING_A, attachmentId: attId },
+            {
+              isOnline: () => true,
+              getUid: () => USER_A,
+              getIdToken: async () => 'token-alice',
+              fetchApi: (input, init) => {
+                const url = typeof input === 'string' ? `${baseUrl}${input}` : input;
+                return fetch(url, init);
+              },
+            }
+          ),
+        (err: any) => err.code === 'B2_DELETE_FAILED'
       );
-      assert.equal(
-        metadataDeleted,
-        false,
-        'Firestore metadata must NOT be deleted if Backblaze B2 delete fails'
+
+      const saved = delOwned.get(`${USER_A}:${MEETING_A}:${attId}`);
+      assert.ok(saved, 'Firestore attachment record must remain when B2 delete fails');
+      assert.equal(saved.deleteStatus, 'delete_failed');
+
+      // Recover and retry delete
+      setFailDelete(false);
+      await deleteMeetingAttachmentWithDeps(
+        { meetingId: MEETING_A, attachmentId: attId },
+        {
+          isOnline: () => true,
+          getUid: () => USER_A,
+          getIdToken: async () => 'token-alice',
+          fetchApi: (input, init) => {
+            const url = typeof input === 'string' ? `${baseUrl}${input}` : input;
+            return fetch(url, init);
+          },
+        }
       );
+      assert.equal(delOwned.has(`${USER_A}:${MEETING_A}:${attId}`), false);
+      assert.equal(objs2.has(key), false);
     });
   });
 
   await t.test('9. Host ADC auth/internal-error falls back safely without masking genuine expired/revoked tokens', async () => {
-    // 9a. Cross-project IdentityToolkit auth/internal-error falls back to checkRevoked=false signature verification
     const decodedFallback = await verifyFirebaseTokenWithFallback({
       idToken: 'valid-jwt',
       preferRevocationCheck: true,
@@ -582,7 +783,6 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
     });
     assert.equal(decodedFallback.uid, USER_A);
 
-    // 9b. When preferRevocationCheck is false (no explicit Firebase SA key), uses checkRevoked=false directly
     let calledWithRevokedFlag: boolean | null = null;
     const decodedDirect = await verifyFirebaseTokenWithFallback({
       idToken: 'valid-jwt',
@@ -595,7 +795,6 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
     assert.equal(calledWithRevokedFlag, false);
     assert.equal(decodedDirect.uid, USER_A);
 
-    // 9c. Expired/revoked/malformed tokens MUST NOT fall back
     for (const tokenCode of ['auth/id-token-expired', 'auth/id-token-revoked', 'auth/argument-error']) {
       let fallbackCalled = false;
       await assert.rejects(
@@ -615,7 +814,6 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
       assert.equal(fallbackCalled, false, `${tokenCode} must fail immediately without fallback`);
     }
 
-    // 9d. Unexpected internal verifier error returns 500 AUTH_VERIFICATION_UNAVAILABLE instead of misleading 401
     const outageRouter = createAttachmentsRouter({
       verifyBearerToken: async () => {
         const err: any = new Error('Temporary verifier outage');
@@ -642,7 +840,7 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
     });
   });
 
-  await t.test('10. Same-origin relay upload and download fallbacks enforce auth, ownership, size, magic bytes, and security headers', async () => {
+  await t.test('10. Same-origin relay upload and download fallbacks enforce auth, intent, magic bytes, and security headers', async () => {
     const { app, b2Objects, attachmentsOwned } = createMockTestServer();
 
     await withServer(app, async (baseUrl) => {
@@ -695,14 +893,41 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
       });
       assert.equal(spoofRelayUp.status, 403);
 
-      // 10d. Disguised HTML payload sent to /relay-upload as image/jpeg rejected (422) & never stored in B2
+      // 10d. Relay upload without pending UploadIntent rejected (404), and disguised HTML with intent rejected (422)
+      const noIntentRelayUp = await fetch(`${baseUrl}/api/attachments/relay-upload`, {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer token-alice',
+          'Content-Type': 'image/jpeg',
+          'x-meeting-id': MEETING_A,
+          'x-attachment-id': 'att_missing_intent',
+          'x-file-name': 'photo.jpg',
+        },
+        body: JPEG_HEADER,
+      });
+      assert.equal(noIntentRelayUp.status, 404);
+
+      const presignSneaky = await fetch(`${baseUrl}/api/attachments/presign-upload`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer token-alice',
+        },
+        body: JSON.stringify({
+          meetingId: MEETING_A,
+          fileName: 'sneaky.jpg',
+          contentType: 'image/jpeg',
+          sizeBytes: HTML_DISGUISED.byteLength,
+        }),
+      });
+      const sneakyIntent = (await presignSneaky.json()) as any;
       const disguisedRelayUp = await fetch(`${baseUrl}/api/attachments/relay-upload`, {
         method: 'PUT',
         headers: {
           Authorization: 'Bearer token-alice',
           'Content-Type': 'image/jpeg',
           'x-meeting-id': MEETING_A,
-          'x-attachment-id': 'att_html_spoof',
+          'x-attachment-id': sneakyIntent.attachmentId,
           'x-file-name': 'sneaky.jpg',
         },
         body: HTML_DISGUISED,
@@ -711,7 +936,6 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
       assert.equal(b2Objects.size, 0);
 
       // 10e. Automatic client fallback from CORS NETWORK_ERROR on presigned PUT to same-origin /relay-upload
-      const savedRecords: MeetingAttachment[] = [];
       let relayUsed = false;
       const fakeJpegFile = {
         name: 'ملاحظات_اللقاء.jpg',
@@ -748,17 +972,14 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
             assert.equal(relayRes.status, 200);
             return (await relayRes.json()) as { etag?: string };
           },
-          saveMetadata: async (record) => {
-            savedRecords.push(record);
-            attachmentsOwned.set(`${USER_A}:${MEETING_A}:${record.id}`, record);
-          },
         }
       );
 
       assert.equal(relayUsed, true, 'Client must fall back automatically to same-origin relay when CORS blocks direct PUT');
-      assert.equal(savedRecords.length, 1);
+      assert.equal(attachmentsOwned.has(`${USER_A}:${MEETING_A}:${uploaded.id}`), true);
       assert.equal(uploaded.storageProvider, 'backblaze_b2');
       assert.equal(uploaded.uploadStatus, 'completed');
+      assert.equal(uploaded.deleteStatus, 'active');
 
       // 10f. Authenticated /relay-download serves attachment with strict security headers and blocks User B
       const bobRelayDown = await fetch(`${baseUrl}/api/attachments/relay-download`, {
@@ -793,6 +1014,437 @@ test('Task 004-A Security & Reliability Suite (Backblaze B2 Attachments)', async
       assert.equal(aliceRelayDown.headers.get('content-type'), 'image/jpeg');
       const returnedBytes = new Uint8Array(await aliceRelayDown.arrayBuffer());
       assert.deepEqual(returnedBytes, JPEG_HEADER);
+    });
+  });
+
+  await t.test('11. Server-authoritative complete-upload commit & idempotent retry prevent duplicates or orphan intents', async () => {
+    const { app, b2Objects, attachmentsOwned, uploadIntents } = createMockTestServer();
+
+    await withServer(app, async (baseUrl) => {
+      // Calling complete-upload without a server UploadIntent must fail (404)
+      const noIntentRes = await fetch(`${baseUrl}/api/attachments/complete-upload`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer token-alice',
+        },
+        body: JSON.stringify({
+          meetingId: MEETING_A,
+          attachmentId: 'att_untracked_01',
+          fileName: 'doc.pdf',
+          contentType: 'application/pdf',
+          sizeBytes: PDF_HEADER.byteLength,
+        }),
+      });
+      assert.equal(noIntentRes.status, 404);
+
+      // Issue intent, upload valid PDF, commit twice -> idempotent, zero duplicate attachments
+      const presignRes = await fetch(`${baseUrl}/api/attachments/presign-upload`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer token-alice',
+        },
+        body: JSON.stringify({
+          meetingId: MEETING_A,
+          fileName: 'agreement.pdf',
+          contentType: 'application/pdf',
+          sizeBytes: PDF_HEADER.byteLength,
+        }),
+      });
+      assert.equal(presignRes.status, 200);
+      const presign = (await presignRes.json()) as any;
+      assert.equal(uploadIntents.get(`${USER_A}:${MEETING_A}:${presign.attachmentId}`)?.status, 'pending');
+
+      b2Objects.set(presign.storageKey, {
+        sizeBytes: PDF_HEADER.byteLength,
+        contentType: 'application/pdf',
+        headerBytes: PDF_HEADER,
+        etag: 'etag-pdf-1',
+      });
+
+      const commitBody = JSON.stringify({
+        meetingId: MEETING_A,
+        attachmentId: presign.attachmentId,
+        fileName: 'agreement.pdf',
+        contentType: 'application/pdf',
+        sizeBytes: PDF_HEADER.byteLength,
+      });
+
+      const c1 = await fetch(`${baseUrl}/api/attachments/complete-upload`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer token-alice',
+        },
+        body: commitBody,
+      });
+      assert.equal(c1.status, 200);
+      const rec1 = (await c1.json()) as MeetingAttachment;
+
+      const c2 = await fetch(`${baseUrl}/api/attachments/complete-upload`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer token-alice',
+        },
+        body: commitBody,
+      });
+      assert.equal(c2.status, 200);
+      const rec2 = (await c2.json()) as MeetingAttachment;
+
+      assert.equal(rec1.id, rec2.id);
+      assert.equal(rec1.createdAt, rec2.createdAt);
+      assert.equal(attachmentsOwned.size, 1);
+      assert.equal(uploadIntents.get(`${USER_A}:${MEETING_A}:${presign.attachmentId}`)?.status, 'committed');
+    });
+  });
+
+  await t.test('12. cleanup-uncommitted deletes uncommitted B2 objects, refuses committed files (409), and survives concurrent/late races', async () => {
+    const { app, b2Objects, attachmentsOwned, uploadIntents, setSlowCommitMs } = createMockTestServer();
+
+    await withServer(app, async (baseUrl) => {
+      // 12a. Uncommitted cleanup removes B2 object & blocks late complete-upload
+      const p1 = await fetch(`${baseUrl}/api/attachments/presign-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({
+          meetingId: MEETING_A,
+          fileName: 'temp.jpg',
+          contentType: 'image/jpeg',
+          sizeBytes: JPEG_HEADER.byteLength,
+        }),
+      });
+      const d1 = (await p1.json()) as any;
+      b2Objects.set(d1.storageKey, {
+        sizeBytes: JPEG_HEADER.byteLength,
+        contentType: 'image/jpeg',
+        headerBytes: JPEG_HEADER,
+        etag: 'e1',
+      });
+
+      const clean1 = await fetch(`${baseUrl}/api/attachments/cleanup-uncommitted`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({ meetingId: MEETING_A, attachmentId: d1.attachmentId }),
+      });
+      assert.equal(clean1.status, 200);
+      assert.equal(b2Objects.has(d1.storageKey), false);
+      assert.equal(uploadIntents.get(`${USER_A}:${MEETING_A}:${d1.attachmentId}`)?.status, 'abandoned');
+
+      const lateCommit = await fetch(`${baseUrl}/api/attachments/complete-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({
+          meetingId: MEETING_A,
+          attachmentId: d1.attachmentId,
+          fileName: 'temp.jpg',
+          contentType: 'image/jpeg',
+          sizeBytes: JPEG_HEADER.byteLength,
+        }),
+      });
+      assert.equal(lateCommit.status, 409);
+
+      // 12b. Concurrent complete-upload + late/overlapping cleanup-uncommitted NEVER deletes committed file
+      const p2 = await fetch(`${baseUrl}/api/attachments/presign-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({
+          meetingId: MEETING_A,
+          fileName: 'final.jpg',
+          contentType: 'image/jpeg',
+          sizeBytes: JPEG_HEADER.byteLength,
+        }),
+      });
+      const d2 = (await p2.json()) as any;
+      b2Objects.set(d2.storageKey, {
+        sizeBytes: JPEG_HEADER.byteLength,
+        contentType: 'image/jpeg',
+        headerBytes: JPEG_HEADER,
+        etag: 'e2',
+      });
+
+      setSlowCommitMs(40);
+      const completePromise = fetch(`${baseUrl}/api/attachments/complete-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({
+          meetingId: MEETING_A,
+          attachmentId: d2.attachmentId,
+          fileName: 'final.jpg',
+          contentType: 'image/jpeg',
+          sizeBytes: JPEG_HEADER.byteLength,
+        }),
+      });
+      const concurrentCleanupPromise = fetch(`${baseUrl}/api/attachments/cleanup-uncommitted`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({ meetingId: MEETING_A, attachmentId: d2.attachmentId }),
+      });
+
+      const [compRes, cleanRes] = await Promise.all([completePromise, concurrentCleanupPromise]);
+      setSlowCommitMs(0);
+
+      assert.equal(compRes.status, 200);
+      assert.equal(cleanRes.status, 409);
+      const cleanJson = (await cleanRes.json()) as any;
+      assert.equal(cleanJson.error, 'ATTACHMENT_ALREADY_COMMITTED');
+      assert.equal(b2Objects.has(d2.storageKey), true, 'Committed B2 object MUST NOT be deleted by cleanup');
+      assert.equal(attachmentsOwned.has(`${USER_A}:${MEETING_A}:${d2.attachmentId}`), true);
+    });
+  });
+
+  await t.test('13. Lost complete-upload response triggers safe idempotent retry and NEVER deletes via cleanup-uncommitted', async () => {
+    const { app, b2Objects, attachmentsOwned } = createMockTestServer();
+    const fakeJpeg = {
+      name: 'receipt.jpg',
+      type: 'image/jpeg',
+      size: JPEG_HEADER.byteLength,
+    } as File;
+
+    let completeCallCount = 0;
+    let cleanupCalled = false;
+
+    await withServer(app, async (baseUrl) => {
+      const result = await uploadMeetingAttachmentWithDeps(
+        { meetingId: MEETING_A, file: fakeJpeg },
+        {
+          isOnline: () => true,
+          getIdToken: async () => 'token-alice',
+          readHeaderBytes: async () => JPEG_HEADER,
+          putFileToPresignedUrl: async ({ uploadUrl }) => {
+            const storageKey = new URL(uploadUrl).pathname.replace(/^\/Murafiq\//, '');
+            b2Objects.set(storageKey, {
+              sizeBytes: JPEG_HEADER.byteLength,
+              contentType: 'image/jpeg',
+              headerBytes: JPEG_HEADER,
+              etag: 'etag-lost-ack',
+            });
+            return { etag: 'etag-lost-ack' };
+          },
+          fetchApi: async (input, init) => {
+            const urlStr = typeof input === 'string' ? input : String(input);
+            if (urlStr.endsWith('/cleanup-uncommitted')) {
+              cleanupCalled = true;
+            }
+            const realRes = await fetch(`${baseUrl}${urlStr}`, init);
+            if (urlStr.endsWith('/complete-upload')) {
+              completeCallCount++;
+              if (completeCallCount === 1) {
+                // Simulate network/proxy drop AFTER server committed in Firestore!
+                throw new TypeError('Failed to fetch after commit');
+              }
+            }
+            return realRes;
+          },
+        }
+      );
+
+      assert.equal(completeCallCount, 2, 'Client must retry complete-upload idempotently');
+      assert.equal(cleanupCalled, false, 'Client MUST NEVER call cleanup-uncommitted when commit outcome is uncertain');
+      assert.equal(attachmentsOwned.size, 1);
+      assert.equal(b2Objects.has(result.storageKey), true);
+    });
+  });
+
+  await t.test('14. Recoverable deletion handles Firestore failure after B2 delete & idempotent duplicate delete', async () => {
+    const { app, b2Objects, attachmentsOwned, setFailFinalize } = createMockTestServer();
+    const attId = 'att-rec-del';
+    const key = buildAttachmentStorageKey({
+      uid: USER_A,
+      meetingId: MEETING_A,
+      attachmentId: attId,
+    });
+    b2Objects.set(key, {
+      sizeBytes: 512,
+      contentType: 'application/pdf',
+      headerBytes: PDF_HEADER,
+      etag: 'etag-rec',
+    });
+    attachmentsOwned.set(`${USER_A}:${MEETING_A}:${attId}`, {
+      id: attId,
+      userId: USER_A,
+      meetingId: MEETING_A,
+      fileName: 'doc.pdf',
+      contentType: 'application/pdf',
+      sizeBytes: 512,
+      storageKey: key,
+      storageProvider: 'backblaze_b2',
+      uploadStatus: 'completed',
+      deleteStatus: 'active',
+      createdAt: new Date().toISOString(),
+    });
+    setFailFinalize(true);
+
+    await withServer(app, async (baseUrl) => {
+      // Pass 1: B2 succeeds, Firestore finalization fails -> transitional state b2_deleted (502)
+      const res1 = await fetch(`${baseUrl}/api/attachments/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({ meetingId: MEETING_A, attachmentId: attId }),
+      });
+      assert.equal(res1.status, 502);
+      const body1 = (await res1.json()) as any;
+      assert.equal(body1.error, 'FIRESTORE_DELETE_INCOMPLETE');
+      assert.equal(body1.deleteStatus, 'b2_deleted');
+      assert.equal(b2Objects.has(key), false, 'B2 object was deleted in pass 1');
+      assert.equal(attachmentsOwned.get(`${USER_A}:${MEETING_A}:${attId}`)?.deleteStatus, 'b2_deleted');
+
+      // Downloading a b2_deleted attachment returns 410 Gone cleanly
+      const dlWhileDeleting = await fetch(`${baseUrl}/api/attachments/presign-download`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({ meetingId: MEETING_A, attachmentId: attId }),
+      });
+      assert.equal(dlWhileDeleting.status, 410);
+
+      // Pass 2: Firestore recovers -> retry completes cleanup cleanly even though B2 object is already gone
+      setFailFinalize(false);
+      const res2 = await fetch(`${baseUrl}/api/attachments/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({ meetingId: MEETING_A, attachmentId: attId }),
+      });
+      assert.equal(res2.status, 200);
+      assert.equal(attachmentsOwned.has(`${USER_A}:${MEETING_A}:${attId}`), false);
+
+      // Pass 3: Duplicate delete request returns idempotent 200 alreadyDeleted=true
+      const res3 = await fetch(`${baseUrl}/api/attachments/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({ meetingId: MEETING_A, attachmentId: attId }),
+      });
+      assert.equal(res3.status, 200);
+      const body3 = (await res3.json()) as any;
+      assert.equal(body3.alreadyDeleted, true);
+    });
+  });
+
+  await t.test('15. Download URL memory cache isolates by uid, clears on logout/account switch, and expires cleanly', async () => {
+    clearAttachmentDownloadCache();
+    let currentUid: string | null = USER_A;
+    let currentTime = 1_700_000_000_000;
+    let backendFetchCount = 0;
+
+    const fakeFetch = async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      backendFetchCount++;
+      return new Response(
+        JSON.stringify({
+          downloadUrl: `https://b2.example/${currentUid}/item-${backendFetchCount}`,
+          expiresAt: new Date(currentTime + 180_000).toISOString(),
+          expiresInSeconds: 180,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    };
+
+    const deps = {
+      isOnline: () => true,
+      getUid: () => {
+        if (!currentUid) throw new Error('Not logged in');
+        return currentUid;
+      },
+      getIdToken: async () => `token-${currentUid}`,
+      fetchApi: fakeFetch as typeof fetch,
+      nowMs: () => currentTime,
+    };
+
+    // First call for Alice hits backend and caches under Alice's UID
+    const a1 = await getFreshPresignedDownloadUrlWithDeps(
+      { meetingId: MEETING_A, attachmentId: 'att-cache-1', disposition: 'inline' },
+      deps
+    );
+    assert.equal(backendFetchCount, 1);
+    assert.match(a1.downloadUrl, new RegExp(USER_A));
+
+    // Second call for Alice within TTL uses cache
+    const a2 = await getFreshPresignedDownloadUrlWithDeps(
+      { meetingId: MEETING_A, attachmentId: 'att-cache-1', disposition: 'inline' },
+      deps
+    );
+    assert.equal(backendFetchCount, 1);
+    assert.equal(a2.downloadUrl, a1.downloadUrl);
+
+    // Account switch Alice -> Bob MUST NOT return Alice's cached URL
+    currentUid = USER_B;
+    const b1 = await getFreshPresignedDownloadUrlWithDeps(
+      { meetingId: MEETING_A, attachmentId: 'att-cache-1', disposition: 'inline' },
+      deps
+    );
+    assert.equal(backendFetchCount, 2);
+    assert.match(b1.downloadUrl, new RegExp(USER_B));
+    assert.notEqual(b1.downloadUrl, a1.downloadUrl);
+
+    // Advancing time past expiry triggers fresh presign fetch
+    currentTime += 175_000;
+    const b2 = await getFreshPresignedDownloadUrlWithDeps(
+      { meetingId: MEETING_A, attachmentId: 'att-cache-1', disposition: 'inline' },
+      deps
+    );
+    assert.equal(backendFetchCount, 3);
+    assert.notEqual(b2.downloadUrl, b1.downloadUrl);
+
+    // Logout clears cache completely
+    clearAttachmentDownloadCache();
+    const snapshot = getDownloadCacheSnapshotForTesting();
+    assert.equal(snapshot.size, 0);
+    assert.equal(snapshot.activeUid, null);
+  });
+
+  await t.test('16. Named Firestore DB enforcement & clear 503 errors when B2 or Firebase Admin config is missing', async () => {
+    const serverCfg = getFirebaseServerConfig();
+    assert.equal(
+      serverCfg.firestoreDatabaseId,
+      'ai-studio-murafiq-cb988db3-5a07-40b7-b1ca-8eaaae894475'
+    );
+    assert.notEqual(serverCfg.firestoreDatabaseId, '(default)');
+
+    const clientFirebaseSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'src/services/firebase.ts'),
+      'utf8'
+    );
+    assert.equal(clientFirebaseSource.includes('firebaseConfig.firestoreDatabaseId'), true);
+
+    const serverFirebaseSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'src/server/firebaseServerAuth.ts'),
+      'utf8'
+    );
+    assert.equal(serverFirebaseSource.includes("firestoreDatabaseId === '(default)'"), true);
+
+    // Missing B2 config -> 503 STORAGE_NOT_CONFIGURED without leaking env values
+    const { app: noB2App } = createMockTestServer({ b2Configured: false });
+    await withServer(noB2App, async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/attachments/presign-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({
+          meetingId: MEETING_A,
+          fileName: 'doc.pdf',
+          contentType: 'application/pdf',
+          sizeBytes: 1024,
+        }),
+      });
+      assert.equal(res.status, 503);
+      const data = (await res.json()) as any;
+      assert.equal(data.error, 'STORAGE_NOT_CONFIGURED');
+    });
+
+    // Missing Firebase Admin config -> 503 FIREBASE_ADMIN_NOT_CONFIGURED
+    const { app: noAdminApp } = createMockTestServer({ adminConfigured: false });
+    await withServer(noAdminApp, async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/attachments/presign-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({
+          meetingId: MEETING_A,
+          fileName: 'doc.pdf',
+          contentType: 'application/pdf',
+          sizeBytes: 1024,
+        }),
+      });
+      assert.equal(res.status, 503);
+      const data = (await res.json()) as any;
+      assert.equal(data.error, 'FIREBASE_ADMIN_NOT_CONFIGURED');
     });
   });
 });

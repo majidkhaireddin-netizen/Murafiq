@@ -43,6 +43,10 @@ import {
   formatPersistenceInitErrorArabic,
   OptOutExecutionResult,
 } from '../utils/offlineStoragePolicy';
+import {
+  clearAttachmentDownloadCache,
+  syncAttachmentCacheUser,
+} from '../utils/attachmentDownloadCache';
 
 // Initialize Firebase App
 const app = initializeApp(firebaseConfig);
@@ -496,17 +500,28 @@ export async function signInWithGoogle(): Promise<User> {
 }
 
 /**
- * Sign out current authenticated user
+ * Sign out current authenticated user and wipe cached presigned attachment links.
  */
 export async function logOut(): Promise<void> {
+  clearAttachmentDownloadCache();
   await signOut(auth);
 }
 
 /**
- * Subscribe to authentication state changes
+ * Subscribe to authentication state changes while clearing presigned attachment links
+ * whenever the signed-in UID changes or session ends.
  */
 export function subscribeAuthState(callback: (user: User | null) => void) {
-  return onAuthStateChanged(auth, callback);
+  let previousUid: string | null | undefined = undefined;
+  return onAuthStateChanged(auth, (user) => {
+    const nextUid = user?.uid ?? null;
+    if (previousUid !== undefined && previousUid !== nextUid) {
+      clearAttachmentDownloadCache();
+    }
+    syncAttachmentCacheUser(nextUid);
+    previousUid = nextUid;
+    callback(user);
+  });
 }
 
 /**
@@ -819,41 +834,5 @@ export function subscribeMeetingAttachments(
       logFirestoreError(error, OperationType.LIST, path);
       if (onError) onError(error as Error);
     }
-  );
-}
-
-/**
- * Persists verified Backblaze B2 attachment metadata to Firestore named DB.
- * Must ONLY be called AFTER the backend confirms the object exists and passed validation in B2.
- */
-export async function saveMeetingAttachmentMetadata(attachment: MeetingAttachment): Promise<void> {
-  const uid = getAuthenticatedUid();
-  const path = `users/${uid}/meetings/${attachment.meetingId}/attachments/${attachment.id}`;
-  const payload = sanitizeFirestorePayload({
-    ...attachment,
-    userId: uid,
-  });
-
-  await trackInFlightWrite(
-    setDoc(doc(db, 'users', uid, 'meetings', attachment.meetingId, 'attachments', attachment.id), payload).catch(
-      (error) => handleFirestoreError(error, OperationType.CREATE, path)
-    )
-  );
-}
-
-/**
- * Removes attachment metadata from Firestore named DB.
- * Must ONLY be called AFTER backend confirms deletion from Backblaze B2 succeeded.
- */
-export async function deleteMeetingAttachmentMetadata(
-  meetingId: string,
-  attachmentId: string
-): Promise<void> {
-  const uid = getAuthenticatedUid();
-  const path = `users/${uid}/meetings/${meetingId}/attachments/${attachmentId}`;
-  await trackInFlightWrite(
-    deleteDoc(doc(db, 'users', uid, 'meetings', meetingId, 'attachments', attachmentId)).catch((error) =>
-      handleFirestoreError(error, OperationType.DELETE, path)
-    )
   );
 }

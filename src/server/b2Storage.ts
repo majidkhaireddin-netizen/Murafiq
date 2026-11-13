@@ -44,6 +44,7 @@ export interface VerifiedB2Object {
 
 export interface B2StorageService {
   isConfigured(): boolean;
+  getBucketName?(): string;
   createPresignedUploadUrl(params: {
     key: string;
     contentType: AllowedAttachmentMimeType;
@@ -212,6 +213,10 @@ export function createBackblazeB2StorageService(env: NodeJS.ProcessEnv = process
       return readB2ConfigFromEnv(env) !== null;
     },
 
+    getBucketName(): string {
+      return readB2ConfigFromEnv(env)?.bucketName || 'Murafiq';
+    },
+
     async createPresignedUploadUrl(params): Promise<PresignedUploadOutput> {
       const { client, config } = getClientAndConfig();
       const ttl = params.expiresInSeconds ?? PRESIGNED_UPLOAD_TTL_SECONDS;
@@ -363,12 +368,21 @@ export function createBackblazeB2StorageService(env: NodeJS.ProcessEnv = process
 
     async deleteObject(key: string): Promise<void> {
       const { client, config } = getClientAndConfig();
-      await client.send(
-        new DeleteObjectCommand({
-          Bucket: config.bucketName,
-          Key: key,
-        })
-      );
+      try {
+        await client.send(
+          new DeleteObjectCommand({
+            Bucket: config.bucketName,
+            Key: key,
+          })
+        );
+      } catch (err: any) {
+        const status = err?.$metadata?.httpStatusCode;
+        const name = String(err?.name || err?.Code || '');
+        if (status === 404 || name === 'NoSuchKey' || name === 'NotFound') {
+          return;
+        }
+        throw err;
+      }
     },
   };
 }

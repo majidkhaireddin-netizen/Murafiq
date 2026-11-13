@@ -1,14 +1,18 @@
-import type { AllowedAttachmentMimeType, MeetingAttachment } from '../types/index.ts';
+import type { MeetingAttachment } from '../types/index.ts';
 import {
   isPresignedUrlExpired,
   validateAttachmentFileRequest,
   verifyMagicBytes,
 } from '../utils/attachmentPolicy.ts';
 import {
-  deleteMeetingAttachmentMetadata,
-  getCurrentUserIdToken,
-  saveMeetingAttachmentMetadata,
-} from './firebase.ts';
+  clearAttachmentDownloadCache,
+  getCachedPresignedDownloadUrl,
+  invalidateAttachmentDownloadCacheEntry,
+  setCachedPresignedDownloadUrl,
+} from '../utils/attachmentDownloadCache.ts';
+import { getAuthenticatedUid, getCurrentUserIdToken } from './firebase.ts';
+
+export { clearAttachmentDownloadCache };
 
 export interface PresignUploadResponse {
   attachmentId: string;
@@ -49,14 +53,21 @@ export interface AttachmentUploadDeps {
     onProgress?: (percent: number) => void;
     signal?: AbortSignal;
   }) => Promise<{ etag?: string }>;
-  saveMetadata: (attachment: MeetingAttachment) => Promise<void>;
+}
+
+export interface AttachmentDownloadDeps {
+  isOnline: () => boolean;
+  getUid: () => string;
+  getIdToken: (forceRefresh?: boolean) => Promise<string>;
+  fetchApi: typeof fetch;
+  nowMs?: () => number;
 }
 
 export interface AttachmentDeleteDeps {
   isOnline: () => boolean;
+  getUid?: () => string;
   getIdToken: (forceRefresh?: boolean) => Promise<string>;
   fetchApi: typeof fetch;
-  deleteMetadata: (meetingId: string, attachmentId: string) => Promise<void>;
 }
 
 export class AttachmentClientError extends Error {
@@ -69,17 +80,6 @@ export class AttachmentClientError extends Error {
     this.code = code;
     this.statusCode = statusCode;
   }
-}
-
-interface CachedDownloadEntry {
-  url: string;
-  expiresAt: string;
-}
-
-const downloadUrlMemoryCache = new Map<string, CachedDownloadEntry>();
-
-export function clearAttachmentDownloadCache(): void {
-  downloadUrlMemoryCache.clear();
 }
 
 async function readBrowserFileHeaderBytes(file: File): Promise<Uint8Array> {
@@ -300,14 +300,20 @@ const defaultUploadDeps: AttachmentUploadDeps = {
   readHeaderBytes: readBrowserFileHeaderBytes,
   putFileToPresignedUrl: uploadFileViaXhr,
   putFileViaRelay: uploadFileViaRelayXhr,
-  saveMetadata: saveMeetingAttachmentMetadata,
+};
+
+const defaultDownloadDeps: AttachmentDownloadDeps = {
+  isOnline: () => (typeof navigator !== 'undefined' ? navigator.onLine : true),
+  getUid: () => getAuthenticatedUid(),
+  getIdToken: (forceRefresh) => getCurrentUserIdToken(forceRefresh),
+  fetchApi: (...args) => fetch(...args),
 };
 
 const defaultDeleteDeps: AttachmentDeleteDeps = {
   isOnline: () => (typeof navigator !== 'undefined' ? navigator.onLine : true),
+  getUid: () => getAuthenticatedUid(),
   getIdToken: (forceRefresh) => getCurrentUserIdToken(forceRefresh),
   fetchApi: (...args) => fetch(...args),
-  deleteMetadata: deleteMeetingAttachmentMetadata,
 };
 
 export type UploadStage =
@@ -316,6 +322,29 @@ export type UploadStage =
   | 'uploading'
   | 'verifying'
   | 'saving_metadata';
+
+async function cleanupUncommittedBestEffort(params: {
+  fetchApi: typeof fetch;
+  idToken: string;
+  meetingId: string;
+  attachmentId: string;
+}) {
+  try {
+    await params.fetchApi('/api/attachments/cleanup-uncommitted', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${params.idToken}`,
+      },
+      body: JSON.stringify({
+        meetingId: params.meetingId,
+        attachmentId: params.attachmentId,
+      }),
+    });
+  } catch {
+    // Best-effort cleanup only; server guards prevent deleting any committed object
+  }
+}
 
 export async function uploadMeetingAttachmentWithDeps(
   params: {
@@ -407,70 +436,100 @@ export async function uploadMeetingAttachmentWithDeps(
       typeof deps.putFileViaRelay === 'function';
 
     if (!isCorsOrDirectNetworkFailure) {
+      // Upload was aborted or failed before server completion -> safe to clean up uncommitted intent
+      if (deps.isOnline()) {
+        await cleanupUncommittedBestEffort({
+          fetchApi: deps.fetchApi,
+          idToken,
+          meetingId,
+          attachmentId: presign.attachmentId,
+        });
+      }
       throw uploadErr;
     }
 
-    // Seamless same-origin authenticated upload relay fallback when B2 CORS blocks direct browser PUT
-    onProgress?.(0);
-    await deps.putFileViaRelay!({
-      meetingId,
-      attachmentId: presign.attachmentId,
-      fileName: validation.sanitizedFileName,
-      file,
-      contentType: validation.normalizedContentType,
-      idToken,
-      onProgress,
-      signal,
-    });
+    try {
+      // Seamless same-origin authenticated upload relay fallback when B2 CORS blocks direct browser PUT
+      onProgress?.(0);
+      await deps.putFileViaRelay!({
+        meetingId,
+        attachmentId: presign.attachmentId,
+        fileName: validation.sanitizedFileName,
+        file,
+        contentType: validation.normalizedContentType,
+        idToken,
+        onProgress,
+        signal,
+      });
+    } catch (relayErr) {
+      if (deps.isOnline()) {
+        await cleanupUncommittedBestEffort({
+          fetchApi: deps.fetchApi,
+          idToken,
+          meetingId,
+          attachmentId: presign.attachmentId,
+        });
+      }
+      throw relayErr;
+    }
   }
 
   onProgress?.(100);
   onStageChange?.('verifying');
 
-  const completeRes = await deps.fetchApi('/api/attachments/complete-upload', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${idToken}`,
-    },
-    body: JSON.stringify({
-      meetingId,
-      attachmentId: presign.attachmentId,
-      fileName: validation.sanitizedFileName,
-      contentType: validation.normalizedContentType,
-      sizeBytes: file.size,
-    }),
-  });
-
-  const completedAttachment = await parseJsonApiResponse<MeetingAttachment>(completeRes);
+  // Server-authoritative verification + Firestore metadata commit (with 1 safe idempotent retry on lost response)
+  const callCompleteUpload = async (): Promise<MeetingAttachment> => {
+    const completeRes = await deps.fetchApi('/api/attachments/complete-upload', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({
+        meetingId,
+        attachmentId: presign.attachmentId,
+        fileName: validation.sanitizedFileName,
+        contentType: validation.normalizedContentType,
+        sizeBytes: file.size,
+      }),
+    });
+    return parseJsonApiResponse<MeetingAttachment>(completeRes);
+  };
 
   onStageChange?.('saving_metadata');
 
   try {
-    await deps.saveMetadata(completedAttachment);
-    return completedAttachment;
-  } catch (firestoreErr: any) {
-    // Cleanup orphaned B2 object if Firestore metadata save fails
-    try {
-      await deps.fetchApi('/api/attachments/cleanup-uncommitted', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${idToken}`,
-        },
-        body: JSON.stringify({
-          meetingId,
-          attachmentId: completedAttachment.id,
-        }),
-      });
-    } catch {
-      // Best-effort cleanup; surface honest error below
+    return await callCompleteUpload();
+  } catch (err: any) {
+    const isTransientLostResponse =
+      !(err instanceof AttachmentClientError) ||
+      err.statusCode === 502 ||
+      err.statusCode === 504;
+
+    // IMPORTANT (Req C.8): NEVER invoke cleanup-uncommitted when commit response may have succeeded on the server!
+    if (isTransientLostResponse && deps.isOnline()) {
+      try {
+        return await callCompleteUpload();
+      } catch (retryErr: any) {
+        if (retryErr instanceof AttachmentClientError) {
+          throw retryErr;
+        }
+        throw new AttachmentClientError(
+          'COMPLETE_UPLOAD_UNCERTAIN',
+          'انقطع الاتصال أثناء تأكيد حفظ المرفق على الخادم. إذا لم يظهر المرفق في القائمة بعد ثوانٍ، يرجى إعادة المحاولة بأمان دون حذف الملف.',
+          502
+        );
+      }
+    }
+
+    if (err instanceof AttachmentClientError) {
+      throw err;
     }
 
     throw new AttachmentClientError(
-      'FIRESTORE_METADATA_SAVE_FAILED',
-      'تم رفع الملف للسحابة لكن تعذر حفظ بياناته في قاعدة البيانات. تم تنظيف الملف غير المثبت؛ يرجى المحاولة مرة أخرى.',
-      500
+      'COMPLETE_UPLOAD_UNCERTAIN',
+      'تعذر تأكيد استلام استجابة الخادم لحفظ المرفق. يرجى التحقق من قائمة المرفقات أو إعادة المحاولة.',
+      502
     );
   }
 }
@@ -485,36 +544,57 @@ export async function uploadMeetingAttachment(params: {
   return uploadMeetingAttachmentWithDeps(params, defaultUploadDeps);
 }
 
-export async function getFreshPresignedDownloadUrl(params: {
-  meetingId: string;
-  attachmentId: string;
-  disposition: 'inline' | 'attachment';
-  forceRefresh?: boolean;
-}): Promise<PresignDownloadResponse> {
+export async function getFreshPresignedDownloadUrlWithDeps(
+  params: {
+    meetingId: string;
+    attachmentId: string;
+    disposition: 'inline' | 'attachment';
+    forceRefresh?: boolean;
+  },
+  deps: AttachmentDownloadDeps
+): Promise<PresignDownloadResponse> {
   const { meetingId, attachmentId, disposition, forceRefresh = false } = params;
 
-  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+  if (!deps.isOnline()) {
     throw new AttachmentClientError(
       'OFFLINE_BLOCKED',
       'عرض أو تنزيل المرفقات يتطلب اتصالاً نشطاً بالإنترنت.'
     );
   }
 
-  const cacheKey = `${meetingId}:${attachmentId}:${disposition}`;
+  let uid = '';
+  try {
+    uid = deps.getUid();
+  } catch {
+    clearAttachmentDownloadCache();
+    throw new AttachmentClientError(
+      'UNAUTHENTICATED',
+      'يجب تسجيل الدخول بحساب Google الموثّق للوصول إلى المرفقات.',
+      401
+    );
+  }
+
+  const now = deps.nowMs ? deps.nowMs() : Date.now();
   if (!forceRefresh) {
-    const cached = downloadUrlMemoryCache.get(cacheKey);
-    if (cached && !isPresignedUrlExpired(cached.expiresAt, Date.now(), 10_000)) {
+    const cached = getCachedPresignedDownloadUrl({
+      uid,
+      meetingId,
+      attachmentId,
+      disposition,
+      nowMs: now,
+    });
+    if (cached) {
       return {
         attachmentId,
-        downloadUrl: cached.url,
+        downloadUrl: cached.downloadUrl,
         expiresAt: cached.expiresAt,
         disposition,
       };
     }
   }
 
-  const idToken = await getCurrentUserIdToken();
-  const res = await fetch('/api/attachments/presign-download', {
+  const idToken = await deps.getIdToken();
+  const res = await deps.fetchApi('/api/attachments/presign-download', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -532,7 +612,12 @@ export async function getFreshPresignedDownloadUrl(params: {
     expiresAt: string;
     expiresInSeconds?: number;
   }>(res);
-  downloadUrlMemoryCache.set(cacheKey, {
+
+  setCachedPresignedDownloadUrl({
+    uid,
+    meetingId,
+    attachmentId,
+    disposition,
     url: data.downloadUrl,
     expiresAt: data.expiresAt,
   });
@@ -543,6 +628,15 @@ export async function getFreshPresignedDownloadUrl(params: {
     expiresAt: data.expiresAt,
     disposition,
   };
+}
+
+export async function getFreshPresignedDownloadUrl(params: {
+  meetingId: string;
+  attachmentId: string;
+  disposition: 'inline' | 'attachment';
+  forceRefresh?: boolean;
+}): Promise<PresignDownloadResponse> {
+  return getFreshPresignedDownloadUrlWithDeps(params, defaultDownloadDeps);
 }
 
 export async function fetchAttachmentBlobViaRelay(params: {
@@ -613,11 +707,13 @@ export async function deleteMeetingAttachmentWithDeps(
 
   await parseJsonApiResponse<{ deleted: boolean }>(res);
 
-  // ONLY delete Firestore metadata AFTER Backblaze B2 object deletion succeeds
-  await deps.deleteMetadata(meetingId, attachmentId);
-
-  downloadUrlMemoryCache.delete(`${meetingId}:${attachmentId}:inline`);
-  downloadUrlMemoryCache.delete(`${meetingId}:${attachmentId}:attachment`);
+  let uid: string | null = null;
+  try {
+    uid = deps.getUid ? deps.getUid() : null;
+  } catch {
+    uid = null;
+  }
+  invalidateAttachmentDownloadCacheEntry({ uid, meetingId, attachmentId });
 }
 
 export async function deleteMeetingAttachment(params: {

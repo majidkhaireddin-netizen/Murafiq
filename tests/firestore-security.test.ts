@@ -62,7 +62,7 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
     }
   });
 
-  const dbTargets = ['(default)'];
+  const dbTargets = [NAMED_DB_ID];
 
   for (const dbId of dbTargets) {
     await t.test(`Database Target [${dbId}]: Security & Data Isolation Assertions`, async (st) => {
@@ -288,29 +288,12 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
         assert.equal(clientsSnap.empty, true);
       });
 
-      // 8b. Meeting Attachments Subcollection Security Rules
-      await st.test(`8b. Meeting attachments subcollection isolation & validation on ${dbId}`, async () => {
+      // 8b. Meeting Attachments & UploadIntents Subcollection Security Rules (Server-Authoritative Writes)
+      await st.test(`8b. Meeting attachments allow owner reads only (client writes denied) & uploadIntents deny all client access on ${dbId}`, async () => {
         const aliceCtx = testEnv.authenticatedContext(USER_A_UID);
         const aliceDb = getDbInstance(aliceCtx, dbId);
         const bobCtx = testEnv.authenticatedContext(USER_B_UID);
         const bobDb = getDbInstance(bobCtx, dbId);
-
-        // Master Gate: attachment creation fails if parent meeting does not exist
-        const orphanAttRef = doc(aliceDb, `users/${USER_A_UID}/meetings/missing_meet/attachments/att_1`);
-        await assertFails(
-          setDoc(orphanAttRef, {
-            id: 'att_1',
-            userId: USER_A_UID,
-            meetingId: 'missing_meet',
-            fileName: 'notes.jpg',
-            contentType: 'image/jpeg',
-            sizeBytes: 2048,
-            storageKey: `users/${USER_A_UID}/meetings/missing_meet/attachments/att_1`,
-            storageProvider: 'backblaze_b2',
-            uploadStatus: 'completed',
-            createdAt: '2026-11-13T10:00:00.000Z',
-          })
-        );
 
         // Create parent meeting first
         await assertSucceeds(
@@ -327,82 +310,80 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
           })
         );
 
-        // Valid attachment metadata succeeds
-        const validAttRef = doc(aliceDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_valid_1`);
-        await assertSucceeds(
-          setDoc(validAttRef, {
-            id: 'att_valid_1',
+        // Direct browser client creation of attachment MUST FAIL (only server Admin SDK may commit)
+        const directAttRef = doc(aliceDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_client_forged`);
+        await assertFails(
+          setDoc(directAttRef, {
+            id: 'att_client_forged',
             userId: USER_A_UID,
             meetingId: 'meet_att_1',
             fileName: 'contract.pdf',
             contentType: 'application/pdf',
             sizeBytes: 4096,
-            storageKey: `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_valid_1`,
+            storageKey: `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_client_forged`,
             storageProvider: 'backblaze_b2',
             uploadStatus: 'completed',
+            deleteStatus: 'active',
             createdAt: '2026-11-13T10:05:00.000Z',
           })
         );
+
+        // Direct client access to uploadIntents MUST FAIL (read & write)
+        const intentRef = doc(aliceDb, `users/${USER_A_UID}/meetings/meet_att_1/uploadIntents/intent_1`);
+        await assertFails(getDoc(intentRef));
+        await assertFails(
+          setDoc(intentRef, {
+            attachmentId: 'intent_1',
+            userId: USER_A_UID,
+            meetingId: 'meet_att_1',
+            status: 'pending',
+          })
+        );
+
+        // Server-trusted Admin seed (via withSecurityRulesDisabled) creates verified attachment
+        await testEnv.withSecurityRulesDisabled(async (adminCtx) => {
+          const adminDb = getDbInstance(adminCtx, dbId);
+          await setDoc(
+            doc(adminDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_server_1`),
+            {
+              id: 'att_server_1',
+              userId: USER_A_UID,
+              meetingId: 'meet_att_1',
+              fileName: 'contract.pdf',
+              contentType: 'application/pdf',
+              sizeBytes: 4096,
+              storageKey: `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_server_1`,
+              storageProvider: 'backblaze_b2',
+              uploadStatus: 'completed',
+              deleteStatus: 'active',
+              createdAt: '2026-11-13T10:05:00.000Z',
+            }
+          );
+          await setDoc(
+            doc(adminDb, `users/${USER_A_UID}/meetings/meet_att_1/uploadIntents/att_server_1`),
+            {
+              attachmentId: 'att_server_1',
+              userId: USER_A_UID,
+              meetingId: 'meet_att_1',
+              status: 'committed',
+            }
+          );
+        });
+
+        // Owner Alice CAN read/list her server-committed attachment, CANNOT update/delete directly from browser
+        const validAttRef = doc(aliceDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_server_1`);
         await assertSucceeds(getDoc(validAttRef));
         await assertSucceeds(getDocs(collection(aliceDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments`)));
-
-        // Immutable update denied
         await assertFails(updateDoc(validAttRef, { fileName: 'tampered.pdf' }));
+        await assertFails(deleteDoc(validAttRef));
 
-        // Cross-user Bob denied
-        await assertFails(getDoc(doc(bobDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_valid_1`)));
-        await assertFails(
-          deleteDoc(doc(bobDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_valid_1`))
-        );
+        // Owner Alice still CANNOT read uploadIntents
+        await assertFails(getDoc(doc(aliceDb, `users/${USER_A_UID}/meetings/meet_att_1/uploadIntents/att_server_1`)));
 
-        // Disallowed MIME / size > 10MB / forged storageKey denied
-        await assertFails(
-          setDoc(doc(aliceDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_bad_mime`), {
-            id: 'att_bad_mime',
-            userId: USER_A_UID,
-            meetingId: 'meet_att_1',
-            fileName: 'evil.html',
-            contentType: 'text/html',
-            sizeBytes: 1024,
-            storageKey: `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_bad_mime`,
-            storageProvider: 'backblaze_b2',
-            uploadStatus: 'completed',
-            createdAt: '2026-11-13T10:05:00.000Z',
-          })
-        );
-
-        await assertFails(
-          setDoc(doc(aliceDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_too_big`), {
-            id: 'att_too_big',
-            userId: USER_A_UID,
-            meetingId: 'meet_att_1',
-            fileName: 'big.pdf',
-            contentType: 'application/pdf',
-            sizeBytes: 10485761,
-            storageKey: `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_too_big`,
-            storageProvider: 'backblaze_b2',
-            uploadStatus: 'completed',
-            createdAt: '2026-11-13T10:05:00.000Z',
-          })
-        );
-
-        await assertFails(
-          setDoc(doc(aliceDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_bad_key`), {
-            id: 'att_bad_key',
-            userId: USER_A_UID,
-            meetingId: 'meet_att_1',
-            fileName: 'ok.jpg',
-            contentType: 'image/jpeg',
-            sizeBytes: 1024,
-            storageKey: `users/${USER_B_UID}/meetings/meet_att_1/attachments/att_bad_key`,
-            storageProvider: 'backblaze_b2',
-            uploadStatus: 'completed',
-            createdAt: '2026-11-13T10:05:00.000Z',
-          })
-        );
-
-        // Owner delete succeeds
-        await assertSucceeds(deleteDoc(validAttRef));
+        // Cross-user Bob CANNOT read, list, write, or delete Alice's attachment
+        await assertFails(getDoc(doc(bobDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_server_1`)));
+        await assertFails(getDocs(collection(bobDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments`)));
+        await assertFails(deleteDoc(doc(bobDb, `users/${USER_A_UID}/meetings/meet_att_1/attachments/att_server_1`)));
       });
     });
   }

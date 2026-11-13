@@ -1,6 +1,11 @@
 import * as crypto from 'crypto';
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
+import type {
+  AllowedAttachmentMimeType,
+  MeetingAttachment,
+  UploadIntentRecord,
+} from '../types/index.ts';
 import {
   buildAttachmentStorageKey,
   isValidResourceId,
@@ -12,12 +17,17 @@ import {
 } from '../utils/attachmentPolicy.ts';
 import { createBackblazeB2StorageService, type B2StorageService } from './b2Storage.ts';
 import {
+  createFirebaseAttachmentMetadataStore,
   verifyAttachmentOwnershipInNamedDb,
   verifyFirebaseBearerToken,
   verifyMeetingOwnershipInNamedDb,
+  type AttachmentMetadataStore,
   type MeetingAttachmentRecordCheck,
   type VerifiedFirebaseUser,
 } from './firebaseServerAuth.ts';
+
+// Allow 15 minutes for complete-upload retries on an authorized upload intent
+const UPLOAD_INTENT_GRACE_MS = 15 * 60 * 1000;
 
 export interface AuthenticatedRequest extends Request {
   authUser?: VerifiedFirebaseUser;
@@ -32,8 +42,10 @@ export interface AttachmentsRouterDeps {
     attachmentId: string;
     idToken: string;
   }) => Promise<MeetingAttachmentRecordCheck>;
+  metadataStore?: AttachmentMetadataStore;
   storageService?: B2StorageService;
   generateAttachmentId?: () => string;
+  now?: () => number;
 }
 
 function rejectIfCallerTriedPathOrUidSpoofing(
@@ -49,6 +61,10 @@ function rejectIfCallerTriedPathOrUidSpoofing(
     return 'يُمنع تحديد مسار الملف أو الـ Bucket من جهة العميل؛ يولّد الخادم المسار تلقائياً.';
   }
 
+  if (body.uploadStatus !== undefined || body.deleteStatus !== undefined) {
+    return 'يُمنع تحديد حالة الاعتماد أو الحذف من جهة العميل؛ الخادم هو الجهة الموثوقة لإدارة الحالة.';
+  }
+
   const claimedUid = body.uid ?? body.userId ?? body.ownerId;
   if (claimedUid !== undefined && claimedUid !== verifiedUid) {
     return 'مرفوض: لا يُسمح بطلب أو تعديل مرفقات تخص حساباً آخر.';
@@ -62,6 +78,35 @@ function encodeRfc5987HeaderValue(fileName: string): string {
     /['()*!]/g,
     (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`
   );
+}
+
+function handleServerConfigOrAccessError(
+  err: any,
+  res: Response,
+  fallbackStatus: number,
+  fallbackCode: string,
+  fallbackArabic: string
+): void {
+  const msg = String(err?.message || '');
+  if (msg.startsWith('FORBIDDEN:')) {
+    res.status(403).json({
+      error: 'FORBIDDEN',
+      messageArabic: 'تم رفض الوصول إلى بيانات اللقاء.',
+    });
+    return;
+  }
+  if (msg.startsWith('FIREBASE_ADMIN_NOT_CONFIGURED:')) {
+    res.status(503).json({
+      error: 'FIREBASE_ADMIN_NOT_CONFIGURED',
+      messageArabic:
+        'تعذر إتمام العملية لأن صلاحيات خادم Firebase Admin غير مهيأة بعد للوصول إلى قاعدة البيانات المسماة.',
+    });
+    return;
+  }
+  res.status(fallbackStatus).json({
+    error: fallbackCode,
+    messageArabic: fallbackArabic,
+  });
 }
 
 async function readBinaryBodyCapped(req: Request, maxBytes: number): Promise<Uint8Array> {
@@ -130,16 +175,50 @@ async function readBinaryBodyCapped(req: Request, maxBytes: number): Promise<Uin
   });
 }
 
+/**
+ * Per-attachment async lock queue so overlapping complete-upload, cleanup-uncommitted,
+ * relay-upload, and delete operations on the same attachment execute strictly sequentially.
+ */
+function createAttachmentLockManager() {
+  const tails = new Map<string, Promise<unknown>>();
+
+  return async function withAttachmentLock<T>(
+    key: string,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    const prev = tails.get(key) || Promise.resolve();
+    const next = prev.then(
+      () => fn(),
+      () => fn()
+    );
+    const tailCleanup = next.then(
+      () => undefined,
+      () => undefined
+    );
+    tails.set(key, tailCleanup);
+    try {
+      return await next;
+    } finally {
+      if (tails.get(key) === tailCleanup) {
+        tails.delete(key);
+      }
+    }
+  };
+}
+
 export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) {
   const router = express.Router();
   const verifyToken = customDeps.verifyBearerToken ?? verifyFirebaseBearerToken;
   const verifyMeetingOwner = customDeps.verifyMeetingOwnership ?? verifyMeetingOwnershipInNamedDb;
   const verifyAttachmentOwner =
     customDeps.verifyAttachmentOwnership ?? verifyAttachmentOwnershipInNamedDb;
+  const metadataStore = customDeps.metadataStore ?? createFirebaseAttachmentMetadataStore();
   const storage = customDeps.storageService ?? createBackblazeB2StorageService();
   const generateId =
     customDeps.generateAttachmentId ??
     (() => `att_${crypto.randomUUID().replace(/-/g, '')}`);
+  const nowMs = customDeps.now ?? (() => Date.now());
+  const withAttachmentLock = createAttachmentLockManager();
 
   const requireAuth = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
@@ -172,7 +251,7 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
 
   router.use(requireAuth);
 
-  // 1. Issue short-lived S3 Presigned PUT URL for uploading a validated file
+  // 1. Issue short-lived S3 Presigned PUT URL and record a server-authoritative UploadIntent
   router.post('/presign-upload', async (req: AuthenticatedRequest, res: Response) => {
     try {
       const uid = req.authUser!.uid;
@@ -236,6 +315,26 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
         attachmentId,
       });
 
+      const currentMs = nowMs();
+      const nowIso = new Date(currentMs).toISOString();
+      const intentExpiresAt = new Date(currentMs + UPLOAD_INTENT_GRACE_MS).toISOString();
+      const intent: UploadIntentRecord = {
+        attachmentId,
+        userId: uid,
+        meetingId: body.meetingId,
+        fileName: fileValidation.sanitizedFileName,
+        contentType: fileValidation.normalizedContentType,
+        sizeBytes: body.sizeBytes as number,
+        storageKey,
+        bucket: storage.getBucketName ? storage.getBucketName() : 'Murafiq',
+        status: 'pending',
+        expiresAt: intentExpiresAt,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+
+      await metadataStore.createUploadIntent(intent);
+
       const presigned = await storage.createPresignedUploadUrl({
         key: storageKey,
         contentType: fileValidation.normalizedContentType,
@@ -258,19 +357,17 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
         },
       });
     } catch (err: any) {
-      const msg = String(err?.message || '');
-      if (msg.startsWith('FORBIDDEN:')) {
-        res.status(403).json({ error: 'FORBIDDEN', messageArabic: 'تم رفض الوصول إلى بيانات اللقاء.' });
-        return;
-      }
-      res.status(500).json({
-        error: 'PRESIGN_UPLOAD_FAILED',
-        messageArabic: 'تعذر تجهيز رابط الرفع الآمن من الخادم. حاول مرة أخرى.',
-      });
+      handleServerConfigOrAccessError(
+        err,
+        res,
+        500,
+        'PRESIGN_UPLOAD_FAILED',
+        'تعذر تجهيز رابط الرفع الآمن من الخادم. حاول مرة أخرى.'
+      );
     }
   });
 
-  // 2. Verify uploaded object in Backblaze B2 (existence, exact size, magic bytes) before Firestore commit
+  // 2. Server-authoritative B2 object verification & transactional Firestore attachment commit
   router.post('/complete-upload', async (req: AuthenticatedRequest, res: Response) => {
     try {
       const uid = req.authUser!.uid;
@@ -290,6 +387,9 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
         return;
       }
 
+      const meetingId = body.meetingId;
+      const attachmentId = body.attachmentId;
+
       const fileValidation = validateAttachmentFileRequest({
         fileName: body.fileName,
         contentType: body.contentType,
@@ -306,7 +406,7 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
 
       const ownsMeeting = await verifyMeetingOwner({
         uid,
-        meetingId: body.meetingId,
+        meetingId,
         idToken: req.authUser!.idToken,
       });
 
@@ -326,46 +426,163 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
         return;
       }
 
-      const storageKey = buildAttachmentStorageKey({
-        uid,
-        meetingId: body.meetingId,
-        attachmentId: body.attachmentId,
-      });
-
-      const verification = await storage.verifyUploadedObject({
-        key: storageKey,
-        expectedContentType: fileValidation.normalizedContentType,
-        expectedSizeBytes: body.sizeBytes as number,
-      });
-
-      if (!verification.verified) {
-        res.status(422).json({
-          error: 'UPLOAD_VERIFICATION_FAILED',
-          messageArabic:
-            verification.reasonArabic ||
-            'فشل التحقق من الملف المرفوع في Backblaze B2. يرجى إعادة المحاولة.',
+      const lockKey = `${uid}:${meetingId}:${attachmentId}`;
+      const result = await withAttachmentLock(lockKey, async () => {
+        // Idempotency check: if already committed in Firestore, return existing record immediately
+        const existingAtt = await metadataStore.getAttachmentRecord({
+          uid,
+          meetingId,
+          attachmentId,
         });
-        return;
-      }
+        if (existingAtt.exists && existingAtt.record) {
+          return { status: 200 as const, body: existingAtt.record };
+        }
 
-      res.json({
-        id: body.attachmentId,
-        userId: uid,
-        meetingId: body.meetingId,
-        fileName: fileValidation.sanitizedFileName,
-        contentType: fileValidation.normalizedContentType,
-        sizeBytes: verification.sizeBytes,
-        storageKey,
-        storageProvider: 'backblaze_b2',
-        uploadStatus: 'completed',
-        etag: verification.etag,
-        createdAt: new Date().toISOString(),
+        // Verify server-authoritative UploadIntent
+        const intent = await metadataStore.getUploadIntent({
+          uid,
+          meetingId,
+          attachmentId,
+        });
+        if (!intent) {
+          return {
+            status: 404 as const,
+            body: {
+              error: 'UPLOAD_INTENT_NOT_FOUND',
+              messageArabic: 'مرفوض: لا يوجد إذن رفع موثق لهذه العملية.',
+            },
+          };
+        }
+
+        if (intent.userId !== uid || intent.meetingId !== meetingId) {
+          return {
+            status: 403 as const,
+            body: {
+              error: 'UPLOAD_INTENT_MISMATCH',
+              messageArabic: 'مرفوض: بيانات عملية الرفع لا تطابق الحساب أو اللقاء المصرح به.',
+            },
+          };
+        }
+
+        if (intent.status === 'abandoned' || intent.status === 'deleted') {
+          return {
+            status: 409 as const,
+            body: {
+              error: 'UPLOAD_INTENT_ABANDONED',
+              messageArabic: 'تم إلغاء أو إنهاء عملية الرفع هذه مسبقاً. يرجى بدء رفع جديد.',
+            },
+          };
+        }
+
+        if (
+          intent.fileName !== fileValidation.sanitizedFileName ||
+          intent.contentType !== fileValidation.normalizedContentType ||
+          intent.sizeBytes !== body.sizeBytes
+        ) {
+          return {
+            status: 403 as const,
+            body: {
+              error: 'UPLOAD_INTENT_MISMATCH',
+              messageArabic: 'بيانات الملف المرفوع لا تطابق البيانات المعتمدة عند بدء الرفع.',
+            },
+          };
+        }
+
+        const storageKey = buildAttachmentStorageKey({
+          uid,
+          meetingId,
+          attachmentId,
+        });
+
+        // Verify B2 object existence, exact size, and binary Magic Bytes
+        const verification = await storage.verifyUploadedObject({
+          key: storageKey,
+          expectedContentType: intent.contentType,
+          expectedSizeBytes: intent.sizeBytes,
+        });
+
+        if (!verification.verified) {
+          // If B2 object is invalid/disguised/missing, safely mark intent abandoned
+          await metadataStore
+            .markUploadIntentAbandonedIfPending({
+              uid,
+              meetingId,
+              attachmentId,
+              nowIso: new Date(nowMs()).toISOString(),
+            })
+            .catch(() => {});
+
+          return {
+            status: 422 as const,
+            body: {
+              error: 'UPLOAD_VERIFICATION_FAILED',
+              messageArabic:
+                verification.reasonArabic ||
+                'فشل التحقق من الملف المرفوع في Backblaze B2. يرجى إعادة المحاولة.',
+            },
+          };
+        }
+
+        const nowIso = new Date(nowMs()).toISOString();
+        const attachmentPayload: MeetingAttachment = {
+          id: attachmentId,
+          userId: uid,
+          meetingId,
+          fileName: intent.fileName,
+          contentType: intent.contentType,
+          sizeBytes: verification.sizeBytes,
+          storageKey,
+          storageProvider: 'backblaze_b2',
+          uploadStatus: 'completed',
+          deleteStatus: 'active',
+          etag: verification.etag,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        };
+
+        const commitRes = await metadataStore.commitAttachmentFromIntent({
+          uid,
+          meetingId,
+          attachmentId,
+          attachment: attachmentPayload,
+          nowIso,
+        });
+
+        if (commitRes.outcome === 'committed' || commitRes.outcome === 'already_committed') {
+          return {
+            status: 200 as const,
+            body: commitRes.record!,
+          };
+        }
+
+        if (commitRes.outcome === 'intent_abandoned') {
+          return {
+            status: 409 as const,
+            body: {
+              error: 'UPLOAD_INTENT_ABANDONED',
+              messageArabic: 'تم إلغاء عملية الرفع قبل التثبيت. يرجى إعادة رفع الملف.',
+            },
+          };
+        }
+
+        return {
+          status: 404 as const,
+          body: {
+            error: 'UPLOAD_INTENT_NOT_FOUND',
+            messageArabic: 'تعذر العثور على إذن الرفع أثناء التثبيت.',
+          },
+        };
       });
-    } catch {
-      res.status(500).json({
-        error: 'COMPLETE_UPLOAD_FAILED',
-        messageArabic: 'حدث خطأ أثناء التحقق من اكتمال رفع المرفق.',
-      });
+
+      res.status(result.status).json(result.body);
+    } catch (err: any) {
+      handleServerConfigOrAccessError(
+        err,
+        res,
+        500,
+        'COMPLETE_UPLOAD_FAILED',
+        'حدث خطأ أثناء التحقق من اكتمال رفع المرفق وحفظه في قاعدة البيانات.'
+      );
     }
   });
 
@@ -417,6 +634,14 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
         return;
       }
 
+      if (attCheck.deleteStatus === 'b2_deleted') {
+        res.status(410).json({
+          error: 'ATTACHMENT_BEING_DELETED',
+          messageArabic: 'تمت إزالة هذا المرفق من التخزين السحابي وهو بانتظار استكمال حذف السجل.',
+        });
+        return;
+      }
+
       if (!storage.isConfigured()) {
         res.status(503).json({
           error: 'STORAGE_NOT_CONFIGURED',
@@ -441,13 +666,13 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
 
       const disposition = body.disposition === 'attachment' ? 'attachment' : 'inline';
       const contentType =
-        (attCheck.contentType as any) ||
+        (attCheck.contentType as AllowedAttachmentMimeType) ||
         validateAttachmentFileRequest({
           fileName: attCheck.fileName || 'file.pdf',
           contentType: attCheck.contentType || 'application/pdf',
           sizeBytes: 1024,
         }).normalizedContentType ||
-        'application/octet-stream';
+        ('application/pdf' as AllowedAttachmentMimeType);
 
       const presigned = await storage.createPresignedDownloadUrl({
         key: expectedKey,
@@ -462,15 +687,18 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
         expiresAt: presigned.expiresAt,
         expiresInSeconds: presigned.expiresInSeconds,
       });
-    } catch {
-      res.status(500).json({
-        error: 'PRESIGN_DOWNLOAD_FAILED',
-        messageArabic: 'تعذر إنشاء رابط عرض أو تنزيل مؤقت للمرفق.',
-      });
+    } catch (err: any) {
+      handleServerConfigOrAccessError(
+        err,
+        res,
+        500,
+        'PRESIGN_DOWNLOAD_FAILED',
+        'تعذر إنشاء رابط عرض أو تنزيل مؤقت للمرفق.'
+      );
     }
   });
 
-  // 4. Delete attachment object from Backblaze B2 (must succeed before Firestore metadata deletion)
+  // 4. Server-coordinated recoverable deletion of attachment from B2 and named Firestore DB
   router.post('/delete', async (req: AuthenticatedRequest, res: Response) => {
     try {
       const uid = req.authUser!.uid;
@@ -490,30 +718,18 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
         return;
       }
 
+      const meetingId = body.meetingId;
+      const attachmentId = body.attachmentId;
+
       const ownsMeeting = await verifyMeetingOwner({
         uid,
-        meetingId: body.meetingId,
+        meetingId,
         idToken: req.authUser!.idToken,
       });
       if (!ownsMeeting) {
         res.status(403).json({
           error: 'MEETING_ACCESS_DENIED',
           messageArabic: 'مرفوض: لا تملك صلاحية حذف مرفقات هذا اللقاء.',
-        });
-        return;
-      }
-
-      const attCheck = await verifyAttachmentOwner({
-        uid,
-        meetingId: body.meetingId,
-        attachmentId: body.attachmentId,
-        idToken: req.authUser!.idToken,
-      });
-
-      if (!attCheck.exists) {
-        res.status(404).json({
-          error: 'ATTACHMENT_NOT_FOUND',
-          messageArabic: 'المرفق غير موجود في سجلات هذا اللقاء.',
         });
         return;
       }
@@ -526,39 +742,167 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
         return;
       }
 
-      const expectedKey = buildAttachmentStorageKey({
-        uid,
-        meetingId: body.meetingId,
-        attachmentId: body.attachmentId,
-      });
+      const lockKey = `${uid}:${meetingId}:${attachmentId}`;
+      const result = await withAttachmentLock(lockKey, async () => {
+        // Check attachment record in named DB via trusted store
+        let attCheck: MeetingAttachmentRecordCheck;
+        try {
+          attCheck = await metadataStore.getAttachmentRecord({
+            uid,
+            meetingId,
+            attachmentId,
+          });
+        } catch (err: any) {
+          if (String(err?.message || '').startsWith('FIREBASE_ADMIN_NOT_CONFIGURED:')) {
+            throw err;
+          }
+          attCheck = await verifyAttachmentOwner({
+            uid,
+            meetingId,
+            attachmentId,
+            idToken: req.authUser!.idToken,
+          });
+        }
 
-      try {
-        await storage.deleteObject(expectedKey);
-      } catch {
-        res.status(502).json({
-          error: 'B2_DELETE_FAILED',
-          messageArabic:
-            'فشل حذف الملف من خادم التخزين (Backblaze B2). لم يتم مسح سجل المرفق لتجنب ترك ملفات يتيمة.',
+        if (!attCheck.exists) {
+          // Idempotent duplicate delete check: if intent is already marked deleted, return clean 200
+          const existingIntent = await metadataStore
+            .getUploadIntent({ uid, meetingId, attachmentId })
+            .catch(() => null);
+          if (existingIntent?.status === 'deleted') {
+            return {
+              status: 200 as const,
+              body: {
+                deleted: true,
+                alreadyDeleted: true,
+                attachmentId,
+              },
+            };
+          }
+
+          return {
+            status: 404 as const,
+            body: {
+              error: 'ATTACHMENT_NOT_FOUND',
+              messageArabic: 'المرفق غير موجود في سجلات هذا اللقاء.',
+            },
+          };
+        }
+
+        const expectedKey = buildAttachmentStorageKey({
+          uid,
+          meetingId,
+          attachmentId,
         });
-        return;
-      }
 
-      res.json({
-        deleted: true,
-        attachmentId: body.attachmentId,
-        storageKey: expectedKey,
-        versioningNoteArabic:
-          'تم إرسال أمر الحذف للإصدار الحالي في Backblaze B2 (قد تبقى إصدارات سابقة مخفية إذا كان Versioning مفعّلاً على الـ Bucket وفق سياسات دورة الحياة).',
+        if (attCheck.storageKey && attCheck.storageKey !== expectedKey) {
+          return {
+            status: 403 as const,
+            body: {
+              error: 'STORAGE_KEY_MISMATCH',
+              messageArabic: 'مسار الملف المحفوظ لا يطابق مسار الحساب المصرح به.',
+            },
+          };
+        }
+
+        const currentDeleteStatus = attCheck.deleteStatus || 'active';
+
+        // Step A: Delete from B2 unless a previous recoverable pass already confirmed B2 deletion
+        if (currentDeleteStatus !== 'b2_deleted') {
+          await metadataStore.updateAttachmentDeleteStatus({
+            uid,
+            meetingId,
+            attachmentId,
+            deleteStatus: 'deleting',
+            updatedAt: new Date(nowMs()).toISOString(),
+          });
+
+          try {
+            await storage.deleteObject(expectedKey);
+          } catch {
+            const failMsg =
+              'تعذر حذف الملف من التخزين السحابي (Backblaze B2). تم الإبقاء على سجل المرفق لتتمكن من إعادة المحاولة بأمان.';
+            await metadataStore
+              .updateAttachmentDeleteStatus({
+                uid,
+                meetingId,
+                attachmentId,
+                deleteStatus: 'delete_failed',
+                deleteErrorArabic: failMsg,
+                updatedAt: new Date(nowMs()).toISOString(),
+              })
+              .catch(() => {});
+
+            return {
+              status: 502 as const,
+              body: {
+                error: 'B2_DELETE_FAILED',
+                recoverable: true,
+                deleteStatus: 'delete_failed',
+                messageArabic: failMsg,
+              },
+            };
+          }
+
+          // Record transitional state so retry skips/survives even if Firestore delete fails next
+          await metadataStore
+            .updateAttachmentDeleteStatus({
+              uid,
+              meetingId,
+              attachmentId,
+              deleteStatus: 'b2_deleted',
+              deleteErrorArabic: '',
+              updatedAt: new Date(nowMs()).toISOString(),
+            })
+            .catch(() => {});
+        }
+
+        // Step B: Finalize Firestore metadata deletion on the named DB
+        try {
+          await metadataStore.finalizeAttachmentDeletion({
+            uid,
+            meetingId,
+            attachmentId,
+            nowIso: new Date(nowMs()).toISOString(),
+          });
+        } catch {
+          return {
+            status: 502 as const,
+            body: {
+              error: 'FIRESTORE_DELETE_INCOMPLETE',
+              recoverable: true,
+              deleteStatus: 'b2_deleted',
+              messageArabic:
+                'تم حذف الملف من التخزين السحابي، لكن تعذر حذف سجله من قاعدة البيانات. أعد الضغط على حذف لإكمال التنظيف.',
+            },
+          };
+        }
+
+        return {
+          status: 200 as const,
+          body: {
+            deleted: true,
+            attachmentId,
+            storageKey: expectedKey,
+            versioningNoteArabic:
+              'تم حذف المرفق وسجله من قاعدة البيانات، وأُرسل أمر حذف الإصدار الحالي إلى Backblaze B2.',
+          },
+        };
       });
-    } catch {
-      res.status(500).json({
-        error: 'DELETE_ATTACHMENT_FAILED',
-        messageArabic: 'تعذر إتمام حذف المرفق من الخادم.',
-      });
+
+      res.status(result.status).json(result.body);
+    } catch (err: any) {
+      handleServerConfigOrAccessError(
+        err,
+        res,
+        500,
+        'DELETE_ATTACHMENT_FAILED',
+        'تعذر إتمام حذف المرفق من الخادم. يمكنك إعادة المحاولة لاحقاً.'
+      );
     }
   });
 
-  // 5. Cleanup uncommitted B2 object if Firestore metadata save fails right after B2 upload
+  // 5. Hardened cleanup of uncommitted B2 objects (NEVER deletes committed attachments)
   router.post('/cleanup-uncommitted', async (req: AuthenticatedRequest, res: Response) => {
     try {
       const uid = req.authUser!.uid;
@@ -578,9 +922,12 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
         return;
       }
 
+      const meetingId = body.meetingId;
+      const attachmentId = body.attachmentId;
+
       const ownsMeeting = await verifyMeetingOwner({
         uid,
-        meetingId: body.meetingId,
+        meetingId,
         idToken: req.authUser!.idToken,
       });
       if (!ownsMeeting) {
@@ -599,19 +946,61 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
         return;
       }
 
-      const expectedKey = buildAttachmentStorageKey({
-        uid,
-        meetingId: body.meetingId,
-        attachmentId: body.attachmentId,
+      const lockKey = `${uid}:${meetingId}:${attachmentId}`;
+      const result = await withAttachmentLock(lockKey, async () => {
+        const markRes = await metadataStore.markUploadIntentAbandonedIfPending({
+          uid,
+          meetingId,
+          attachmentId,
+          nowIso: new Date(nowMs()).toISOString(),
+        });
+
+        if (markRes.outcome === 'already_committed') {
+          return {
+            status: 409 as const,
+            body: {
+              error: 'ATTACHMENT_ALREADY_COMMITTED',
+              messageArabic: 'مرفوض: المرفق معتمد ومحفوظ بالفعل ولا يمكن حذفه عبر مسار التنظيف المؤقت.',
+            },
+          };
+        }
+
+        if (markRes.outcome === 'not_found') {
+          return {
+            status: 404 as const,
+            body: {
+              error: 'UPLOAD_INTENT_NOT_FOUND',
+              messageArabic: 'لا توجد عملية رفع مؤقتة غير معتمدة لهذا المعرّف.',
+            },
+          };
+        }
+
+        const expectedKey = buildAttachmentStorageKey({
+          uid,
+          meetingId,
+          attachmentId,
+        });
+
+        await storage.deleteObject(expectedKey);
+        return {
+          status: 200 as const,
+          body: {
+            cleanedUp: true,
+            alreadyCleaned: markRes.outcome === 'already_abandoned',
+            attachmentId,
+          },
+        };
       });
 
-      await storage.deleteObject(expectedKey);
-      res.json({ cleanedUp: true, attachmentId: body.attachmentId });
-    } catch {
-      res.status(502).json({
-        error: 'CLEANUP_FAILED',
-        messageArabic: 'تعذر تنظيف الملف المؤقت من Backblaze B2.',
-      });
+      res.status(result.status).json(result.body);
+    } catch (err: any) {
+      handleServerConfigOrAccessError(
+        err,
+        res,
+        502,
+        'CLEANUP_FAILED',
+        'تعذر تنظيف الملف المؤقت من Backblaze B2.'
+      );
     }
   });
 
@@ -628,6 +1017,8 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
         bucket: req.headers['x-bucket'] ?? queryObj.bucket,
         uid: req.headers['x-uid'] ?? queryObj.uid,
         userId: req.headers['x-user-id'] ?? queryObj.userId,
+        uploadStatus: req.headers['x-upload-status'] ?? queryObj.uploadStatus,
+        deleteStatus: req.headers['x-delete-status'] ?? queryObj.deleteStatus,
       };
       const spoofError = rejectIfCallerTriedPathOrUidSpoofing(spoofCheckObj, uid);
       if (spoofError) {
@@ -701,6 +1092,38 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
         return;
       }
 
+      const intent = await metadataStore.getUploadIntent({
+        uid,
+        meetingId,
+        attachmentId,
+      });
+      if (!intent) {
+        res.status(404).json({
+          error: 'UPLOAD_INTENT_NOT_FOUND',
+          messageArabic: 'مرفوض: لا يوجد إذن رفع موثق لهذه العملية.',
+        });
+        return;
+      }
+      if (intent.status !== 'pending') {
+        res.status(409).json({
+          error: 'UPLOAD_INTENT_NOT_PENDING',
+          messageArabic: 'عملية الرفع هذه لم تعد في حالة انتظار الرفع.',
+        });
+        return;
+      }
+      if (
+        intent.userId !== uid ||
+        intent.meetingId !== meetingId ||
+        intent.fileName !== preValidation.sanitizedFileName ||
+        intent.contentType !== preValidation.normalizedContentType
+      ) {
+        res.status(403).json({
+          error: 'UPLOAD_INTENT_MISMATCH',
+          messageArabic: 'بيانات الملف لا تطابق إذن الرفع المصرح به.',
+        });
+        return;
+      }
+
       const bodyBytes = await readBinaryBodyCapped(req, MAX_ATTACHMENT_SIZE_BYTES);
       const actualValidation = validateAttachmentFileRequest({
         fileName: preValidation.sanitizedFileName,
@@ -713,6 +1136,14 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
         res.status(status).json({
           error: actualValidation.errorCode || 'VALIDATION_FAILED',
           messageArabic: actualValidation.errorArabic || 'حجم الملف غير صالح.',
+        });
+        return;
+      }
+
+      if (bodyBytes.byteLength !== intent.sizeBytes) {
+        res.status(400).json({
+          error: 'SIZE_MISMATCH',
+          messageArabic: 'حجم الملف المرسل لا يطابق الحجم المسجل في إذن الرفع.',
         });
         return;
       }
@@ -753,10 +1184,13 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
         });
         return;
       }
-      res.status(502).json({
-        error: 'RELAY_UPLOAD_FAILED',
-        messageArabic: 'تعذر تمرير الملف إلى خادم التخزين السحابي. يرجى المحاولة مرة أخرى.',
-      });
+      handleServerConfigOrAccessError(
+        err,
+        res,
+        502,
+        'RELAY_UPLOAD_FAILED',
+        'تعذر تمرير الملف إلى خادم التخزين السحابي. يرجى المحاولة مرة أخرى.'
+      );
     }
   });
 
@@ -804,6 +1238,14 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
         res.status(404).json({
           error: 'ATTACHMENT_NOT_FOUND',
           messageArabic: 'المرفق المطلوب غير موجود أو لا يخص حسابك.',
+        });
+        return;
+      }
+
+      if (attCheck.deleteStatus === 'b2_deleted') {
+        res.status(410).json({
+          error: 'ATTACHMENT_BEING_DELETED',
+          messageArabic: 'تمت إزالة هذا المرفق من التخزين السحابي وهو بانتظار استكمال حذف السجل.',
         });
         return;
       }
@@ -857,11 +1299,14 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
       res.status(200).send(Buffer.from(obj.bytes));
-    } catch {
-      res.status(502).json({
-        error: 'RELAY_DOWNLOAD_FAILED',
-        messageArabic: 'تعذر جلب المرفق من التخزين السحابي عبر الخادم.',
-      });
+    } catch (err: any) {
+      handleServerConfigOrAccessError(
+        err,
+        res,
+        502,
+        'RELAY_DOWNLOAD_FAILED',
+        'تعذر جلب المرفق من التخزين السحابي عبر الخادم.'
+      );
     }
   });
 

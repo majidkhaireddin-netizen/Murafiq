@@ -201,17 +201,18 @@ service cloud.firestore {
           && isValidMeeting(incoming(), userId);
         allow delete: if isOwner(userId) && isValidId(meetingId);
 
-        // Scoped Subcollection: Meeting Attachments (Metadata for private Backblaze B2 objects)
+        // Scoped Subcollection: Meeting Attachments (Server-authoritative commits & deletes only)
         match /attachments/{attachmentId} {
           allow get: if isOwner(userId) && isValidId(meetingId) && isValidId(attachmentId);
           allow list: if isOwner(userId) && isValidId(meetingId);
-          allow create: if isOwner(userId)
-            && isValidId(meetingId)
-            && isValidId(attachmentId)
-            && isValidMeetingAttachment(incoming(), userId, meetingId, attachmentId)
-            && exists(/databases/$(database)/documents/users/$(userId)/meetings/$(meetingId));
+          allow create: if false;
           allow update: if false;
-          allow delete: if isOwner(userId) && isValidId(meetingId) && isValidId(attachmentId);
+          allow delete: if false;
+        }
+
+        // Server-only Upload Intents (Strictly inaccessible to browser clients)
+        match /uploadIntents/{intentId} {
+          allow read, write: if false;
         }
       }
 

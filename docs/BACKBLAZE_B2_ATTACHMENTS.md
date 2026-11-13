@@ -1,113 +1,77 @@
-# تكامل التخزين السحابي الآمن Backblaze B2 (Task 004-A)
+# تكامل التخزين السحابي الآمن Backblaze B2 (Task 004-A & Fix-01)
 
 ## 1. القدرات الخادمية المتاحة في Google AI Studio
 
 يدعم مشروع **مُرافق — Murafiq** داخل بيئة Google AI Studio التشغيل الموحّد (Full-Stack Node.js Express + Vite) على المنفذ `3000`:
-- خادم Express في `server.ts` يتولى نقاط النهاية `/api/attachments/*` وخدمة واجهة React عبر `vite.middlewares` في التطوير أو `dist/` في الإنتاج.
-- يتحمل هذا الخادم التحقق من هوية Firebase ID Token وإصدار روابط التوقيع المؤقتة (S3 Presigned URLs) دون الحاجة لنشر خدمة خارجية منفصلة، مع بقاء المفاتيح السرية في متغيرات بيئة الخادم فقط (`process.env`).
-- **متطلبات التشغيل قبل الرفع الحقيقي**: ضبط متغيرات/أسرار Backblaze B2 في لوحة **Secrets** في Google AI Studio، وضبط سياسة CORS على Bucket باسم `Murafiq` في لوحة تحكم Backblaze B2.
+- خادم Express في `server.ts` يتولى نقاط النهاية `/api/attachments/*` وخدمة واجهة React عبر `vite.middlewares` في التطوير (`npm run dev`) أو `dist/` في الإنتاج (`npm run start` عبر `node server.ts` على Node 22).
+- يوفّر الخادم فحص الصحة على `GET /api/health` متضمناً حالة التهيئة المنطقية فقط (`b2Configured`, `firebaseAdminConfigured`, `firestoreDatabaseId`) دون كشف أي مفاتيح أو قيم سرية.
+- في حال غياب أسرار Backblaze B2 أو صلاحية Firebase Admin لقاعدة البيانات المسماة، يعيد الخادم استجابة واضحة ومفهومة (`503 STORAGE_NOT_CONFIGURED` أو `503 FIREBASE_ADMIN_NOT_CONFIGURED`) دون إسقاط الواجهة أو كشف بيانات حساسة.
 
 ---
 
-## 2. البنية الأمنية المعتمدة
+## 2. البنية الأمنية المعتمدة (بما في ذلك إصلاحات Task 004-A-Fix-01)
 
-1. **عدم تعرض الواجهة لمفاتيح B2 إطلاقاً**:
-   - لا يحتوي كود `src/components` أو `src/services` أو حزمة `dist/` على `B2_APPLICATION_KEY_ID` أو `B2_APPLICATION_KEY` أو حزمة `@aws-sdk/client-s3`.
+1. **عدم تعرض الواجهة لمفاتيح B2 أو مفاتيح Firebase Admin إطلاقاً**:
+   - لا يحتوي كود `src/components` أو `src/services` أو `src/utils` أو حزمة `dist/` على `B2_APPLICATION_KEY_ID` أو `B2_APPLICATION_KEY` أو `FIREBASE_SERVICE_ACCOUNT_JSON` أو حزمة `@aws-sdk/client-s3`.
    - تتعامل الواجهة فقط مع نقاط `/api/attachments/*` وتستخدم `Authorization: Bearer <Firebase ID Token>`.
 
-2. **الهوية والملكية من الخادم وقاعدة البيانات المسماة فقط**:
-   - يتحقق الخادم من `Firebase ID Token` عبر `firebase-admin/auth` ويستخرج `uid` حصرياً من التوكن الموثق، ويرفض أي طلب يحاول تمرير `uid` أو `userId` أو `storageKey` مزيف من الواجهة (`403`).
-   - يتحقق الخادم من ملكية اللقاء داخل قاعدة Firestore المسماة حصرياً:
+2. **الهوية والملكية وقاعدة البيانات المسماة حصرياً**:
+   - يتحقق الخادم من `Firebase ID Token` عبر `firebase-admin/auth` ويستخرج `uid` حصرياً من التوكن الموثق، ويرفض أي طلب يحاول تمرير `uid` أو `userId` أو `storageKey` أو `uploadStatus` أو `deleteStatus` من الواجهة (`403`).
+   - تستهدف جميع عمليات العميل والخادم قاعدة Firestore المسماة حصرياً:
      `ai-studio-murafiq-cb988db3-5a07-40b7-b1ca-8eaaae894475`
-     تحت المسار:
-     `users/{uid}/meetings/{meetingId}`
-     دون الرجوع أبداً إلى `(default)`.
+     تحت المسار `users/{uid}/meetings/{meetingId}` مع منع الرجوع إلى `(default)` صراحةً في `src/server/firebaseServerAuth.ts` و`src/services/firebase.ts`.
 
-3. **هيكلة المفاتيح في Backblaze B2**:
-   - يولّد الخادم `attachmentId` آمن عشوائياً (`crypto.randomUUID()`) ويبني المفتاح حصراً بالصيغة:
-     `users/{uid}/meetings/{meetingId}/attachments/{attachmentId}`
+3. **اعتماد المرفقات عبر الخادم فقط (Server-Authoritative Metadata Commit)**:
+   - عند طلب `/api/attachments/presign-upload`، ينشئ الخادم سجل نية رفع موثقاً (`UploadIntent`) في `users/{uid}/meetings/{meetingId}/uploadIntents/{attachmentId}` بالحالة `pending`.
+   - بعد الرفع إلى Backblaze B2 (مباشرة عبر Presigned `PUT` أو عبر مسار التمرير الموثق `PUT /api/attachments/relay-upload` عند حجب CORS)، تستدعي الواجهة `/api/attachments/complete-upload`.
+   - يتحقق الخادم في `complete-upload` من `UploadIntent` ومن وجود الملف في B2 ومن حجمه الفعلي وتوقيعه الثنائي (**Magic Bytes**)، ثم يثبّت سجل `MeetingAttachment` داخل قاعدة البيانات المسماة باستخدام **Firebase Admin SDK Transaction** ويحوّل حالة `UploadIntent` إلى `committed`.
+   - تكرار استدعاء `complete-upload` بنفس المعرّف يتصرف بشكل **Idempotent** ويعيد السجل المثبّت دون تكرار، وإذا فُقدت استجابة الشبكة أثناء التثبيت تُعيد الواجهة المحاولة بأمان **ولا تستدعي أبداً** مسار التنظيف على عملية محتملة النجاح.
+   - في `firestore.rules`: القراءة والكتابة على `uploadIntents` محظورتان تماماً من المتصفح (`allow read, write: if false`)، ومجموعة `attachments` تسمح بقراءة المالك فقط وتمنع الإنشاء أو التعديل أو الحذف المباشر من المتصفح (`allow create, update, delete: if false`).
 
-4. **الروابط المؤقتة القصيرة العمر (Short-lived S3 Presigned URLs)**:
-   - رابط الرفع `PUT`: صالح لمدة **120 ثانية** فقط ومقيّد بـ `Content-Type` محدد.
-   - رابط العرض/التنزيل `GET`: صالح لمدة **180 ثانية** فقط ولا يُخزَّن في Firestore أو `localStorage`.
+4. **حماية مسار التنظيف المؤقت `/api/attachments/cleanup-uncommitted` ومنع سباقات التزامن**:
+   - يعمل تحت قفل تسلسلي لكل مرفق (`withAttachmentLock`) ويتحقق عبر Transaction من حالة `UploadIntent` وسجل `attachments`.
+   - إذا كان المرفق قد ثُبّت بالفعل (`committed` أو `deleted`)، يرفض الخادم التنظيف بـ `409 ATTACHMENT_ALREADY_COMMITTED` ولا يمس الملف في B2 أبداً.
+   - فقط الحالات المعلقة (`pending`) يجوز تحويلها إلى `abandoned` ثم حذف كائنها المؤقت من B2.
 
-5. **التحقق الثنائي والمحتوى الفعلي (Validation + Magic Bytes)**:
-   - الأنواع المسموحة في الإصدار الأول: `image/jpeg`، `image/png`، `image/webp`، `application/pdf`.
-   - الحد الأقصى للحجم: `10 MB` (`10,485,760` بايت).
-   - حظر الملفات التنفيذية وHTML وJavaScript وSVG.
-   - بعد الرفع المباشر إلى B2، ينفّذ المسار `/api/attachments/complete-upload` فحصاً فعلياً على Backblaze عبر `HeadObject` (للحجم) و`GetObject` بالبايتات الأولى `Range: bytes=0-15` للتحقق من توقيع الملف الفعلي (**Magic Bytes**)، وإذا تبيّن تزوير الصيغة يحذف الخادم الملف فوراً من B2 ويرفض التسجيل في Firestore (`422`).
+5. **حذف منسق وقابل للاسترداد من الخادم (`/api/attachments/delete`)**:
+   - يدير الخادم دورة الحياة: `active` ← `deleting` ← حذف B2 ← `b2_deleted` (أو `delete_failed` عند فشل B2) ← حذف سجل `MeetingAttachment` وتحويل `UploadIntent` إلى `deleted`.
+   - إذا فشل حذف B2 (`502 B2_DELETE_FAILED`) يبقى سجل Firestore مع حالة `delete_failed` ورسالة عربية واضحة تتيح إعادة المحاولة بأمان.
+   - إذا نجح حذف B2 ثم تعذر حذف Firestore (`502 FIRESTORE_DELETE_INCOMPLETE`) يبقى السجل بحالة `b2_deleted` وتتيح الواجهة زر «إكمال الحذف»؛ وعند إعادة المحاولة يتخطى الخادم حذف B2 (أو يعامله كـ idempotent عند `404/NoSuchKey`) ويكمل تنظيف Firestore بنجاح.
+   - أي طلب حذف مكرر لمرفق تم حذفه مسبقاً يعيد `200` (`alreadyDeleted: true`) بأمان.
 
-6. **معالجة الإخفاقات ومنع الملفات اليتيمة**:
-   - إذا فشل حفظ البيانات الوصفية في Firestore بعد نجاح الرفع إلى B2، يستدعي التطبيق تلقائياً `/api/attachments/cleanup-uncommitted` لحذف الملف غير المثبت من B2.
-   - عند الحذف، يحذف الخادم الملف من Backblaze B2 أولاً؛ وإذا فشل حذف B2 لا يحذف سجل Firestore حتى لا يختفي المرفق عن نظر المستخدم.
+6. **التمرير الموثّق عبر الخادم (Same-Origin Relay Fallbacks) وعزل الذاكرة المؤقتة لروابط التنزيل**:
+   - عند تعذر `PUT` المباشر لـ Backblaze B2 بسبب CORS، تسقط الواجهة تلقائياً إلى `PUT /api/attachments/relay-upload` بنفس المعايير الأمنية.
+   - عند تعذر العرض/التنزيل المباشر عبر Presigned `GET`، تستخدم الواجهة `POST /api/attachments/relay-download` مع ترويسات `X-Content-Type-Options: nosniff` و`Cache-Control: private, no-store, no-cache, must-revalidate`.
+   - تُعزل ذاكرة روابط التنزيل المؤقتة (`src/utils/attachmentDownloadCache.ts`) حسب `uid:meetingId:attachmentId:disposition`، وتُمسح تلقائياً عند تسجيل الخروج أو تغيّر حساب Google أو انتهاء الجلسة.
+
+7. **التحقق الثنائي والروابط القصيرة العمر**:
+   - الأنواع المسموحة: `image/jpeg`، `image/png`، `image/webp`، `application/pdf` بحد أقصى `10 MB` (`10,485,760` بايت).
+   - مدة صلاحية رابط الرفع `PUT`: `120` ثانية؛ ورابط العرض/التنزيل `GET`: `180` ثانية.
 
 ---
 
 ## 3. التوافق مع وضع عدم الاتصال (Offline-First)
 
 - رفع المرفقات وعرضها وتنزيلها وحذفها يتطلب اتصالاً نشطاً بالإنترنت (`navigator.onLine`).
-- إذا كان المستخدم غير متصل، يعرض التطبيق رسالة عربية واضحة أن المرفقات تتطلب اتصالاً بالإنترنت.
-- لا تُخزَّن ملفات المرفقات الحساسة تلقائياً في `IndexedDB` أو `localStorage`.
-- لا يظهر الملف كمرفق مكتمل في Firestore إلا بعد تأكيد التحقق منه في Backblaze B2.
+- لا تُخزَّن محتويات المرفقات أو روابطها المؤقتة في `IndexedDB` أو `localStorage`.
+- الحفاظ الكامل على سلوك Task 003 الخاص بالمزامنة ومنع فقدان البيانات للعملاء واللقاءات والمهام والملاحظات.
 
 ---
 
-## 4. سلوك Backblaze B2 مع Versioning والحذف (مهم لمالك المنتج)
+## 4. متطلبات الإعداد اليدوي المطلوبة من مالك المنتج قبل التشغيل الحي
 
-وفق تصميم Backblaze B2 Cloud Storage:
-- إذا كان خيار **File Versioning / Keep all versions** مفعّلاً في إعدادات Bucket (`Murafiq`)، فإن أمر S3 `DeleteObject` لا يمسح النسخة التاريخية فوراً بل يضع علامة إخفاء (**Hide Marker / Hidden Version**) بحيث تتوقف النسخة عن الظهور في القراءة العادية، لكنها تبقى محفوظة وتُحتسب ضمن سعة التخزين حتى انتهاء دورة الحياة (Lifecycle Rule).
-- **التوصية المعتمدة لمالك المنتج**:
-  - في إعدادات **Lifecycle Rules** للـ Bucket `Murafiq` داخل Backblaze B2:
-    - إما اختيار **Keep only the last version of the file** (مع **Days till hide = 0 / delete hidden immediately**)،
-    - أو ضبط قاعدة Lifecycle لحذف النسخ المخفية (`daysFromHidingToDeleting: 1`) إذا رُغب في فترة سماح لاسترجاع المحذوفات.
-  - تم توثيق ذلك لأن طلبات S3 `DeleteObject` الموقّعة من التطبيق لا تتجاوز سياسة Versioning الخاصة بالـ Bucket بدون تعديل إعدادات Backblaze نفسها.
-
----
-
-## 5. إعدادات Backblaze B2 اليدوية المطلوبة من مالك المنتج
-
-قبل تفعيل الرفع الحقيقي في الإنتاج أو التجربة الحية:
-
-1. **التحقق من الأسرار في Google AI Studio Secrets** (لا تُضاف أبداً في كود الواجهة):
+1. **إعداد أسرار Backblaze B2 في Google AI Studio Secrets**:
    - `B2_APPLICATION_KEY_ID`
    - `B2_APPLICATION_KEY`
    - `B2_BUCKET_NAME=Murafiq`
    - `B2_REGION=us-east-005`
    - `B2_S3_ENDPOINT=https://s3.us-east-005.backblazeb2.com`
 
-2. **صلاحيات Application Key في Backblaze B2**:
-   - مقصور على Bucket `Murafiq` فقط (`readFiles`, `writeFiles`, `deleteFiles`, `listFiles`).
+2. **توفير صلاحية خادم Firebase Admin للوصول إلى قاعدة البيانات المسماة**:
+   - إضافة السر `FIREBASE_SERVICE_ACCOUNT_JSON` (أو `GOOGLE_APPLICATION_CREDENTIALS`) لحساب خدمة ضمن المشروع السحابي `gen-lang-client-0264525417` يمتلك صلاحية القراءة والكتابة على قاعدة البيانات المسماة `ai-studio-murafiq-cb988db3-5a07-40b7-b1ca-8eaaae894475` (`roles/datastore.user` أو دور Firebase Admin)، لأن حساب تشغيل الحاوية الافتراضي لا يملك صلاحية Admin Write على المشروع السحابي تلقائياً.
 
-3. **ضبط CORS Rules على Bucket `Murafiq` (S3 Compatible API)**:
-   لأن المتصفح يرفع الملف مباشرة عبر `PUT` إلى `https://s3.us-east-005.backblazeb2.com` باستخدام Presigned URL، يجب إضافة قاعدة CORS في Backblaze B2 (عبر B2 CLI أو لوحة التحكم) تسمح لنطاق التطبيق الفعلي فقط:
-   ```json
-   [
-     {
-       "corsRuleName": "murafiq-s3-presigned-attachments",
-       "allowedOrigins": [
-         "https://<YOUR_AI_STUDIO_OR_APP_DOMAIN>",
-         "http://localhost:3000"
-       ],
-       "allowedOperations": [
-         "s3_put",
-         "s3_get",
-         "s3_head"
-       ],
-       "allowedHeaders": [
-         "content-type",
-         "x-amz-*"
-       ],
-       "exposeHeaders": [
-         "ETag"
-       ],
-       "maxAgeSeconds": 3600
-     }
-   ]
-   ```
+3. **نشر قواعد `firestore.rules` المحدثة على المشروع السحابي**:
+   - بعد مراجعة واعتماد التغييرات، يلزم نشر `firestore.rules` يدوياً أو عبر مسار النشر المعتمد لتطبيق منع الإنشاء/التعديل/الحذف المباشر من المتصفح على `attachments` وحظر `uploadIntents` تماماً.
 
----
-
-## 6. حالة النشر والتغييرات الحساسة
-
-- **لم يتم تنفيذ نشر تلقائي** لقواعد `firestore.rules` أو تشغيل رفع/حذف تجريبي على Bucket `Murafiq` الحقيقي بانتظار موافقة مالك المنتج وتوفير الأسرار وCORS في بيئة التشغيل.
-- بعد الموافقة على التغييرات، يلزم نشر التحديث لملف `firestore.rules` على المشروع السحابي لدعم مجموعة `attachments` الفرعية تحت `users/{userId}/meetings/{meetingId}/attachments/{attachmentId}`.
+4. **ضبط CORS Rules وLifecycle Rules على Bucket `Murafiq` في Backblaze B2**:
+   - يُنصح بإضافة قاعدة CORS لنطاق التطبيق الفعلي (`s3_put`, `s3_get`, `s3_head`) للرفع المباشر وتقليل الاعتماد على الـ Relay، وضبط Lifecycle للنسخ المخفية حسب سياسة الاحتفاظ المطلوبة.

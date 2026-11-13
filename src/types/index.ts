@@ -153,6 +153,26 @@ export type AllowedAttachmentMimeType =
 
 export type AttachmentUploadStatus = 'completed';
 
+export type AttachmentDeleteStatus = 'active' | 'deleting' | 'b2_deleted' | 'delete_failed';
+
+export type UploadIntentStatus = 'pending' | 'committed' | 'abandoned' | 'deleted';
+
+export interface UploadIntentRecord {
+  attachmentId: string;
+  userId: string;
+  meetingId: string;
+  fileName: string;
+  contentType: AllowedAttachmentMimeType;
+  sizeBytes: number;
+  storageKey: string;
+  bucket?: string;
+  status: UploadIntentStatus;
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+  committedAt?: string;
+}
+
 export interface MeetingAttachment {
   id: string;
   userId: string;
@@ -163,6 +183,8 @@ export interface MeetingAttachment {
   storageKey: string;
   storageProvider: 'backblaze_b2';
   uploadStatus: AttachmentUploadStatus;
+  deleteStatus?: AttachmentDeleteStatus;
+  deleteErrorArabic?: string;
   etag?: string;
   createdAt: string;
   updatedAt?: string;

@@ -1,9 +1,13 @@
 import 'dotenv/config';
+import * as fs from 'fs';
 import * as path from 'path';
 import express from 'express';
 import { createAttachmentsRouter } from './src/server/attachmentsRouter.ts';
 import { readB2ConfigFromEnv } from './src/server/b2Storage.ts';
-import { getFirebaseServerConfig } from './src/server/firebaseServerAuth.ts';
+import {
+  getFirebaseServerConfig,
+  isFirebaseAdminConfigured,
+} from './src/server/firebaseServerAuth.ts';
 
 export async function createMurafiqServerApp() {
   const app = express();
@@ -13,11 +17,13 @@ export async function createMurafiqServerApp() {
 
   app.get('/api/health', (_req, res) => {
     const b2Configured = readB2ConfigFromEnv() !== null;
+    const firebaseAdminConfigured = isFirebaseAdminConfigured();
     const { firestoreDatabaseId } = getFirebaseServerConfig();
     res.json({
       ok: true,
       storageProvider: 'backblaze_b2',
       b2Configured,
+      firebaseAdminConfigured,
       firestoreDatabaseId,
     });
   });
@@ -32,7 +38,12 @@ export async function createMurafiqServerApp() {
     });
   });
 
-  if (process.env.NODE_ENV !== 'production') {
+  const isProduction =
+    process.env.NODE_ENV === 'production' ||
+    process.env.npm_lifecycle_event === 'start' ||
+    process.argv.includes('--production');
+
+  if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -41,9 +52,15 @@ export async function createMurafiqServerApp() {
     app.use(vite.middlewares);
   } else {
     const distDir = path.resolve(process.cwd(), 'dist');
+    const indexHtmlPath = path.join(distDir, 'index.html');
+    if (!fs.existsSync(indexHtmlPath)) {
+      throw new Error(
+        'PRODUCTION_BUILD_MISSING: مجلد dist/index.html غير موجود. شغّل npm run build قبل npm run start.'
+      );
+    }
     app.use(express.static(distDir));
     app.get('*', (_req, res) => {
-      res.sendFile(path.join(distDir, 'index.html'));
+      res.sendFile(indexHtmlPath);
     });
   }
 

@@ -390,7 +390,7 @@ export const MeetingAttachmentsSection: React.FC<MeetingAttachmentsSectionProps>
         attachmentId: target.id,
       });
       if (viewerState?.attachment.id === target.id) {
-        setViewerState(null);
+        closeViewer();
       }
       setConfirmDeleteItem(null);
       setActionSuccess(`تم حذف المرفق «${target.fileName}» من التخزين السحابي وسجل اللقاء.`);
@@ -617,11 +617,19 @@ export const MeetingAttachmentsSection: React.FC<MeetingAttachmentsSectionProps>
           {attachments.map((att) => {
             const isImg = isImageMimeType(att.contentType);
             const isBusy = loadingUrlForId === att.id || deletingId === att.id;
+            const isB2DeletedPendingCleanup = att.deleteStatus === 'b2_deleted';
+            const isDeleteFailed = att.deleteStatus === 'delete_failed';
+            const isDeletingInProgress = att.deleteStatus === 'deleting';
+            const isRecoverableDelete = isB2DeletedPendingCleanup || isDeleteFailed || isDeletingInProgress;
             return (
               <div
                 key={att.id}
                 data-testid={`attachment-row-${att.id}`}
-                className="p-2.5 rounded-xl border border-stone-200 bg-white flex items-center justify-between gap-2.5 hover:border-stone-300 transition-colors"
+                className={`p-2.5 rounded-xl border flex items-center justify-between gap-2.5 transition-colors ${
+                  isRecoverableDelete
+                    ? 'border-amber-300 bg-amber-50/40'
+                    : 'border-stone-200 bg-white hover:border-stone-300'
+                }`}
               >
                 <div className="flex items-center gap-2.5 min-w-0">
                   <div
@@ -642,7 +650,17 @@ export const MeetingAttachmentsSection: React.FC<MeetingAttachmentsSectionProps>
                       <span>{formatFileSizeArabic(att.sizeBytes)}</span>
                       <span>•</span>
                       <span>{formatArabicDate(att.createdAt)}</span>
-                      <span className="text-emerald-700 font-semibold">• مؤمن</span>
+                      {isB2DeletedPendingCleanup ? (
+                        <span className="text-amber-800 font-semibold">
+                          • أُزيل من السحابة وبانتظار إكمال حذف السجل
+                        </span>
+                      ) : isDeleteFailed || isDeletingInProgress ? (
+                        <span className="text-rose-700 font-semibold">
+                          • تعذر إكمال الحذف — أعد المحاولة
+                        </span>
+                      ) : (
+                        <span className="text-emerald-700 font-semibold">• مؤمن</span>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -651,7 +669,7 @@ export const MeetingAttachmentsSection: React.FC<MeetingAttachmentsSectionProps>
                   <button
                     type="button"
                     onClick={() => void handleOpenViewer(att)}
-                    disabled={!isOnline || isBusy}
+                    disabled={!isOnline || isBusy || isB2DeletedPendingCleanup}
                     className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium bg-stone-100 hover:bg-stone-200 text-stone-800 disabled:opacity-50"
                     title="عرض المرفق"
                   >
@@ -666,7 +684,7 @@ export const MeetingAttachmentsSection: React.FC<MeetingAttachmentsSectionProps>
                   <button
                     type="button"
                     onClick={() => void handleDownloadAttachment(att)}
-                    disabled={!isOnline || isBusy}
+                    disabled={!isOnline || isBusy || isB2DeletedPendingCleanup}
                     className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium bg-stone-100 hover:bg-stone-200 text-stone-800 disabled:opacity-50"
                     title="تنزيل المرفق"
                   >
@@ -681,11 +699,15 @@ export const MeetingAttachmentsSection: React.FC<MeetingAttachmentsSectionProps>
                       setConfirmDeleteItem(att);
                     }}
                     disabled={!isOnline || isBusy}
-                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-50"
-                    title="حذف المرفق"
+                    className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium disabled:opacity-50 ${
+                      isRecoverableDelete
+                        ? 'bg-rose-700 text-white hover:bg-rose-800'
+                        : 'text-rose-700 hover:bg-rose-50'
+                    }`}
+                    title={isRecoverableDelete ? 'إكمال حذف المرفق' : 'حذف المرفق'}
                   >
                     <Trash2 className="w-3 h-3" />
-                    <span>حذف</span>
+                    <span>{isRecoverableDelete ? 'إكمال الحذف' : 'حذف'}</span>
                   </button>
                 </div>
               </div>

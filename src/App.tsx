@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { User } from 'firebase/auth';
 import { subscribeAuthState, logOut } from './services/firebase';
+import { clearAttachmentDownloadCache } from './utils/attachmentDownloadCache';
 import { AuthScreen } from './components/AuthScreen';
 import { AuthenticatedSession } from './components/AuthenticatedSession';
 import { Wifi, BatteryMedium, Signal } from 'lucide-react';
@@ -13,6 +14,9 @@ export default function App() {
   // Monitor Authentication State
   useEffect(() => {
     const unsubscribeAuth = subscribeAuthState((user) => {
+      if (!user) {
+        clearAttachmentDownloadCache();
+      }
       setCurrentUser(user);
       setIsAuthRestoring(false);
     });
@@ -24,6 +28,7 @@ export default function App() {
 
   const handleLogOut = async () => {
     try {
+      clearAttachmentDownloadCache();
       await logOut();
       setCurrentUser(null);
     } catch (err) {

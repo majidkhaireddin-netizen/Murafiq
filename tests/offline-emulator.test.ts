@@ -22,8 +22,10 @@ import {
 import { sanitizeFirestorePayload } from '../src/services/firebase';
 import { OperationCoordinator } from '../src/utils/sessionState';
 import { Client, ActionItem } from '../src/types';
+import appletConfig from '../firebase-applet-config.json';
 
 const PROJECT_ID = 'demo-murafiq-offline-test';
+const NAMED_DB_ID = appletConfig.firestoreDatabaseId;
 const USER_A_UID = 'user_alice_offline_1';
 const USER_B_UID = 'user_bob_offline_2';
 
@@ -33,7 +35,7 @@ let emulatorPort: number;
 
 function createConnectedDb(context: any): Firestore {
   const app = (context as any).getApp();
-  const db = getFirestore(app);
+  const db = getFirestore(app, NAMED_DB_ID);
   connectFirestoreEmulator(db, emulatorHost, emulatorPort, {
     mockUserToken: (context as any).authToken,
   });

@@ -83,7 +83,7 @@
     },
     "MeetingAttachment": {
       "title": "MeetingAttachment",
-      "description": "Metadata for an attachment stored in Backblaze B2 under a user's meeting.",
+      "description": "Server-verified metadata for an attachment stored in Backblaze B2 under a user's meeting.",
       "type": "object",
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
@@ -95,11 +95,34 @@
         "storageKey": { "type": "string", "maxLength": 512 },
         "storageProvider": { "type": "string", "enum": ["backblaze_b2"] },
         "uploadStatus": { "type": "string", "enum": ["completed"] },
+        "deleteStatus": { "type": "string", "enum": ["active", "deleting", "b2_deleted", "delete_failed"] },
+        "deleteErrorArabic": { "type": "string", "maxLength": 500 },
         "etag": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string", "maxLength": 50 },
         "updatedAt": { "type": "string", "maxLength": 50 }
       },
       "required": ["id", "userId", "meetingId", "fileName", "contentType", "sizeBytes", "storageKey", "storageProvider", "uploadStatus", "createdAt"]
+    },
+    "UploadIntent": {
+      "title": "UploadIntent",
+      "description": "Server-only upload authorization and commit tracking record for Backblaze B2 attachments.",
+      "type": "object",
+      "properties": {
+        "attachmentId": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "meetingId": { "type": "string", "maxLength": 128 },
+        "fileName": { "type": "string", "maxLength": 255 },
+        "contentType": { "type": "string", "enum": ["image/jpeg", "image/png", "image/webp", "application/pdf"] },
+        "sizeBytes": { "type": "number" },
+        "storageKey": { "type": "string", "maxLength": 512 },
+        "bucket": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["pending", "committed", "abandoned", "deleted"] },
+        "expiresAt": { "type": "string", "maxLength": 50 },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 },
+        "committedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["attachmentId", "userId", "meetingId", "fileName", "contentType", "sizeBytes", "storageKey", "status", "expiresAt", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -113,7 +136,11 @@
     },
     "/users/{userId}/meetings/{meetingId}/attachments/{attachmentId}": {
       "schema": { "$ref": "entities/MeetingAttachment" },
-      "description": "Stores user-isolated Backblaze B2 attachment metadata scoped to a meeting"
+      "description": "Stores server-committed, user-isolated Backblaze B2 attachment metadata scoped to a meeting"
+    },
+    "/users/{userId}/meetings/{meetingId}/uploadIntents/{intentId}": {
+      "schema": { "$ref": "entities/UploadIntent" },
+      "description": "Server-only upload authorization intents (blocked for client SDK access)"
     },
     "/users/{userId}/tasks/{taskId}": {
       "schema": { "$ref": "entities/Task" },

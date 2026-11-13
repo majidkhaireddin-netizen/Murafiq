@@ -54,6 +54,7 @@ import {
   serializeRejectedDraftJson,
   formatRejectedDraftClipboardText,
 } from '../utils/sessionState';
+import { clearAttachmentDownloadCache, syncAttachmentCacheUser } from '../utils/attachmentDownloadCache';
 
 interface AuthenticatedSessionProps {
   user: User;
@@ -190,6 +191,7 @@ export function AuthenticatedSession({
   useEffect(() => {
     let isSubscribed = true;
     const sessionUid = user.uid;
+    syncAttachmentCacheUser(sessionUid);
 
     const unsubClients = subscribeClients(
       (data, meta) => {
@@ -301,6 +303,7 @@ export function AuthenticatedSession({
 
     return () => {
       isSubscribed = false;
+      clearAttachmentDownloadCache();
       unsubClients();
       unsubMeetings();
       unsubTasks();
