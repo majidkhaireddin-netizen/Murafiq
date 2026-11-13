@@ -54,6 +54,15 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
 
   beforeEach(async () => {
     await testEnv.clearFirestore();
+    const res = await fetch(
+      `http://${emulatorHost}:${emulatorPort}/emulator/v1/projects/${PROJECT_ID}/databases/${encodeURIComponent(
+        NAMED_DB_ID
+      )}/documents`,
+      { method: 'DELETE' }
+    );
+    if (!res.ok && res.status !== 404) {
+      throw new Error(`Failed to clear named database ${NAMED_DB_ID}: ${await res.text()}`);
+    }
   });
 
   after(async () => {
@@ -66,19 +75,14 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
 
   for (const dbId of dbTargets) {
     await t.test(`Database Target [${dbId}]: Security & Data Isolation Assertions`, async (st) => {
-      // 0. Explicit Strict Security Enforcement Guard (Requirement B.5)
+      // 0. Explicit Strict Security Enforcement Guard (Requirement B.5 & Req 4)
       await st.test(`0. Explicit security rules enforcement check (detects wide-open rules)`, async () => {
         const unauthCtx = testEnv.unauthenticatedContext();
         const unauthDb = getDbInstance(unauthCtx, dbId);
         const forbiddenRef = doc(unauthDb, `users/${USER_A_UID}/clients/guard_test`);
-        try {
-          await setDoc(forbiddenRef, { id: 'guard_test', userId: USER_A_UID, name: 'should fail' });
-          throw new Error('SECURITY_RULES_NOT_ENFORCED: Firestore emulator allowed unauthenticated write. Rules were not loaded or are wide open.');
-        } catch (err: any) {
-          if (err.message && err.message.includes('SECURITY_RULES_NOT_ENFORCED')) {
-            throw err;
-          }
-        }
+        await assertFails(
+          setDoc(forbiddenRef, { id: 'guard_test', userId: USER_A_UID, name: 'should fail' })
+        );
       });
 
       // 1. Unauthenticated access denied

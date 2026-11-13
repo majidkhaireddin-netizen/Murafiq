@@ -84,6 +84,15 @@ test('Murafiq Real Firestore Emulator Offline-to-Online Integration Suite', asyn
 
   beforeEach(async () => {
     await testEnv.clearFirestore();
+    const res = await fetch(
+      `http://${emulatorHost}:${emulatorPort}/emulator/v1/projects/${PROJECT_ID}/databases/${encodeURIComponent(
+        NAMED_DB_ID
+      )}/documents`,
+      { method: 'DELETE' }
+    );
+    if (!res.ok && res.status !== 404) {
+      throw new Error(`Failed to clear named database ${NAMED_DB_ID}: ${await res.text()}`);
+    }
   });
 
   after(async () => {
