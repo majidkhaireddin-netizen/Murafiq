@@ -1,4 +1,4 @@
-import {
+import type {
   ActionItem,
   Client,
   ClientImportanceLevel,
@@ -10,7 +10,7 @@ import {
   Note,
   TaskPriority,
   TaskStatus,
-} from '../types';
+} from '../types/index.ts';
 import {
   CLIENT_CATEGORY_LABELS,
   CLIENT_IMPORTANCE_CONFIG,
@@ -19,9 +19,9 @@ import {
   buildClientDataIndex,
   evaluateClientAttentionAlerts,
   getClientCategoryLabel,
-} from './client360';
+} from './client360.ts';
 import {
-  CalendarDateParts,
+  type CalendarDateParts,
   addCalendarDays,
   calendarDaysDiff,
   extractZonedCalendarParts,
@@ -30,8 +30,8 @@ import {
   parseDateOnlyString,
   parseMeetingDateTimeMs,
   resolveCalendarParts,
-} from './followUpEngine';
-import { MEETING_STATUS_LABELS, MEETING_TYPE_LABELS, MINUTES_STATUS_CONFIG } from './meetingMinutes';
+} from './followUpEngine.ts';
+import { MEETING_STATUS_LABELS, MEETING_TYPE_LABELS, MINUTES_STATUS_CONFIG } from './meetingMinutes.ts';
 
 // ============================================================================
 // Date Range Presets & Timezone-Safe Period Resolution

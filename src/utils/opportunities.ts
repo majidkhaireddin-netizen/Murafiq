@@ -1,4 +1,4 @@
-import {
+import type {
   ActionItem,
   Client,
   Meeting,
@@ -9,13 +9,13 @@ import {
   OpportunityStageEventType,
   OpportunityType,
   TaskPriority,
-} from '../types';
+} from '../types/index.ts';
 import {
   calendarDaysDiff,
   extractZonedCalendarParts,
   parseDateOnlyString,
   resolveCalendarParts,
-} from './followUpEngine';
+} from './followUpEngine.ts';
 
 // =========================================================================
 // Stage, Type, and Currency Configuration

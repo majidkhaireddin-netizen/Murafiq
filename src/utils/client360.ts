@@ -1,4 +1,4 @@
-import {
+import type {
   ActionItem,
   Client,
   ClientCategory,
@@ -8,7 +8,7 @@ import {
   Meeting,
   Note,
   ProvenanceType,
-} from '../types';
+} from '../types/index.ts';
 
 export const MAX_CLIENT_TAGS = 20;
 export const MAX_CLIENT_CONTACTS = 25;

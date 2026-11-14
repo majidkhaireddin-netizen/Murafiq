@@ -57,8 +57,17 @@ export async function createMurafiqServerApp() {
     process.env.npm_lifecycle_event === 'start' ||
     process.argv.includes('--production');
 
-  if (!isProduction) {
-    const disableHmr = process.env.DISABLE_HMR === 'true';
+  const distDir = path.resolve(process.cwd(), 'dist');
+  const indexHtmlPath = path.join(distDir, 'index.html');
+  const hasBuiltDist = fs.existsSync(indexHtmlPath);
+
+  if (isProduction && hasBuiltDist) {
+    app.use(express.static(distDir));
+    app.get('*', (_req, res) => {
+      res.sendFile(indexHtmlPath);
+    });
+  } else {
+    const disableHmr = isProduction || process.env.DISABLE_HMR === 'true';
     // Initialize Vite asynchronously so Express binds port 3000 and serves /api/health
     // immediately without blocking on cold dependency pre-bundling.
     const viteServerPromise = import('vite').then(({ createServer: createViteServer }) =>
@@ -72,7 +81,7 @@ export async function createMurafiqServerApp() {
     );
 
     viteServerPromise.catch((err) => {
-      console.error('Failed to initialize Vite dev middleware:', err);
+      console.error('Failed to initialize Vite middleware:', err);
     });
 
     app.use(async (req, res, next) => {
@@ -82,18 +91,6 @@ export async function createMurafiqServerApp() {
       } catch (err) {
         next(err);
       }
-    });
-  } else {
-    const distDir = path.resolve(process.cwd(), 'dist');
-    const indexHtmlPath = path.join(distDir, 'index.html');
-    if (!fs.existsSync(indexHtmlPath)) {
-      throw new Error(
-        'PRODUCTION_BUILD_MISSING: مجلد dist/index.html غير موجود. شغّل npm run build قبل npm run start.'
-      );
-    }
-    app.use(express.static(distDir));
-    app.get('*', (_req, res) => {
-      res.sendFile(indexHtmlPath);
     });
   }
 

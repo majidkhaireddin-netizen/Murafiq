@@ -1,4 +1,4 @@
-import { CacheInitError, CacheMode, CacheRuntimeState } from '../types';
+import type { CacheInitError, CacheMode, CacheRuntimeState } from '../types/index.ts';
 
 export interface OptOutEvaluation {
   canProceedImmediately: boolean;

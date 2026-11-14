@@ -1,4 +1,4 @@
-import { Client, Meeting, ActionItem, Note, ConflictItem, EntityType, ResolutionChoice } from '../types';
+import type { Client, Meeting, ActionItem, Note, ConflictItem, EntityType, ResolutionChoice } from '../types/index.ts';
 
 export const FIELD_LABELS_ARABIC: Record<string, string> = {
   name: 'الاسم',

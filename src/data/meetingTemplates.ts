@@ -1,4 +1,4 @@
-import { MeetingType } from '../types';
+import type { MeetingType } from '../types/index.ts';
 
 export interface MeetingTemplateAgendaSeed {
   title: string;

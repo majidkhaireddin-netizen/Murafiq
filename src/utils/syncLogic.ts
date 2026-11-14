@@ -1,4 +1,4 @@
-import { CacheMode, SyncState } from '../types';
+import type { CacheMode, SyncState } from '../types/index.ts';
 
 export interface CollectionSyncStatus {
   loaded: boolean;

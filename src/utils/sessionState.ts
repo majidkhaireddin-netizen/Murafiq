@@ -1,4 +1,4 @@
-import { EntityType, RejectedWriteRecord, WriteErrorCategory } from '../types';
+import type { EntityType, RejectedWriteRecord, WriteErrorCategory } from '../types/index.ts';
 
 export interface WriteErrorClassification {
   category: WriteErrorCategory;

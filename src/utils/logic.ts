@@ -1,9 +1,9 @@
-import { ActionItem, Client, Meeting, Note, Opportunity, TaskPriority } from '../types';
+import type { ActionItem, Client, Meeting, Note, Opportunity, TaskPriority } from '../types/index.ts';
 import {
   calendarDaysDiff,
   extractZonedCalendarParts,
   resolveCalendarParts,
-} from './followUpEngine';
+} from './followUpEngine.ts';
 
 /**
  * Format Gregorian date into authentic Arabic string representation

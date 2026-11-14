@@ -1,4 +1,4 @@
-import {
+import type {
   ActionItem,
   Meeting,
   MeetingAgendaItem,
@@ -10,9 +10,9 @@ import {
   MinutesStatus,
   ParticipantParty,
   TaskPriority,
-} from '../types';
-import type { MeetingTemplate } from '../data/meetingTemplates';
-import { formatArabicDate, getHijriDateString } from './logic';
+} from '../types/index.ts';
+import type { MeetingTemplate } from '../data/meetingTemplates.ts';
+import { formatArabicDate, getHijriDateString } from './logic.ts';
 
 export interface MinutesSectionDefinition {
   key: MinutesSectionKey;

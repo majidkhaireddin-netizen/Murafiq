@@ -1,4 +1,4 @@
-import {
+import type {
   ActionItem,
   Client,
   DailyCommandSummary,
@@ -14,15 +14,15 @@ import {
   ReminderStateRecord,
   SnoozePreset,
   UpcomingTaskWindowDaysOption,
-} from '../types';
+} from '../types/index.ts';
 import {
   STALE_CONTACT_THRESHOLD_DAYS,
   evaluateClientAttentionAlerts,
-} from './client360';
+} from './client360.ts';
 import {
   evaluateOpportunityFollowUpAlerts,
   isOpportunityClosed,
-} from './opportunities';
+} from './opportunities.ts';
 
 export const FOLLOW_UP_PREFERENCES_DOC_ID = 'follow_up';
 
