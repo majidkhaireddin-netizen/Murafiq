@@ -143,6 +143,10 @@ export function isOpportunityClosed(stage: OpportunityStage): boolean {
   return stage === 'won' || stage === 'lost';
 }
 
+export function isOpportunityOpen(stage: OpportunityStage): boolean {
+  return !isOpportunityClosed(stage);
+}
+
 export function isValidOpportunityStage(val: unknown): val is OpportunityStage {
   return typeof val === 'string' && OPPORTUNITY_ALL_STAGES.includes(val as OpportunityStage);
 }

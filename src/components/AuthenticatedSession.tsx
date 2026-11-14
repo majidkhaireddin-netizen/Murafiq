@@ -2280,16 +2280,28 @@ export function AuthenticatedSession({
           isOpen={isSearchOpen}
           onClose={() => setIsSearchOpen(false)}
           data={{ clients, meetings, tasks, notes, opportunities }}
+          currentUserId={user.uid}
+          collectionsLoaded={{
+            clients: collectionSync.clients.loaded,
+            meetings: collectionSync.meetings.loaded,
+            tasks: collectionSync.tasks.loaded,
+            notes: collectionSync.notes.loaded,
+            opportunities: collectionSync.opportunities.loaded,
+          }}
           onSelectClient={(client: Client) => {
             setSelectedClientId(client.id);
             setActiveTab('clients');
           }}
           onSelectMeeting={(meeting: Meeting) => {
             setSelectedMeetingId(meeting.id);
+            setMeetingInitialTab('all');
             setActiveTab('meetings');
           }}
-          onSelectTask={() => {
-            setActiveTab('tasks');
+          onSelectTask={(task: ActionItem) => {
+            handleOpenExistingTask(task);
+          }}
+          onSelectNote={(note: Note) => {
+            handleOpenExistingNote(note);
           }}
           onSelectOpportunity={(opportunity: Opportunity) => {
             setSelectedOpportunityId(opportunity.id);
@@ -2328,6 +2340,44 @@ export function AuthenticatedSession({
           rejectedWritesCount={rejectedWrites.length}
           followUpPreferences={followUpPreferences}
           onUpdateFollowUpPreferences={handleUpdateFollowUpPreferences}
+          currentUserId={user.uid}
+          opportunities={opportunities}
+          opportunityStageEvents={opportunityStageEvents}
+          isOnline={isOnline}
+          collectionsLoaded={{
+            clients: collectionSync.clients.loaded,
+            meetings: collectionSync.meetings.loaded,
+            tasks: collectionSync.tasks.loaded,
+            notes: collectionSync.notes.loaded,
+            opportunities: collectionSync.opportunities.loaded,
+            opportunityStageEvents: collectionSync.opportunityStageEvents.loaded,
+          }}
+          importHandlers={{
+            saveClient: async (client: Client) => {
+              const handle = fbSaveClient(client);
+              await handle.serverPromise;
+            },
+            saveOpportunity: async (opp: Opportunity) => {
+              const handle = fbSaveOpportunity(opp);
+              await handle.serverPromise;
+            },
+            saveMeeting: async (meeting: Meeting) => {
+              const handle = fbSaveMeeting(meeting);
+              await handle.serverPromise;
+            },
+            saveTask: async (task: ActionItem) => {
+              const handle = fbSaveTask(task);
+              await handle.serverPromise;
+            },
+            saveNote: async (note: Note) => {
+              const handle = fbSaveNote(note);
+              await handle.serverPromise;
+            },
+            saveOpportunityStageEvent: async (ev: OpportunityStageEvent) => {
+              const handle = fbSaveOpportunityStageEvent(ev);
+              await handle.serverPromise;
+            },
+          }}
         />
       )}
 

@@ -575,3 +575,229 @@ export interface OpportunityStageEvent {
   occurredAt: string;
 }
 
+// =========================================================================
+// Task 009: Advanced Search, Smart Filters & Safe Data Portability Types
+// =========================================================================
+
+export type SearchRecordType =
+  | 'client'
+  | 'contact'
+  | 'meeting'
+  | 'task'
+  | 'note'
+  | 'opportunity';
+
+export type SearchMatchTier =
+  | 'exact'
+  | 'prefix'
+  | 'word'
+  | 'partial'
+  | 'related'
+  | 'filter_only';
+
+export type SearchDateRangePreset = 'all' | 'today' | '7d' | '30d' | '90d' | 'custom';
+
+export type SearchOpportunityOpenFilter = 'all' | 'open' | 'closed' | 'won' | 'lost';
+
+export interface SearchFilterState {
+  recordType: 'all' | SearchRecordType;
+  clientId: string; // 'all' or specific client.id
+  datePreset: SearchDateRangePreset;
+  dateFrom?: string; // YYYY-MM-DD
+  dateTo?: string; // YYYY-MM-DD
+  status: string; // 'all' or entity status
+  priority: 'all' | TaskPriority;
+  tag: string; // 'all' or tag string
+  opportunityState: SearchOpportunityOpenFilter;
+}
+
+export interface HighlightSegment {
+  text: string;
+  matched: boolean;
+}
+
+export interface SearchResultItem {
+  id: string;
+  recordType: SearchRecordType;
+  recordTypeLabelAr: string;
+  recordTypeLabelEn: string;
+  title: string;
+  subtitle?: string;
+  snippet: string;
+  matchedFieldLabelAr: string;
+  matchTier: SearchMatchTier;
+  score: number;
+  clientId?: string;
+  clientName?: string;
+  dateIso?: string;
+  statusLabelAr?: string;
+  priority?: TaskPriority;
+  tags?: string[];
+  // Direct navigation references
+  clientRef?: Client;
+  contactRef?: ClientContact;
+  meetingRef?: Meeting;
+  taskRef?: ActionItem;
+  noteRef?: Note;
+  opportunityRef?: Opportunity;
+}
+
+export interface SearchCollectionsLoadedState {
+  clients: boolean;
+  meetings: boolean;
+  tasks: boolean;
+  notes: boolean;
+  opportunities: boolean;
+}
+
+export interface SearchExecutionResult {
+  items: SearchResultItem[];
+  grouped: Record<SearchRecordType, SearchResultItem[]>;
+  totalMatched: number;
+  returnedCount: number;
+  truncated: boolean;
+  isDataIncomplete: boolean;
+  incompleteCollectionsAr: string[];
+  activeFilterCount: number;
+}
+
+export type CsvExportEntityType = 'clients' | 'tasks' | 'meetings' | 'opportunities';
+
+export type DataCompletenessStatus = 'complete_online' | 'partial_or_offline';
+
+export interface ExportCompletenessMeta {
+  status: DataCompletenessStatus;
+  isOnline: boolean;
+  allCollectionsLoaded: boolean;
+  hasPendingLocalWrites: boolean;
+  unloadedCollections: string[];
+  disclosureAr: string;
+}
+
+export interface AttachmentExportSummary {
+  meetingsWithLegacyPhotoPathsCount: number;
+  totalLegacyPhotoPathsCount: number;
+  policyDisclosureAr: string;
+}
+
+export interface MurafiqExportBundleV1 {
+  schemaVersion: 'murafiq-export-v1';
+  application: 'Murafiq';
+  exportedAt: string;
+  completeness: ExportCompletenessMeta;
+  attachmentPolicyDisclosureAr: string;
+  securityDisclosureAr: string;
+  attachmentSummary: AttachmentExportSummary;
+  excludedItems: string[];
+  counts: {
+    clients: number;
+    meetings: number;
+    tasks: number;
+    notes: number;
+    opportunities: number;
+    opportunityStageEvents: number;
+  };
+  data: {
+    clients: Client[];
+    meetings: Meeting[];
+    tasks: ActionItem[];
+    notes: Note[];
+    opportunities: Opportunity[];
+    opportunityStageEvents: OpportunityStageEvent[];
+  };
+}
+
+export type ImportFormatType = 'murafiq_json' | 'clients_csv';
+
+export type ImportIssueSeverity = 'error' | 'warning';
+
+export interface ImportValidationIssue {
+  id: string;
+  collection:
+    | 'file'
+    | 'clients'
+    | 'meetings'
+    | 'tasks'
+    | 'notes'
+    | 'opportunities'
+    | 'opportunityStageEvents';
+  recordId?: string;
+  recordTitle?: string;
+  severity: ImportIssueSeverity;
+  code:
+    | 'INVALID_FORMAT'
+    | 'UNSUPPORTED_SCHEMA'
+    | 'FILE_TOO_LARGE'
+    | 'PROTOTYPE_POLLUTION_BLOCKED'
+    | 'INVALID_ID'
+    | 'MISSING_REQUIRED_FIELD'
+    | 'UNKNOWN_FIELDS_STRIPPED'
+    | 'INVALID_FIELD_VALUE'
+    | 'DUPLICATE_SKIPPED'
+    | 'MISSING_CLIENT_SKIPPED'
+    | 'BROKEN_OPTIONAL_LINK_UNLINKED'
+    | 'MISSING_OPPORTUNITY_SKIPPED'
+    | 'FOREIGN_USER_ID_REBOUND'
+    | 'ATTACHMENT_FIELDS_STRIPPED';
+  messageAr: string;
+}
+
+export interface SanitizedImportBatch {
+  clients: Client[];
+  meetings: Meeting[];
+  tasks: ActionItem[];
+  notes: Note[];
+  opportunities: Opportunity[];
+  opportunityStageEvents: OpportunityStageEvent[];
+}
+
+export interface ImportPreviewResult {
+  canProceed: boolean;
+  fatalErrorAr?: string;
+  format: ImportFormatType;
+  schemaVersionDetected?: string;
+  countsByCollection: {
+    clients: { totalInFile: number; validToImport: number; duplicateSkipped: number; rejected: number };
+    meetings: { totalInFile: number; validToImport: number; duplicateSkipped: number; rejected: number };
+    tasks: { totalInFile: number; validToImport: number; duplicateSkipped: number; rejected: number };
+    notes: { totalInFile: number; validToImport: number; duplicateSkipped: number; rejected: number };
+    opportunities: { totalInFile: number; validToImport: number; duplicateSkipped: number; rejected: number };
+    opportunityStageEvents: { totalInFile: number; validToImport: number; duplicateSkipped: number; rejected: number };
+  };
+  totalInFile: number;
+  totalValidToImport: number;
+  totalDuplicatesSkipped: number;
+  totalRejected: number;
+  brokenRelationshipsCount: number;
+  issues: ImportValidationIssue[];
+  sanitizedBatch: SanitizedImportBatch;
+}
+
+export interface ImportCollectionExecutionReport {
+  attempted: number;
+  succeeded: number;
+  skippedDuplicates: number;
+  failed: number;
+  failedItems: { id: string; title: string; errorAr: string }[];
+}
+
+export interface ImportExecutionReport {
+  startedAt: string;
+  completedAt: string;
+  status: 'completed' | 'partial_failure' | 'blocked_offline' | 'blocked_unconfirmed' | 'failed';
+  messageAr: string;
+  collections: {
+    clients: ImportCollectionExecutionReport;
+    opportunities: ImportCollectionExecutionReport;
+    meetings: ImportCollectionExecutionReport;
+    tasks: ImportCollectionExecutionReport;
+    notes: ImportCollectionExecutionReport;
+    opportunityStageEvents: ImportCollectionExecutionReport;
+  };
+  totalSucceeded: number;
+  totalSkippedDuplicates: number;
+  totalFailed: number;
+  succeededRecordKeys: string[];
+}
+
+

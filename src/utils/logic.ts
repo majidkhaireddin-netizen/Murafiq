@@ -4,6 +4,7 @@ import {
   extractZonedCalendarParts,
   resolveCalendarParts,
 } from './followUpEngine.ts';
+import { executeUniversalSearch } from './searchEngine.ts';
 
 /**
  * Format Gregorian date into authentic Arabic string representation
@@ -240,7 +241,8 @@ export function detectClientsNeedingReview(
 }
 
 /**
- * Universal search filter across Clients, Meetings, Tasks, Notes, and Opportunities
+ * Universal search filter across Clients, Contacts, Meetings, Tasks, Notes, and Opportunities
+ * powered by the Task 009 Arabic-normalized search engine.
  */
 export function universalSearch(
   query: string,
@@ -250,48 +252,25 @@ export function universalSearch(
     tasks: ActionItem[];
     notes: Note[];
     opportunities?: Opportunity[];
+    currentUserId?: string;
   }
 ) {
-  const q = query.trim().toLowerCase();
-  if (!q) {
-    return { clients: [], meetings: [], tasks: [], notes: [], opportunities: [] as Opportunity[] };
-  }
+  const exec = executeUniversalSearch({
+    query,
+    data,
+    limit: 500,
+  });
 
-  const clients = data.clients.filter(c =>
-    c.name.toLowerCase().includes(q) ||
-    (c.company && c.company.toLowerCase().includes(q)) ||
-    (c.phone && c.phone.includes(q)) ||
-    (c.email && c.email.toLowerCase().includes(q)) ||
-    (c.industry && c.industry.toLowerCase().includes(q)) ||
-    (c.tags && c.tags.some(tag => tag.toLowerCase().includes(q))) ||
-    (c.notes && c.notes.toLowerCase().includes(q))
-  );
-
-  const meetings = data.meetings.filter(m =>
-    m.title.toLowerCase().includes(q) ||
-    (m.location && m.location.toLowerCase().includes(q)) ||
-    (m.notes && m.notes.toLowerCase().includes(q))
-  );
-
-  const tasks = data.tasks.filter(t =>
-    t.title.toLowerCase().includes(q) ||
-    (t.description && t.description.toLowerCase().includes(q))
-  );
-
-  const notes = data.notes.filter(n =>
-    n.title.toLowerCase().includes(q) ||
-    n.content.toLowerCase().includes(q) ||
-    n.tags.some(tag => tag.toLowerCase().includes(q))
-  );
-
-  const opportunities = (data.opportunities || []).filter(o =>
-    o.title.toLowerCase().includes(q) ||
-    (o.description && o.description.toLowerCase().includes(q)) ||
-    (o.nextAction && o.nextAction.toLowerCase().includes(q)) ||
-    (o.source && o.source.toLowerCase().includes(q))
-  );
-
-  return { clients, meetings, tasks, notes, opportunities };
+  return {
+    clients: exec.grouped.client.map((i) => i.clientRef!).filter(Boolean),
+    contacts: exec.grouped.contact
+      .map((i) => ({ contact: i.contactRef!, client: i.clientRef! }))
+      .filter((x) => Boolean(x.contact && x.client)),
+    meetings: exec.grouped.meeting.map((i) => i.meetingRef!).filter(Boolean),
+    tasks: exec.grouped.task.map((i) => i.taskRef!).filter(Boolean),
+    notes: exec.grouped.note.map((i) => i.noteRef!).filter(Boolean),
+    opportunities: exec.grouped.opportunity.map((i) => i.opportunityRef!).filter(Boolean),
+  };
 }
 
 /**
