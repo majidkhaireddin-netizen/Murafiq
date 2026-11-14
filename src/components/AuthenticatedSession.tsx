@@ -143,6 +143,15 @@ export function AuthenticatedSession({
   const [preselectedClientIdForMeeting, setPreselectedClientIdForMeeting] = useState<string | null>(null);
   const [preselectedClientIdForTask, setPreselectedClientIdForTask] = useState<string | null>(null);
 
+  const [meetingInitialTab, setMeetingInitialTab] = useState<'all' | 'attachments' | null>(null);
+  const [meetingCreateTrigger, setMeetingCreateTrigger] = useState<{ clientId?: string; nonce: number } | null>(null);
+  const [taskCreateTrigger, setTaskCreateTrigger] = useState<{ clientId?: string; meetingId?: string; nonce: number } | null>(null);
+  const [taskOpenTrigger, setTaskOpenTrigger] = useState<{ taskId: string; nonce: number } | null>(null);
+  const [reportsInitialSubTab, setReportsInitialSubTab] = useState<'stats' | 'notes'>('stats');
+  const [noteCreateTrigger, setNoteCreateTrigger] = useState<{ clientId?: string; nonce: number } | null>(null);
+  const [noteOpenTrigger, setNoteOpenTrigger] = useState<{ noteId: string; nonce: number } | null>(null);
+  const [createClientTrigger, setCreateClientTrigger] = useState(0);
+
   // Listen to browser online/offline transitions
   useEffect(() => {
     const handleOnline = () => setIsOnline(true);
@@ -912,12 +921,53 @@ export function AuthenticatedSession({
   // Navigation handlers
   const handleOpenNewMeeting = (clientId?: string) => {
     if (clientId) setPreselectedClientIdForMeeting(clientId);
+    setMeetingInitialTab('all');
+    setMeetingCreateTrigger((prev) => ({
+      clientId,
+      nonce: (prev?.nonce || 0) + 1,
+    }));
     setActiveTab('meetings');
   };
 
   const handleOpenNewTask = (clientId?: string) => {
     if (clientId) setPreselectedClientIdForTask(clientId);
+    setTaskCreateTrigger((prev) => ({
+      clientId,
+      nonce: (prev?.nonce || 0) + 1,
+    }));
     setActiveTab('tasks');
+  };
+
+  const handleOpenExistingTask = (task: ActionItem) => {
+    setTaskOpenTrigger((prev) => ({
+      taskId: task.id,
+      nonce: (prev?.nonce || 0) + 1,
+    }));
+    setActiveTab('tasks');
+  };
+
+  const handleOpenNewNote = (clientId?: string) => {
+    setReportsInitialSubTab('notes');
+    setNoteCreateTrigger((prev) => ({
+      clientId,
+      nonce: (prev?.nonce || 0) + 1,
+    }));
+    setActiveTab('reports');
+  };
+
+  const handleOpenExistingNote = (note: Note) => {
+    setReportsInitialSubTab('notes');
+    setNoteOpenTrigger((prev) => ({
+      noteId: note.id,
+      nonce: (prev?.nonce || 0) + 1,
+    }));
+    setActiveTab('reports');
+  };
+
+  const handleOpenMeetingAttachments = (meeting: Meeting) => {
+    setSelectedMeetingId(meeting.id);
+    setMeetingInitialTab('attachments');
+    setActiveTab('meetings');
   };
 
   const fullAppState: AppState = {
@@ -1083,6 +1133,7 @@ export function AuthenticatedSession({
               notes={notes}
               onSelectMeeting={(m: Meeting) => {
                 setSelectedMeetingId(m.id);
+                setMeetingInitialTab('all');
                 setActiveTab('meetings');
               }}
               onSelectClient={(c: Client) => {
@@ -1090,10 +1141,11 @@ export function AuthenticatedSession({
                 setActiveTab('clients');
               }}
               onToggleTask={handleToggleTask}
-              onNewMeeting={() => handleOpenNewMeeting()}
+              onNewMeeting={handleOpenNewMeeting}
               onNewTask={() => handleOpenNewTask()}
               onNewClient={() => {
                 setSelectedClientId(null);
+                setCreateClientTrigger((n) => n + 1);
                 setActiveTab('clients');
               }}
               onGoToTab={(tab: NavTab) => setActiveTab(tab)}
@@ -1110,13 +1162,45 @@ export function AuthenticatedSession({
               notes={notes}
               onSelectMeeting={(m: Meeting) => {
                 setSelectedMeetingId(m.id);
+                setMeetingInitialTab('all');
                 setActiveTab('meetings');
               }}
+              onOpenMeetingAttachments={handleOpenMeetingAttachments}
               onNewMeeting={handleOpenNewMeeting}
               onNewTask={handleOpenNewTask}
+              onToggleTask={handleToggleTask}
+              onOpenTask={handleOpenExistingTask}
+              onNewNote={handleOpenNewNote}
+              onOpenNote={handleOpenExistingNote}
+              onDeleteNote={handleDeleteNote}
               onSaveClient={handleSaveClient}
               onDeleteClient={handleDeleteClient}
               selectedClientId={selectedClientId}
+              onSelectedClientChange={setSelectedClientId}
+              createClientTrigger={createClientTrigger}
+              collectionsLoaded={{
+                clients: collectionSync.clients.loaded,
+                meetings: collectionSync.meetings.loaded,
+                tasks: collectionSync.tasks.loaded,
+                notes: collectionSync.notes.loaded,
+              }}
+              hasSyncError={
+                collectionSync.clients.hasError ||
+                collectionSync.meetings.hasError ||
+                collectionSync.tasks.hasError ||
+                collectionSync.notes.hasError
+              }
+              hasPendingWrites={
+                collectionSync.clients.hasPendingWrites ||
+                collectionSync.meetings.hasPendingWrites ||
+                collectionSync.tasks.hasPendingWrites ||
+                collectionSync.notes.hasPendingWrites
+              }
+              pendingClientIds={collectionSync.clients.pendingDocIds}
+              failedClientIds={rejectedWrites
+                .filter((r) => r.entityType === 'client')
+                .map((r) => r.entityId)}
+              isOnline={isOnline}
               language={language}
             />
           )}
@@ -1135,6 +1219,8 @@ export function AuthenticatedSession({
               selectedMeetingId={selectedMeetingId}
               onSelectMeetingChange={(m: Meeting | null) => setSelectedMeetingId(m ? m.id : null)}
               preselectedClientId={preselectedClientIdForMeeting}
+              initialWorkspaceTab={meetingInitialTab}
+              createTrigger={meetingCreateTrigger}
               pendingMeetingIds={collectionSync.meetings.pendingDocIds}
               failedMeetingIds={rejectedWrites
                 .filter((r) => r.entityType === 'meeting')
@@ -1153,6 +1239,8 @@ export function AuthenticatedSession({
               onSaveTask={handleSaveTask}
               onDeleteTask={handleDeleteTask}
               preselectedClientId={preselectedClientIdForTask}
+              createTrigger={taskCreateTrigger}
+              openTaskTrigger={taskOpenTrigger}
               language={language}
             />
           )}
@@ -1165,6 +1253,9 @@ export function AuthenticatedSession({
               notes={notes}
               onSaveNote={handleSaveNote}
               onDeleteNote={handleDeleteNote}
+              initialSubTab={reportsInitialSubTab}
+              createNoteTrigger={noteCreateTrigger}
+              openNoteTrigger={noteOpenTrigger}
               language={language}
             />
           )}

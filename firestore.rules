@@ -64,7 +64,13 @@ service cloud.firestore {
 
     // Client Validation
     function isValidClient(data, userId) {
-      return data.keys().hasOnly(['id', 'userId', 'name', 'company', 'phone', 'email', 'notes', 'avatarPath', 'color', 'isFavorite', 'createdAt', 'updatedAt'])
+      return data.keys().hasOnly([
+          'id', 'userId', 'name', 'company', 'phone', 'email', 'notes',
+          'avatarPath', 'color', 'isFavorite',
+          'industry', 'category', 'relationshipStatus', 'importance',
+          'tags', 'website', 'address', 'source', 'description', 'contacts',
+          'createdAt', 'updatedAt'
+        ])
         && data.keys().hasAll(['id', 'name'])
         && data.id is string && isValidId(data.id)
         && data.name is string && data.name.size() > 0 && data.name.size() <= 150
@@ -76,6 +82,16 @@ service cloud.firestore {
         && (!('avatarPath' in data) || (data.avatarPath is string && data.avatarPath.size() <= 500))
         && (!('color' in data) || (data.color is string && data.color.size() <= 30))
         && (!('isFavorite' in data) || data.isFavorite is bool)
+        && (!('industry' in data) || (data.industry is string && data.industry.size() <= 100))
+        && (!('category' in data) || (data.category is string && data.category.size() <= 80))
+        && (!('relationshipStatus' in data) || (data.relationshipStatus in ['lead', 'initial_contact', 'active', 'follow_up_needed', 'inactive']))
+        && (!('importance' in data) || (data.importance in ['high', 'medium', 'low']))
+        && (!('tags' in data) || (data.tags is list && data.tags.size() <= 20))
+        && (!('website' in data) || (data.website is string && data.website.size() <= 250))
+        && (!('address' in data) || (data.address is string && data.address.size() <= 300))
+        && (!('source' in data) || (data.source is string && data.source.size() <= 150))
+        && (!('description' in data) || (data.description is string && data.description.size() <= 1000))
+        && (!('contacts' in data) || (data.contacts is list && data.contacts.size() <= 25))
         && (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 50))
         && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50));
     }
@@ -139,7 +155,7 @@ service cloud.firestore {
 
     // Note Validation
     function isValidNote(data, userId) {
-      return data.keys().hasOnly(['id', 'userId', 'clientId', 'title', 'content', 'tags', 'isPinned', 'color', 'createdAt'])
+      return data.keys().hasOnly(['id', 'userId', 'clientId', 'title', 'content', 'tags', 'isPinned', 'color', 'createdAt', 'updatedAt'])
         && data.keys().hasAll(['id', 'title', 'content', 'isPinned'])
         && data.id is string && isValidId(data.id)
         && data.title is string && data.title.size() > 0 && data.title.size() <= 200
@@ -149,7 +165,8 @@ service cloud.firestore {
         && (!('clientId' in data) || (data.clientId is string && isValidId(data.clientId)))
         && (!('tags' in data) || (data.tags is list && data.tags.size() <= 30))
         && (!('color' in data) || (data.color is string && data.color.size() <= 30))
-        && (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 50));
+        && (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 50))
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50));
     }
 
     // Meeting Attachment Metadata Validation (Backblaze B2 metadata only; never stores secrets or presigned URLs)

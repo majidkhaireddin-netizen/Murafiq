@@ -217,6 +217,9 @@ export function universalSearch(
     c.name.toLowerCase().includes(q) ||
     (c.company && c.company.toLowerCase().includes(q)) ||
     (c.phone && c.phone.includes(q)) ||
+    (c.email && c.email.toLowerCase().includes(q)) ||
+    (c.industry && c.industry.toLowerCase().includes(q)) ||
+    (c.tags && c.tags.some(tag => tag.toLowerCase().includes(q))) ||
     (c.notes && c.notes.toLowerCase().includes(q))
   );
 

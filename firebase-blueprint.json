@@ -15,6 +15,25 @@
         "avatarPath": { "type": "string", "maxLength": 500 },
         "color": { "type": "string", "maxLength": 20 },
         "isFavorite": { "type": "boolean" },
+        "industry": { "type": "string", "maxLength": 100 },
+        "category": { "type": "string", "maxLength": 80 },
+        "relationshipStatus": {
+          "type": "string",
+          "enum": ["lead", "initial_contact", "active", "follow_up_needed", "inactive"]
+        },
+        "importance": {
+          "type": "string",
+          "enum": ["high", "medium", "low"]
+        },
+        "tags": { "type": "array" },
+        "website": { "type": "string", "maxLength": 250 },
+        "address": { "type": "string", "maxLength": 300 },
+        "source": { "type": "string", "maxLength": 150 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "contacts": {
+          "type": "array",
+          "description": "Embedded bounded list (<= 25) of ClientContact objects belonging to this client"
+        },
         "createdAt": { "type": "string", "maxLength": 50 },
         "updatedAt": { "type": "string", "maxLength": 50 }
       },
@@ -87,7 +106,8 @@
         "tags": { "type": "array" },
         "isPinned": { "type": "boolean" },
         "color": { "type": "string", "maxLength": 30 },
-        "createdAt": { "type": "string", "maxLength": 50 }
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
       },
       "required": ["id", "title", "content", "createdAt"]
     },

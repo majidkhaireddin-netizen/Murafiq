@@ -55,6 +55,7 @@ import {
   MEETING_HAS_PENDING_ATTACHMENTS_MESSAGE_AR,
 } from '../utils/attachmentPolicy';
 import { sanitizeMeetingForSave } from '../utils/meetingMinutes';
+import { sanitizeClientForSave } from '../utils/client360';
 
 // Initialize Firebase App
 const app = initializeApp(firebaseConfig);
@@ -704,12 +705,12 @@ export function sanitizeFirestorePayload<T extends Record<string, any>>(obj: T):
 export function saveClient(client: Client): QueuedWriteHandle {
   const uid = getAuthenticatedUid();
   const path = `users/${uid}/clients/${client.id}`;
-  const rawPayload: Client = {
+  const rawPayload: Client = sanitizeClientForSave({
     ...client,
     userId: uid,
     createdAt: client.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-  };
+  });
   const payload = sanitizeFirestorePayload(rawPayload);
   const serverPromise = trackInFlightWrite(
     setDoc(doc(db, 'users', uid, 'clients', client.id), payload).catch((error) =>
@@ -906,9 +907,11 @@ export function deleteTask(taskId: string): QueuedWriteHandle {
 export function saveNote(note: Note): QueuedWriteHandle {
   const uid = getAuthenticatedUid();
   const path = `users/${uid}/notes/${note.id}`;
+  const cleanClientId = note.clientId?.trim() ? note.clientId.trim() : undefined;
   const rawPayload: Note = {
     ...note,
     userId: uid,
+    clientId: cleanClientId,
     createdAt: note.createdAt || new Date().toISOString(),
   };
   const payload = sanitizeFirestorePayload(rawPayload);

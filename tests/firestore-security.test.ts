@@ -110,7 +110,7 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
         const aliceCtx = testEnv.authenticatedContext(USER_A_UID);
         const aliceDb = getDbInstance(aliceCtx, dbId);
 
-        // Clients
+        // Clients (Legacy minimal shape & Task 005 Client 360 shape)
         const clientRef = doc(aliceDb, `users/${USER_A_UID}/clients/client_1`);
         await assertSucceeds(
           setDoc(
@@ -129,6 +129,45 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
         await assertSucceeds(getDoc(clientRef));
         await assertSucceeds(updateDoc(clientRef, { name: 'شركة الأفق المحدثة' }));
         await assertSucceeds(deleteDoc(clientRef));
+
+        // Client 360 extended fields + contacts
+        const client360Ref = doc(aliceDb, `users/${USER_A_UID}/clients/client_360_1`);
+        await assertSucceeds(
+          setDoc(
+            client360Ref,
+            sanitizeFirestorePayload({
+              id: 'client_360_1',
+              userId: USER_A_UID,
+              name: 'مجموعة المدار للاستشارات',
+              company: 'المدار',
+              industry: 'الاستشارات',
+              category: 'corporate',
+              relationshipStatus: 'active',
+              importance: 'high',
+              tags: ['عقد سنوي', 'VIP'],
+              website: 'https://madar.sa',
+              address: 'الرياض',
+              source: 'توصية',
+              description: 'عميل رئيسي في التحول الرقمي.',
+              contacts: [
+                {
+                  id: 'cc_1',
+                  name: 'سارة المنصور',
+                  title: 'مديرة المشاريع',
+                  phone: '0551112233',
+                  email: 'sara@madar.sa',
+                  isPrimary: true,
+                },
+              ],
+              createdAt: '2026-11-12T00:00:00.000Z',
+              updatedAt: '2026-11-12T00:00:00.000Z',
+            })
+          )
+        );
+        await assertSucceeds(getDoc(client360Ref));
+        await assertFails(updateDoc(client360Ref, { relationshipStatus: 'invalid_status' }));
+        await assertFails(updateDoc(client360Ref, { importance: 'critical_extra' }));
+        await assertSucceeds(deleteDoc(client360Ref));
 
         // Meetings (Legacy shape)
         const meetingRef = doc(aliceDb, `users/${USER_A_UID}/meetings/meet_1`);
@@ -202,7 +241,7 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
         await assertFails(updateDoc(structuredMeetingRef, { minutesStatus: 'signed_legally' }));
         await assertSucceeds(deleteDoc(structuredMeetingRef));
 
-        // Notes
+        // Notes (including optional clientId & updatedAt)
         const noteRef = doc(aliceDb, `users/${USER_A_UID}/notes/note_1`);
         await assertSucceeds(
           setDoc(
@@ -210,14 +249,17 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
             sanitizeFirestorePayload({
               id: 'note_1',
               userId: USER_A_UID,
+              clientId: 'client_360_1',
               title: 'ملاحظة سرية عن المفاوضات',
               content: 'العميل يفضل التوقيع قبل نهاية الربع الحالي.',
               isPinned: false,
               createdAt: '2026-11-12T00:00:00.000Z',
+              updatedAt: '2026-11-12T05:00:00.000Z',
             })
           )
         );
         await assertSucceeds(getDoc(noteRef));
+        await assertFails(updateDoc(noteRef, { clientId: '' }));
         await assertSucceeds(deleteDoc(noteRef));
       });
 

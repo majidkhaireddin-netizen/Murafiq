@@ -97,6 +97,8 @@ interface MeetingsViewProps {
   selectedMeetingId?: string | null;
   onSelectMeetingChange?: (meeting: Meeting | null) => void;
   preselectedClientId?: string | null;
+  initialWorkspaceTab?: WorkspaceSectionTab | null;
+  createTrigger?: { clientId?: string; nonce: number } | null;
   pendingMeetingIds?: string[];
   failedMeetingIds?: string[];
   language: 'ar' | 'en';
@@ -145,6 +147,8 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
   selectedMeetingId,
   onSelectMeetingChange,
   preselectedClientId,
+  initialWorkspaceTab,
+  createTrigger,
   pendingMeetingIds = [],
   failedMeetingIds = [],
   language,
@@ -227,7 +231,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
   const [isCleaningExpired, setIsCleaningExpired] = useState<boolean>(false);
   const [aiConsentTrigger, setAiConsentTrigger] = useState<number>(0);
 
-  // Sync external selectedMeetingId
+  // Sync external selectedMeetingId & initialWorkspaceTab
   useEffect(() => {
     if (selectedMeetingId) {
       const found = meetings.find((m) => m.id === selectedMeetingId);
@@ -236,6 +240,18 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
       }
     }
   }, [selectedMeetingId, meetings]);
+
+  useEffect(() => {
+    if (initialWorkspaceTab) {
+      setWorkspaceTab(initialWorkspaceTab);
+    }
+  }, [initialWorkspaceTab, selectedMeetingId]);
+
+  useEffect(() => {
+    if (createTrigger && createTrigger.nonce > 0) {
+      handleOpenCreate(createTrigger.clientId);
+    }
+  }, [createTrigger?.nonce]);
 
   // Keep activeMeeting hydrated from snapshots ONLY when there is no unsaved local error
   useEffect(() => {
@@ -358,9 +374,9 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
     }
   };
 
-  const handleOpenCreate = () => {
+  const handleOpenCreate = (overrideClientId?: string) => {
     setCreatingMeeting({
-      clientId: preselectedClientId || clients[0]?.id || '',
+      clientId: overrideClientId || preselectedClientId || clients[0]?.id || '',
       title: '',
       dateTime: getCurrentLocalDateTimeInput(new Date(Date.now() + 86400000)),
       duration: 45,
@@ -761,7 +777,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
         <button
           type="button"
           data-testid="new-meeting-button"
-          onClick={handleOpenCreate}
+          onClick={() => handleOpenCreate()}
           className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-emerald-700 text-white hover:bg-emerald-800 transition-colors shrink-0 whitespace-nowrap"
         >
           <Plus className="w-3.5 h-3.5" />
@@ -875,7 +891,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
             </p>
             <button
               type="button"
-              onClick={handleOpenCreate}
+              onClick={() => handleOpenCreate()}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-emerald-700 text-white hover:bg-emerald-800"
             >
               <Plus className="w-3.5 h-3.5" />

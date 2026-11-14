@@ -10,6 +10,30 @@ export type SyncState = 'local' | 'pending' | 'synced' | 'conflict' | 'failed';
 
 export type ProvenanceType = 'source' | 'ai_suggested' | 'approved' | 'uncertain';
 
+export type ClientRelationshipStatus =
+  | 'lead'
+  | 'initial_contact'
+  | 'active'
+  | 'follow_up_needed'
+  | 'inactive';
+
+export type ClientImportanceLevel = 'high' | 'medium' | 'low';
+
+export type ClientCategory = 'vip' | 'corporate' | 'sme' | 'individual' | 'partner' | 'other';
+
+export interface ClientContact {
+  id: string;
+  name: string;
+  title?: string;
+  department?: string;
+  phone?: string;
+  email?: string;
+  notes?: string;
+  isPrimary: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface Client {
   id: string;
   userId?: string;
@@ -21,6 +45,17 @@ export interface Client {
   avatarPath?: string;
   color?: string;
   isFavorite?: boolean;
+  // Task 005: Client 360 & Relationship Intelligence (strictly optional for legacy compatibility)
+  industry?: string;
+  category?: ClientCategory | string;
+  relationshipStatus?: ClientRelationshipStatus;
+  importance?: ClientImportanceLevel;
+  tags?: string[];
+  website?: string;
+  address?: string;
+  source?: string;
+  description?: string;
+  contacts?: ClientContact[];
   createdAt: string;
   updatedAt: string;
 }
@@ -117,6 +152,7 @@ export interface Note {
   isPinned: boolean;
   color?: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export type EntityType = 'client' | 'meeting' | 'task' | 'note';

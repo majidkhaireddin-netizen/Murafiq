@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ActionItem, Client, Meeting, TaskPriority, TaskStatus, ProvenanceType } from '../../types';
 import { formatArabicDate, getRelativeTimeArabic, categorizeTasks, suggestFollowUpDate } from '../../utils/logic';
 import { ProvenanceBadge } from '../ProvenanceBadge';
@@ -16,6 +16,7 @@ import {
   Filter,
   ArrowRight,
   Trash2,
+  Edit2,
 } from 'lucide-react';
 
 interface TasksViewProps {
@@ -27,6 +28,8 @@ interface TasksViewProps {
   onDeleteTask: (taskId: string) => void;
   preselectedClientId?: string | null;
   preselectedMeetingId?: string | null;
+  createTrigger?: { clientId?: string; meetingId?: string; nonce: number } | null;
+  openTaskTrigger?: { taskId: string; nonce: number } | null;
   language: 'ar' | 'en';
 }
 
@@ -39,6 +42,8 @@ export const TasksView: React.FC<TasksViewProps> = ({
   onDeleteTask,
   preselectedClientId,
   preselectedMeetingId,
+  createTrigger,
+  openTaskTrigger,
   language,
 }) => {
   const [filterPriority, setFilterPriority] = useState<string>('all');
@@ -69,6 +74,27 @@ export const TasksView: React.FC<TasksViewProps> = ({
     });
     setIsEditModalOpen(true);
   };
+
+  const handleOpenEdit = (task: ActionItem) => {
+    setEditingTask({ ...task });
+    setIsEditModalOpen(true);
+  };
+
+  useEffect(() => {
+    if (createTrigger && createTrigger.nonce > 0) {
+      handleOpenCreate(createTrigger.clientId, createTrigger.meetingId);
+    }
+  }, [createTrigger?.nonce]);
+
+  useEffect(() => {
+    if (openTaskTrigger && openTaskTrigger.nonce > 0) {
+      const target = tasks.find((t) => t.id === openTaskTrigger.taskId);
+      if (target) {
+        if (target.clientId) setFilterClientId(target.clientId);
+        handleOpenEdit(target);
+      }
+    }
+  }, [openTaskTrigger?.nonce]);
 
   const handleSmartSuggestDate = (priority: TaskPriority) => {
     if (!editingTask) return;
@@ -219,9 +245,18 @@ export const TasksView: React.FC<TasksViewProps> = ({
                     +3 أيام
                   </button>
                   <button
+                    onClick={() => handleOpenEdit(task)}
+                    className="p-1 text-stone-400 hover:text-emerald-700 rounded"
+                    title="تعديل المهمة"
+                    aria-label={`تعديل مهمة ${task.title}`}
+                  >
+                    <Edit2 className="w-3 h-3" />
+                  </button>
+                  <button
                     onClick={() => onDeleteTask(task.id)}
                     className="p-1 text-stone-400 hover:text-rose-600 rounded"
                     title="حذف المهمة"
+                    aria-label={`حذف مهمة ${task.title}`}
                   >
                     <Trash2 className="w-3 h-3" />
                   </button>
