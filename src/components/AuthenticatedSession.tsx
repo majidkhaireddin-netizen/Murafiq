@@ -6,6 +6,9 @@ import {
   Meeting,
   ActionItem,
   Note,
+  Opportunity,
+  OpportunityStage,
+  OpportunityStageEvent,
   ConflictItem,
   ResolutionChoice,
   RejectedWriteRecord,
@@ -15,15 +18,28 @@ import {
   SnoozePreset,
 } from '../types';
 import { categorizeTasks } from '../utils/logic';
+import {
+  buildOpportunityStageTransition,
+  convertNextActionToTaskDraft,
+  createInitialOpportunityEvent,
+  generateDeterministicOpportunityId,
+  linkMeetingToOpportunity,
+  linkTaskToOpportunity,
+  sanitizeOpportunityForSave,
+  unlinkMeetingFromOpportunity,
+  unlinkTaskFromOpportunity,
+} from '../utils/opportunities';
 import { Header } from './Header';
 import { BottomNav, NavTab } from './BottomNav';
 import { DashboardView } from './views/DashboardView';
 import { TodayView } from './views/TodayView';
 import { ClientsView, ClientsFilterTrigger } from './views/ClientsView';
+import { OpportunitiesView } from './views/OpportunitiesView';
 import { MeetingsView, MeetingsFilterTrigger } from './views/MeetingsView';
 import { TasksView, TasksFilterTrigger } from './views/TasksView';
 import { ReportsView } from './views/ReportsView';
 import type { AnalyticsDrillDownTarget } from '../utils/analytics';
+import { OpportunityCloseModal } from './OpportunityCloseModal';
 import { MeetingMinutesPdfModal } from './MeetingMinutesPdfModal';
 import { BiometricLockModal } from './BiometricLockModal';
 import { SearchModal } from './SearchModal';
@@ -55,6 +71,8 @@ import {
   subscribeMeetings,
   subscribeTasks,
   subscribeNotes,
+  subscribeOpportunities,
+  subscribeOpportunityStageEvents,
   subscribeReminders,
   subscribeFollowUpPreferences,
   saveClient as fbSaveClient,
@@ -65,6 +83,10 @@ import {
   deleteTask as fbDeleteTask,
   saveNote as fbSaveNote,
   deleteNote as fbDeleteNote,
+  saveOpportunity as fbSaveOpportunity,
+  deleteOpportunity as fbDeleteOpportunity,
+  saveOpportunityStageEvent as fbSaveOpportunityStageEvent,
+  deleteOpportunityStageEvent as fbDeleteOpportunityStageEvent,
   saveReminderState as fbSaveReminderState,
   deleteReminderState as fbDeleteReminderState,
   saveFollowUpPreferences as fbSaveFollowUpPreferences,
@@ -99,6 +121,8 @@ export function AuthenticatedSession({
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [tasks, setTasks] = useState<ActionItem[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
+  const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
+  const [opportunityStageEvents, setOpportunityStageEvents] = useState<OpportunityStageEvent[]>([]);
   const [reminders, setReminders] = useState<ReminderStateRecord[]>([]);
   const [followUpPreferences, setFollowUpPreferences] = useState<FollowUpPreferences>(() => ({
     ...DEFAULT_FOLLOW_UP_PREFERENCES,
@@ -113,12 +137,16 @@ export function AuthenticatedSession({
   const meetingsRef = useRef<Meeting[]>(meetings);
   const tasksRef = useRef<ActionItem[]>(tasks);
   const notesRef = useRef<Note[]>(notes);
+  const opportunitiesRef = useRef<Opportunity[]>(opportunities);
+  const opportunityStageEventsRef = useRef<OpportunityStageEvent[]>(opportunityStageEvents);
   const remindersRef = useRef<ReminderStateRecord[]>(reminders);
   const followUpPrefsRef = useRef<FollowUpPreferences>(followUpPreferences);
   clientsRef.current = clients;
   meetingsRef.current = meetings;
   tasksRef.current = tasks;
   notesRef.current = notes;
+  opportunitiesRef.current = opportunities;
+  opportunityStageEventsRef.current = opportunityStageEvents;
   remindersRef.current = reminders;
   followUpPrefsRef.current = followUpPreferences;
 
@@ -127,6 +155,8 @@ export function AuthenticatedSession({
   const meetingOpsRef = useRef(new OperationCoordinator<Meeting>());
   const taskOpsRef = useRef(new OperationCoordinator<ActionItem>());
   const noteOpsRef = useRef(new OperationCoordinator<Note>());
+  const opportunityOpsRef = useRef(new OperationCoordinator<Opportunity>());
+  const opportunityStageEventOpsRef = useRef(new OperationCoordinator<OpportunityStageEvent>());
   const reminderOpsRef = useRef(new OperationCoordinator<ReminderStateRecord>());
   const followUpPrefOpsRef = useRef(new OperationCoordinator<FollowUpPreferences>());
 
@@ -136,6 +166,8 @@ export function AuthenticatedSession({
     meetings: new Set(),
     tasks: new Set(),
     notes: new Set(),
+    opportunities: new Set(),
+    opportunityStageEvents: new Set(),
     reminders: new Set(),
     preferences: new Set(),
   });
@@ -153,6 +185,8 @@ export function AuthenticatedSession({
     meetings: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
     tasks: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
     notes: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
+    opportunities: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
+    opportunityStageEvents: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
     reminders: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
     preferences: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
   });
@@ -182,12 +216,19 @@ export function AuthenticatedSession({
 
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [selectedMeetingId, setSelectedMeetingId] = useState<string | null>(null);
+  const [selectedOpportunityId, setSelectedOpportunityId] = useState<string | null>(null);
   const [preselectedClientIdForMeeting, setPreselectedClientIdForMeeting] = useState<string | null>(null);
   const [preselectedClientIdForTask, setPreselectedClientIdForTask] = useState<string | null>(null);
+  const [opportunityCreateTrigger, setOpportunityCreateTrigger] = useState<{ token: number; clientId?: string } | null>(null);
+  const [pendingStageTransition, setPendingStageTransition] = useState<{
+    mode: 'close' | 'reopen';
+    opportunity: Opportunity;
+    targetStage: OpportunityStage;
+  } | null>(null);
 
   const [meetingInitialTab, setMeetingInitialTab] = useState<'all' | 'attachments' | null>(null);
-  const [meetingCreateTrigger, setMeetingCreateTrigger] = useState<{ clientId?: string; nonce: number } | null>(null);
-  const [taskCreateTrigger, setTaskCreateTrigger] = useState<{ clientId?: string; meetingId?: string; nonce: number } | null>(null);
+  const [meetingCreateTrigger, setMeetingCreateTrigger] = useState<{ clientId?: string; opportunityId?: string; nonce: number } | null>(null);
+  const [taskCreateTrigger, setTaskCreateTrigger] = useState<{ clientId?: string; meetingId?: string; opportunityId?: string; nonce: number } | null>(null);
   const [taskOpenTrigger, setTaskOpenTrigger] = useState<{ taskId: string; nonce: number } | null>(null);
   const [reportsInitialSubTab, setReportsInitialSubTab] = useState<'stats' | 'notes'>('stats');
   const [noteCreateTrigger, setNoteCreateTrigger] = useState<{ clientId?: string; nonce: number } | null>(null);
@@ -377,6 +418,60 @@ export function AuthenticatedSession({
       }
     );
 
+    const unsubOpportunities = subscribeOpportunities(
+      (data, meta) => {
+        if (!isSubscribed) return;
+        opportunitiesRef.current = data;
+        setOpportunities(data);
+        setCollectionSync((prev) => ({
+          ...prev,
+          opportunities: {
+            loaded: true,
+            hasPendingWrites: meta.hasPendingWrites,
+            fromCache: meta.fromCache,
+            hasError: false,
+            pendingDocIds: meta.pendingDocIds,
+            pendingDeletesCount: pendingDeleteIdsRef.current.opportunities.size,
+          },
+        }));
+      },
+      (err) => {
+        if (!isSubscribed) return;
+        console.warn(`[User ${sessionUid}] Opportunities subscription warning:`, err);
+        setCollectionSync((prev) => ({
+          ...prev,
+          opportunities: { ...prev.opportunities, hasError: true },
+        }));
+      }
+    );
+
+    const unsubOpportunityStageEvents = subscribeOpportunityStageEvents(
+      (data, meta) => {
+        if (!isSubscribed) return;
+        opportunityStageEventsRef.current = data;
+        setOpportunityStageEvents(data);
+        setCollectionSync((prev) => ({
+          ...prev,
+          opportunityStageEvents: {
+            loaded: true,
+            hasPendingWrites: meta.hasPendingWrites,
+            fromCache: meta.fromCache,
+            hasError: false,
+            pendingDocIds: meta.pendingDocIds,
+            pendingDeletesCount: pendingDeleteIdsRef.current.opportunityStageEvents.size,
+          },
+        }));
+      },
+      (err) => {
+        if (!isSubscribed) return;
+        console.warn(`[User ${sessionUid}] OpportunityStageEvents subscription warning:`, err);
+        setCollectionSync((prev) => ({
+          ...prev,
+          opportunityStageEvents: { ...prev.opportunityStageEvents, hasError: true },
+        }));
+      }
+    );
+
     const unsubReminders = subscribeReminders(
       (data, meta) => {
         if (!isSubscribed) return;
@@ -438,6 +533,8 @@ export function AuthenticatedSession({
       unsubMeetings();
       unsubTasks();
       unsubNotes();
+      unsubOpportunities();
+      unsubOpportunityStageEvents();
       unsubReminders();
       unsubFollowUpPrefs();
     };
@@ -467,7 +564,15 @@ export function AuthenticatedSession({
     operation: 'save' | 'delete';
     classification: WriteErrorClassification;
     error: Error;
-    payload?: Client | Meeting | ActionItem | Note | ReminderStateRecord | FollowUpPreferences;
+    payload?:
+      | Client
+      | Meeting
+      | ActionItem
+      | Note
+      | Opportunity
+      | OpportunityStageEvent
+      | ReminderStateRecord
+      | FollowUpPreferences;
     wasSuperseded?: boolean;
   }) => {
     if (params.wasSuperseded) return;
@@ -587,10 +692,11 @@ export function AuthenticatedSession({
         clients,
         meetings,
         tasks,
+        opportunities,
         preferences: followUpPreferences,
         referenceDate,
       }),
-    [clients, meetings, tasks, followUpPreferences, referenceDate]
+    [clients, meetings, tasks, opportunities, followUpPreferences, referenceDate]
   );
 
   const evaluatedReminders = useMemo(
@@ -599,11 +705,12 @@ export function AuthenticatedSession({
         clients,
         meetings,
         tasks,
+        opportunities,
         persistedStates: reminders,
         preferences: followUpPreferences,
         referenceDate,
       }),
-    [clients, meetings, tasks, reminders, followUpPreferences, referenceDate]
+    [clients, meetings, tasks, opportunities, reminders, followUpPreferences, referenceDate]
   );
 
   // Task Mutations (Non-blocking offline UI + operation-scoped recovery)
@@ -1008,6 +1115,293 @@ export function AuthenticatedSession({
     });
   };
 
+  // Opportunity & OpportunityStageEvent Mutations
+  const handleSaveOpportunityStageEvent = async (event: OpportunityStageEvent): Promise<void> => {
+    const prevEntity = opportunityStageEventsRef.current.find((e) => e.id === event.id);
+    const applyUpsert = (prev: OpportunityStageEvent[]) => {
+      const idx = prev.findIndex((e) => e.id === event.id);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = event;
+        return next;
+      }
+      return [event, ...prev];
+    };
+    opportunityStageEventsRef.current = applyUpsert(opportunityStageEventsRef.current);
+
+    opportunityStageEventOpsRef.current.runScopedMutation({
+      entityId: event.id,
+      entityType: 'opportunityStageEvent',
+      previousEntity: prevEntity,
+      setState: setOpportunityStageEvents,
+      applyOptimistic: applyUpsert,
+      dispatchWrite: () => fbSaveOpportunityStageEvent(event),
+      onServerConfirmed: ({ wasSuperseded }) => {
+        clearRejectedForEntity('opportunityStageEvent', event.id, wasSuperseded);
+      },
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+        console.warn('Save opportunity stage event rejected by server:', error);
+        recordRejectedWrite({
+          opId,
+          entityType: 'opportunityStageEvent',
+          entityId: event.id,
+          entityTitle: `حدث مرحلة الفرصة (${event.opportunityId})`,
+          operation: 'save',
+          classification,
+          error,
+          payload: event,
+          wasSuperseded,
+        });
+      },
+    });
+  };
+
+  const handleDeleteOpportunityStageEvent = async (eventId: string): Promise<void> => {
+    const prevEntity = opportunityStageEventsRef.current.find((e) => e.id === eventId);
+    const applyDelete = (prev: OpportunityStageEvent[]) => prev.filter((e) => e.id !== eventId);
+    opportunityStageEventsRef.current = applyDelete(opportunityStageEventsRef.current);
+    markDeleteInFlight('opportunityStageEvents', eventId, true);
+
+    opportunityStageEventOpsRef.current.runScopedMutation({
+      entityId: eventId,
+      entityType: 'opportunityStageEvent',
+      isDelete: true,
+      previousEntity: prevEntity,
+      setState: setOpportunityStageEvents,
+      applyOptimistic: applyDelete,
+      dispatchWrite: () => fbDeleteOpportunityStageEvent(eventId),
+      onServerConfirmed: ({ wasSuperseded }) => {
+        markDeleteInFlight('opportunityStageEvents', eventId, false);
+        clearRejectedForEntity('opportunityStageEvent', eventId, wasSuperseded);
+      },
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+        markDeleteInFlight('opportunityStageEvents', eventId, false);
+        console.warn('Delete opportunity stage event rejected by server:', error);
+        recordRejectedWrite({
+          opId,
+          entityType: 'opportunityStageEvent',
+          entityId: eventId,
+          entityTitle: `حدث مرحلة الفرصة (${eventId})`,
+          operation: 'delete',
+          classification,
+          error,
+          payload: prevEntity,
+          wasSuperseded,
+        });
+      },
+    });
+  };
+
+  const handleSaveOpportunityRecord = async (opportunity: Opportunity): Promise<void> => {
+    const prevEntity = opportunitiesRef.current.find((o) => o.id === opportunity.id);
+    const applyUpsert = (prev: Opportunity[]) => {
+      const idx = prev.findIndex((o) => o.id === opportunity.id);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = opportunity;
+        return next;
+      }
+      return [opportunity, ...prev];
+    };
+    opportunitiesRef.current = applyUpsert(opportunitiesRef.current);
+
+    opportunityOpsRef.current.runScopedMutation({
+      entityId: opportunity.id,
+      entityType: 'opportunity',
+      previousEntity: prevEntity,
+      setState: setOpportunities,
+      applyOptimistic: applyUpsert,
+      dispatchWrite: () => fbSaveOpportunity(opportunity),
+      onServerConfirmed: ({ wasSuperseded }) => {
+        clearRejectedForEntity('opportunity', opportunity.id, wasSuperseded);
+      },
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+        console.warn('Save opportunity rejected by server:', error);
+        recordRejectedWrite({
+          opId,
+          entityType: 'opportunity',
+          entityId: opportunity.id,
+          entityTitle: opportunity.title,
+          operation: 'save',
+          classification,
+          error,
+          payload: opportunity,
+          wasSuperseded,
+        });
+      },
+    });
+  };
+
+  const handleSaveOpportunity = async (
+    data: Partial<Opportunity> & { clientId: string; title: string },
+    initialNote?: string
+  ): Promise<Opportunity | void> => {
+    const nowIso = new Date().toISOString();
+    const isNew = !data.id || !opportunitiesRef.current.some((o) => o.id === data.id);
+    const id = data.id || generateDeterministicOpportunityId();
+    const sanitized = sanitizeOpportunityForSave({
+      ...data,
+      id,
+      userId: user.uid,
+      updatedAt: nowIso,
+    });
+
+    await handleSaveOpportunityRecord(sanitized);
+
+    if (isNew) {
+      const initialEvent = createInitialOpportunityEvent(sanitized, initialNote);
+      const alreadyExists = opportunityStageEventsRef.current.some(
+        (e) => e.id === initialEvent.id
+      );
+      if (!alreadyExists) {
+        await handleSaveOpportunityStageEvent(initialEvent);
+      }
+    }
+
+    return sanitized;
+  };
+
+  const handleRequestOpportunityStageChange = (
+    opportunity: Opportunity,
+    targetStage: OpportunityStage
+  ) => {
+    if (opportunity.stage === targetStage) return;
+    const nowIso = new Date().toISOString();
+    const transition = buildOpportunityStageTransition({
+      opportunity,
+      targetStage,
+      confirmed: false,
+      nowIso,
+    });
+
+    if (transition.requiresConfirmation) {
+      setPendingStageTransition({
+        mode: transition.confirmationKind === 'reopen' ? 'reopen' : 'close',
+        opportunity,
+        targetStage,
+      });
+      return;
+    }
+
+    if (transition.allowed && transition.opportunity && transition.stageEvent) {
+      void handleSaveOpportunityRecord(transition.opportunity);
+      void handleSaveOpportunityStageEvent(transition.stageEvent);
+    }
+  };
+
+  const handleConfirmOpportunityStageChange = async (params: {
+    targetStage: OpportunityStage;
+    lostReason?: string;
+    note?: string;
+  }) => {
+    if (!pendingStageTransition) return;
+    const nowIso = new Date().toISOString();
+    const transition = buildOpportunityStageTransition({
+      opportunity: pendingStageTransition.opportunity,
+      targetStage: params.targetStage,
+      confirmed: true,
+      lostReason: params.lostReason,
+      note: params.note,
+      nowIso,
+    });
+
+    setPendingStageTransition(null);
+
+    if (transition.allowed && transition.opportunity && transition.stageEvent) {
+      await handleSaveOpportunityRecord(transition.opportunity);
+      await handleSaveOpportunityStageEvent(transition.stageEvent);
+    }
+  };
+
+  const handleDeleteOpportunity = async (opportunity: Opportunity): Promise<void> => {
+    const oppId = opportunity.id;
+
+    // Unlink any linked meetings/tasks while strictly preserving the meetings & tasks themselves
+    const linkedMeetings = meetingsRef.current.filter((m) => m.opportunityId === oppId);
+    for (const m of linkedMeetings) {
+      const unlinked = unlinkMeetingFromOpportunity(m);
+      void handleSaveMeeting(unlinked);
+    }
+
+    const linkedTasks = tasksRef.current.filter((t) => t.opportunityId === oppId);
+    for (const t of linkedTasks) {
+      const unlinked = unlinkTaskFromOpportunity(t);
+      void handleSaveTask(unlinked);
+    }
+
+    const prevEntity = opportunitiesRef.current.find((o) => o.id === oppId);
+    const applyDelete = (prev: Opportunity[]) => prev.filter((o) => o.id !== oppId);
+    opportunitiesRef.current = applyDelete(opportunitiesRef.current);
+    markDeleteInFlight('opportunities', oppId, true);
+
+    if (selectedOpportunityId === oppId) {
+      setSelectedOpportunityId(null);
+    }
+
+    opportunityOpsRef.current.runScopedMutation({
+      entityId: oppId,
+      entityType: 'opportunity',
+      isDelete: true,
+      previousEntity: prevEntity,
+      setState: setOpportunities,
+      applyOptimistic: applyDelete,
+      dispatchWrite: () => fbDeleteOpportunity(oppId),
+      onServerConfirmed: ({ wasSuperseded }) => {
+        markDeleteInFlight('opportunities', oppId, false);
+        clearRejectedForEntity('opportunity', oppId, wasSuperseded);
+      },
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+        markDeleteInFlight('opportunities', oppId, false);
+        console.warn('Delete opportunity rejected by server:', error);
+        recordRejectedWrite({
+          opId,
+          entityType: 'opportunity',
+          entityId: oppId,
+          entityTitle: prevEntity?.title || opportunity.title || oppId,
+          operation: 'delete',
+          classification,
+          error,
+          payload: prevEntity,
+          wasSuperseded,
+        });
+      },
+    });
+  };
+
+  const handleConvertNextActionToTask = async (opportunity: Opportunity): Promise<void> => {
+    const res = convertNextActionToTaskDraft(opportunity);
+    if (!res.ok || !res.task) return;
+    await handleSaveTask(res.task);
+  };
+
+  const handleLinkMeetingToOpportunity = async (
+    meeting: Meeting,
+    opportunity: Opportunity
+  ): Promise<void> => {
+    const res = linkMeetingToOpportunity(meeting, opportunity);
+    if (!res.ok || !res.meeting) return;
+    await handleSaveMeeting(res.meeting);
+  };
+
+  const handleUnlinkMeetingFromOpportunity = async (meeting: Meeting): Promise<void> => {
+    const updated = unlinkMeetingFromOpportunity(meeting);
+    await handleSaveMeeting(updated);
+  };
+
+  const handleLinkTaskToOpportunity = async (
+    task: ActionItem,
+    opportunity: Opportunity
+  ): Promise<void> => {
+    const res = linkTaskToOpportunity(task, opportunity);
+    if (!res.ok || !res.task) return;
+    await handleSaveTask(res.task);
+  };
+
+  const handleUnlinkTaskFromOpportunity = async (task: ActionItem): Promise<void> => {
+    const updated = unlinkTaskFromOpportunity(task);
+    await handleSaveTask(updated);
+  };
+
   // Reminder State & Follow-Up Preferences Mutations (Operation-Scoped + Offline-Honest)
   const handleSaveReminderState = (record: ReminderStateRecord) => {
     const prevEntity = remindersRef.current.find((r) => r.id === record.id);
@@ -1179,6 +1573,11 @@ export function AuthenticatedSession({
       else if (rec.entityType === 'note') void handleDeleteNote(rec.entityId);
       else if (rec.entityType === 'meeting') {
         void handleDeleteMeeting(rec.entityId);
+      } else if (rec.entityType === 'opportunity') {
+        const opp = (rec.payload as Opportunity) || opportunitiesRef.current.find((o) => o.id === rec.entityId);
+        if (opp) void handleDeleteOpportunity(opp);
+      } else if (rec.entityType === 'opportunityStageEvent') {
+        void handleDeleteOpportunityStageEvent(rec.entityId);
       } else if (rec.entityType === 'reminder') {
         handleDeleteReminderState(rec.entityId);
       }
@@ -1190,8 +1589,13 @@ export function AuthenticatedSession({
     else if (rec.entityType === 'meeting') void handleSaveMeeting(rec.payload as Meeting);
     else if (rec.entityType === 'task') void handleSaveTask(rec.payload as ActionItem);
     else if (rec.entityType === 'note') void handleSaveNote(rec.payload as Note);
-    else if (rec.entityType === 'reminder') handleSaveReminderState(rec.payload as ReminderStateRecord);
-    else if (rec.entityType === 'preference') {
+    else if (rec.entityType === 'opportunity') {
+      void handleSaveOpportunityRecord(rec.payload as Opportunity);
+    } else if (rec.entityType === 'opportunityStageEvent') {
+      void handleSaveOpportunityStageEvent(rec.payload as OpportunityStageEvent);
+    } else if (rec.entityType === 'reminder') {
+      handleSaveReminderState(rec.payload as ReminderStateRecord);
+    } else if (rec.entityType === 'preference') {
       handleUpdateFollowUpPreferences(rec.payload as FollowUpPreferences);
     }
   };
@@ -1261,23 +1665,34 @@ export function AuthenticatedSession({
   };
 
   // Navigation handlers
-  const handleOpenNewMeeting = (clientId?: string) => {
+  const handleOpenNewMeeting = (clientId?: string, opportunityId?: string) => {
     if (clientId) setPreselectedClientIdForMeeting(clientId);
     setMeetingInitialTab('all');
     setMeetingCreateTrigger((prev) => ({
       clientId,
+      opportunityId,
       nonce: (prev?.nonce || 0) + 1,
     }));
     setActiveTab('meetings');
   };
 
-  const handleOpenNewTask = (clientId?: string) => {
+  const handleOpenNewTask = (clientId?: string, opportunityId?: string) => {
     if (clientId) setPreselectedClientIdForTask(clientId);
     setTaskCreateTrigger((prev) => ({
       clientId,
+      opportunityId,
       nonce: (prev?.nonce || 0) + 1,
     }));
     setActiveTab('tasks');
+  };
+
+  const handleOpenNewOpportunity = (clientId?: string) => {
+    setSelectedOpportunityId(null);
+    setOpportunityCreateTrigger((prev) => ({
+      clientId,
+      token: (prev?.token || 0) + 1,
+    }));
+    setActiveTab('opportunities');
   };
 
   const handleOpenExistingTask = (task: ActionItem) => {
@@ -1313,6 +1728,14 @@ export function AuthenticatedSession({
   };
 
   const handleOpenReminderSource = (reminder: ReminderItem) => {
+    if (reminder.sourceType === 'opportunity') {
+      const opp = opportunitiesRef.current.find((o) => o.id === reminder.sourceId);
+      if (opp) {
+        setSelectedOpportunityId(opp.id);
+        setActiveTab('opportunities');
+        return;
+      }
+    }
     if (reminder.sourceType === 'task') {
       const task = tasksRef.current.find((t) => t.id === reminder.sourceId);
       if (task) {
@@ -1548,6 +1971,7 @@ export function AuthenticatedSession({
               meetings={meetings}
               tasks={tasks}
               notes={notes}
+              opportunities={opportunities}
               onSelectMeeting={(m: Meeting) => {
                 setSelectedMeetingId(m.id);
                 setMeetingInitialTab('all');
@@ -1597,6 +2021,7 @@ export function AuthenticatedSession({
               clients={clients}
               meetings={meetings}
               tasks={tasks}
+              opportunities={opportunities}
               categorizedDaily={categorizedDaily}
               upcomingMeetings={upcomingMeetingsForToday}
               clientFollowUps={clientFollowUps}
@@ -1640,6 +2065,10 @@ export function AuthenticatedSession({
                 setSelectedClientId(c.id);
                 setActiveTab('clients');
               }}
+              onSelectOpportunity={(opp: Opportunity) => {
+                setSelectedOpportunityId(opp.id);
+                setActiveTab('opportunities');
+              }}
               onNewTask={handleOpenNewTask}
               onNewMeeting={handleOpenNewMeeting}
               onNewNote={handleOpenNewNote}
@@ -1657,6 +2086,7 @@ export function AuthenticatedSession({
               meetings={meetings}
               tasks={tasks}
               notes={notes}
+              opportunities={opportunities}
               onSelectMeeting={(m: Meeting) => {
                 setSelectedMeetingId(m.id);
                 setMeetingInitialTab('all');
@@ -1670,6 +2100,11 @@ export function AuthenticatedSession({
               onNewNote={handleOpenNewNote}
               onOpenNote={handleOpenExistingNote}
               onDeleteNote={handleDeleteNote}
+              onNewOpportunity={handleOpenNewOpportunity}
+              onSelectOpportunity={(opp: Opportunity) => {
+                setSelectedOpportunityId(opp.id);
+                setActiveTab('opportunities');
+              }}
               onSaveClient={handleSaveClient}
               onDeleteClient={handleDeleteClient}
               selectedClientId={selectedClientId}
@@ -1703,17 +2138,68 @@ export function AuthenticatedSession({
             />
           )}
 
+          {activeTab === 'opportunities' && (
+            <OpportunitiesView
+              opportunities={opportunities}
+              stageEvents={opportunityStageEvents}
+              clients={clients}
+              meetings={meetings}
+              tasks={tasks}
+              selectedOpportunityId={selectedOpportunityId}
+              onSelectOpportunity={setSelectedOpportunityId}
+              onSaveOpportunity={handleSaveOpportunity}
+              onRequestStageChange={handleRequestOpportunityStageChange}
+              onDeleteOpportunity={handleDeleteOpportunity}
+              onConvertNextActionToTask={handleConvertNextActionToTask}
+              onLinkMeeting={handleLinkMeetingToOpportunity}
+              onUnlinkMeeting={handleUnlinkMeetingFromOpportunity}
+              onLinkTask={handleLinkTaskToOpportunity}
+              onUnlinkTask={handleUnlinkTaskFromOpportunity}
+              onToggleTaskStatus={(task: ActionItem) => {
+                handleToggleTask(task.id);
+              }}
+              onCreateLinkedMeeting={(opp: Opportunity) =>
+                handleOpenNewMeeting(opp.clientId, opp.id)
+              }
+              onCreateLinkedTask={(opp: Opportunity) =>
+                handleOpenNewTask(opp.clientId, opp.id)
+              }
+              onOpenClient={(clientId: string) => {
+                setSelectedClientId(clientId);
+                setActiveTab('clients');
+              }}
+              onOpenMeeting={(meetingId: string) => {
+                setSelectedMeetingId(meetingId);
+                setMeetingInitialTab('all');
+                setActiveTab('meetings');
+              }}
+              onOpenTask={(taskId: string) => {
+                const task = tasksRef.current.find((t) => t.id === taskId);
+                if (task) handleOpenExistingTask(task);
+              }}
+              createTrigger={opportunityCreateTrigger}
+              isLoading={!collectionSync.opportunities.loaded}
+              syncState={syncSummary.syncState}
+              language={language}
+            />
+          )}
+
           {activeTab === 'meetings' && (
             <MeetingsView
               meetings={meetings}
               clients={clients}
               tasks={tasks}
+              opportunities={opportunities}
               onSaveMeeting={handleSaveMeeting}
               onDeleteMeeting={handleDeleteMeeting}
               onSaveTask={handleSaveTaskWithResult}
               onToggleTask={handleToggleTask}
               onOpenPdfModal={(m: Meeting) => setPdfMeeting(m)}
               onNewTaskFromMeeting={(m: Meeting) => handleOpenNewTask(m.clientId)}
+              onSelectOpportunity={(oppId: string) => {
+                setSelectedOpportunityId(oppId);
+                setActiveTab('opportunities');
+              }}
               selectedMeetingId={selectedMeetingId}
               onSelectMeetingChange={(m: Meeting | null) => setSelectedMeetingId(m ? m.id : null)}
               preselectedClientId={preselectedClientIdForMeeting}
@@ -1734,9 +2220,14 @@ export function AuthenticatedSession({
               tasks={tasks}
               clients={clients}
               meetings={meetings}
+              opportunities={opportunities}
               onToggleTask={handleToggleTask}
               onSaveTask={handleSaveTask}
               onDeleteTask={handleDeleteTask}
+              onSelectOpportunity={(oppId: string) => {
+                setSelectedOpportunityId(oppId);
+                setActiveTab('opportunities');
+              }}
               preselectedClientId={preselectedClientIdForTask}
               createTrigger={taskCreateTrigger}
               openTaskTrigger={taskOpenTrigger}
@@ -1769,6 +2260,7 @@ export function AuthenticatedSession({
           activeRemindersCount={
             followUpPreferences.remindersEnabled ? evaluatedReminders.activeCount : 0
           }
+          overdueOpportunitiesCount={dailySummary.overdueOpportunitiesCount || 0}
           language={language}
         />
       </div>
@@ -1787,7 +2279,7 @@ export function AuthenticatedSession({
         <SearchModal
           isOpen={isSearchOpen}
           onClose={() => setIsSearchOpen(false)}
-          data={{ clients, meetings, tasks, notes }}
+          data={{ clients, meetings, tasks, notes, opportunities }}
           onSelectClient={(client: Client) => {
             setSelectedClientId(client.id);
             setActiveTab('clients');
@@ -1799,6 +2291,22 @@ export function AuthenticatedSession({
           onSelectTask={() => {
             setActiveTab('tasks');
           }}
+          onSelectOpportunity={(opportunity: Opportunity) => {
+            setSelectedOpportunityId(opportunity.id);
+            setActiveTab('opportunities');
+          }}
+          language={language}
+        />
+      )}
+
+      {pendingStageTransition && (
+        <OpportunityCloseModal
+          isOpen={Boolean(pendingStageTransition)}
+          mode={pendingStageTransition.mode}
+          opportunity={pendingStageTransition.opportunity}
+          targetStage={pendingStageTransition.targetStage}
+          onCancel={() => setPendingStageTransition(null)}
+          onConfirm={handleConfirmOpportunityStageChange}
           language={language}
         />
       )}

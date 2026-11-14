@@ -6,6 +6,7 @@ import {
   FollowUpPreferences,
   Meeting,
   MeetingLeadMinutesOption,
+  Opportunity,
   ProvenanceType,
   ReminderItem,
   ReminderReason,
@@ -18,6 +19,10 @@ import {
   STALE_CONTACT_THRESHOLD_DAYS,
   evaluateClientAttentionAlerts,
 } from './client360';
+import {
+  evaluateOpportunityFollowUpAlerts,
+  isOpportunityClosed,
+} from './opportunities';
 
 export const FOLLOW_UP_PREFERENCES_DOC_ID = 'follow_up';
 
@@ -663,6 +668,7 @@ export function computeDailyCommandSummary(params: {
   clients: Client[];
   meetings: Meeting[];
   tasks: ActionItem[];
+  opportunities?: Opportunity[];
   preferences?: FollowUpPreferences;
   referenceDate?: Date;
   timeZone?: string;
@@ -671,6 +677,7 @@ export function computeDailyCommandSummary(params: {
     clients,
     meetings,
     tasks,
+    opportunities = [],
     preferences = DEFAULT_FOLLOW_UP_PREFERENCES,
     referenceDate = new Date(),
     timeZone,
@@ -700,6 +707,16 @@ export function computeDailyCommandSummary(params: {
       (t.priority === 'high' || t.priority === 'urgent')
   ).length;
 
+  const overdueOpportunitiesCount = opportunities.filter((opp) => {
+    if (isOpportunityClosed(opp.stage)) return false;
+    const alerts = evaluateOpportunityFollowUpAlerts({
+      opportunity: opp,
+      referenceDate,
+      timeZone,
+    });
+    return alerts.some((a) => a.kind === 'overdue_next_action');
+  }).length;
+
   return {
     dueTodayTasksCount: categorized.today.length,
     overdueTasksCount: categorized.overdue.length,
@@ -707,6 +724,7 @@ export function computeDailyCommandSummary(params: {
     upcomingMeetingsCount: upcomingMeetings.length,
     followUpsRequiredCount: clientFollowUps.length,
     highPriorityTasksCount,
+    overdueOpportunitiesCount,
   };
 }
 
@@ -759,6 +777,14 @@ export function computeClientFingerprint(
   lastContactIso: string | null
 ): string {
   return `client|${client.relationshipStatus || ''}|${lastContactIso || client.createdAt || ''}`;
+}
+
+export function computeOpportunityFingerprint(opp: Opportunity): string {
+  const na = (opp.nextAction || '').trim();
+  const raw = `opp|${opp.stage}|${opp.nextActionDate || ''}|${opp.expectedCloseDate || ''}|${opp.updatedAt || ''}|${
+    na ? shortHash(na) : '0'
+  }`;
+  return raw.slice(0, 190);
 }
 
 export interface SnoozeCalculationResult {
@@ -874,9 +900,10 @@ function inferInvalidationDetails(params: {
   tasksById: Map<string, ActionItem>;
   meetingsById: Map<string, Meeting>;
   clientsById: Map<string, Client>;
+  opportunitiesById: Map<string, Opportunity>;
   preferences: FollowUpPreferences;
 }): { titleArabic: string; titleEnglish: string; reasonArabic: string; clientId?: string } {
-  const { persisted, tasksById, meetingsById, clientsById, preferences } = params;
+  const { persisted, tasksById, meetingsById, clientsById, opportunitiesById, preferences } = params;
 
   if (persisted.sourceType === 'task') {
     const task = tasksById.get(persisted.sourceId);
@@ -954,6 +981,40 @@ function inferInvalidationDetails(params: {
     };
   }
 
+  if (persisted.sourceType === 'opportunity') {
+    const opp = opportunitiesById.get(persisted.sourceId);
+    if (!opp) {
+      return {
+        titleArabic: 'تذكير فرصة عمل محذوفة',
+        titleEnglish: 'Deleted opportunity reminder',
+        reasonArabic: 'لم يعد صالحًا: تم حذف فرصة العمل المرتبطة',
+        clientId: persisted.clientId,
+      };
+    }
+    if (opp.stage === 'won') {
+      return {
+        titleArabic: opp.title,
+        titleEnglish: opp.title,
+        reasonArabic: 'لم يعد صالحًا: أُغلقت الفرصة كفرصة ناجحة',
+        clientId: opp.clientId,
+      };
+    }
+    if (opp.stage === 'lost') {
+      return {
+        titleArabic: opp.title,
+        titleEnglish: opp.title,
+        reasonArabic: 'لم يعد صالحًا: أُغلقت الفرصة كغير ناجحة',
+        clientId: opp.clientId,
+      };
+    }
+    return {
+      titleArabic: opp.title,
+      titleEnglish: opp.title,
+      reasonArabic: 'لم يعد صالحًا نتيجة تحديث بيانات الفرصة أو موعدها',
+      clientId: opp.clientId,
+    };
+  }
+
   const client = clientsById.get(persisted.sourceId);
   if (!client) {
     return {
@@ -984,6 +1045,7 @@ export function evaluateReminders(params: {
   clients: Client[];
   meetings: Meeting[];
   tasks: ActionItem[];
+  opportunities?: Opportunity[];
   persistedStates?: ReminderStateRecord[];
   preferences?: FollowUpPreferences;
   referenceDate?: Date;
@@ -993,6 +1055,7 @@ export function evaluateReminders(params: {
     clients,
     meetings,
     tasks,
+    opportunities = [],
     persistedStates = [],
     preferences = DEFAULT_FOLLOW_UP_PREFERENCES,
     referenceDate = new Date(),
@@ -1005,6 +1068,7 @@ export function evaluateReminders(params: {
   const clientsById = new Map<string, Client>(clients.map((c) => [c.id, c]));
   const tasksById = new Map<string, ActionItem>(tasks.map((t) => [t.id, t]));
   const meetingsById = new Map<string, Meeting>(meetings.map((m) => [m.id, m]));
+  const opportunitiesById = new Map<string, Opportunity>(opportunities.map((o) => [o.id, o]));
   const persistedById = new Map<string, ReminderStateRecord>(
     persistedStates.map((s) => [s.id, s])
   );
@@ -1233,6 +1297,55 @@ export function evaluateReminders(params: {
     }
   }
 
+  // 4. Open Opportunity Follow-Up Candidates (strict max 1 active reminder per open opportunity; 0 for closed)
+  for (const opp of opportunities) {
+    if (isOpportunityClosed(opp.stage)) continue;
+    const oppAlerts = evaluateOpportunityFollowUpAlerts({
+      opportunity: opp,
+      referenceDate,
+      timeZone,
+    });
+    if (oppAlerts.length === 0) continue;
+
+    const picked =
+      oppAlerts.find((a) => a.kind === 'overdue_next_action') ||
+      oppAlerts.find((a) => a.kind === 'closing_soon') ||
+      oppAlerts.find((a) => a.kind === 'missing_next_action') ||
+      oppAlerts.find((a) => a.kind === 'stale');
+    if (!picked) continue;
+
+    const reason: ReminderReason =
+      picked.kind === 'overdue_next_action'
+        ? 'opportunity_overdue_action'
+        : picked.kind === 'closing_soon'
+        ? 'opportunity_closing_soon'
+        : picked.kind === 'missing_next_action'
+        ? 'opportunity_missing_next_action'
+        : 'opportunity_stale';
+
+    const id = buildDeterministicReminderId('opportunity', opp.id, reason);
+    if (!candidateMap.has(id)) {
+      const clientName = clientsById.get(opp.clientId)?.name;
+      candidateMap.set(id, {
+        id,
+        sourceType: 'opportunity',
+        sourceId: opp.id,
+        reason,
+        clientId: opp.clientId,
+        clientName,
+        titleArabic: opp.title,
+        titleEnglish: opp.title,
+        subtitleArabic: picked.messageArabic,
+        subtitleEnglish: picked.messageEnglish,
+        dueAt: opp.nextActionDate || opp.expectedCloseDate,
+        severity: picked.severity,
+        sourceFingerprint: computeOpportunityFingerprint(opp),
+        basisDisclosureArabic: picked.disclosureArabic,
+        provenance: 'source',
+      });
+    }
+  }
+
   const active: ReminderItem[] = [];
   const snoozed: ReminderItem[] = [];
   const resolved: ReminderItem[] = [];
@@ -1286,6 +1399,7 @@ export function evaluateReminders(params: {
       tasksById,
       meetingsById,
       clientsById,
+      opportunitiesById,
       preferences,
     });
     const clientName = details.clientId

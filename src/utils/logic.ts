@@ -1,4 +1,4 @@
-import { ActionItem, Client, Meeting, Note, TaskPriority } from '../types';
+import { ActionItem, Client, Meeting, Note, Opportunity, TaskPriority } from '../types';
 import {
   calendarDaysDiff,
   extractZonedCalendarParts,
@@ -91,6 +91,35 @@ export const PRIORITY_RANK: Record<TaskPriority, number> = {
   medium: 2,
   low: 1,
 };
+
+export function getPriorityBadge(priority: TaskPriority): {
+  label: string;
+  color: string;
+} {
+  switch (priority) {
+    case 'urgent':
+      return {
+        label: 'عاجل',
+        color: 'bg-rose-50 text-rose-800 border border-rose-200',
+      };
+    case 'high':
+      return {
+        label: 'مرتفع',
+        color: 'bg-amber-50 text-amber-800 border border-amber-200',
+      };
+    case 'medium':
+      return {
+        label: 'متوسط',
+        color: 'bg-stone-100 text-stone-700 border border-stone-200',
+      };
+    case 'low':
+    default:
+      return {
+        label: 'منخفض',
+        color: 'bg-stone-50 text-stone-500 border border-stone-200',
+      };
+  }
+}
 
 /**
  * Categorize action items into standard Murafiq buckets:
@@ -211,7 +240,7 @@ export function detectClientsNeedingReview(
 }
 
 /**
- * Universal search filter across Clients, Meetings, Tasks, and Notes
+ * Universal search filter across Clients, Meetings, Tasks, Notes, and Opportunities
  */
 export function universalSearch(
   query: string,
@@ -220,11 +249,12 @@ export function universalSearch(
     meetings: Meeting[];
     tasks: ActionItem[];
     notes: Note[];
+    opportunities?: Opportunity[];
   }
 ) {
   const q = query.trim().toLowerCase();
   if (!q) {
-    return { clients: [], meetings: [], tasks: [], notes: [] };
+    return { clients: [], meetings: [], tasks: [], notes: [], opportunities: [] as Opportunity[] };
   }
 
   const clients = data.clients.filter(c =>
@@ -254,7 +284,14 @@ export function universalSearch(
     n.tags.some(tag => tag.toLowerCase().includes(q))
   );
 
-  return { clients, meetings, tasks, notes };
+  const opportunities = (data.opportunities || []).filter(o =>
+    o.title.toLowerCase().includes(q) ||
+    (o.description && o.description.toLowerCase().includes(q)) ||
+    (o.nextAction && o.nextAction.toLowerCase().includes(q)) ||
+    (o.source && o.source.toLowerCase().includes(q))
+  );
+
+  return { clients, meetings, tasks, notes, opportunities };
 }
 
 /**

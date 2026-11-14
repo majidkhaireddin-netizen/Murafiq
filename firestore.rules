@@ -47,6 +47,12 @@ service cloud.firestore {
     match /notes/{noteId} {
       allow read, write: if false;
     }
+    match /opportunities/{opportunityId} {
+      allow read, write: if false;
+    }
+    match /opportunityStageEvents/{eventId} {
+      allow read, write: if false;
+    }
 
     // 4. Schema & Data Integrity Validation Helpers
 
@@ -104,7 +110,7 @@ service cloud.firestore {
           'participants', 'agendaItems', 'discussionSummary', 'decisions',
           'followUpDateTime', 'minutesStatus', 'minutesStatusUpdatedAt',
           'minutesIncludedSections', 'minutesAdditionalNotes', 'appliedTemplateId',
-          'createdAt', 'updatedAt'
+          'opportunityId', 'createdAt', 'updatedAt'
         ])
         && data.keys().hasAll(['id', 'clientId', 'title', 'dateTime', 'type', 'status', 'notes'])
         && data.id is string && isValidId(data.id)
@@ -130,13 +136,14 @@ service cloud.firestore {
         && (!('minutesIncludedSections' in data) || (data.minutesIncludedSections is list && data.minutesIncludedSections.size() <= 12))
         && (!('minutesAdditionalNotes' in data) || (data.minutesAdditionalNotes is string && data.minutesAdditionalNotes.size() <= 5000))
         && (!('appliedTemplateId' in data) || (data.appliedTemplateId is string && data.appliedTemplateId.size() <= 100))
+        && (!('opportunityId' in data) || (data.opportunityId is string && isValidId(data.opportunityId)))
         && (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 50))
         && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50));
     }
 
     // Task Validation
     function isValidTask(data, userId) {
-      return data.keys().hasOnly(['id', 'userId', 'meetingId', 'clientId', 'title', 'description', 'dueDate', 'priority', 'status', 'reminderDate', 'completedAt', 'provenance', 'createdAt'])
+      return data.keys().hasOnly(['id', 'userId', 'meetingId', 'clientId', 'opportunityId', 'title', 'description', 'dueDate', 'priority', 'status', 'reminderDate', 'completedAt', 'provenance', 'createdAt'])
         && data.keys().hasAll(['id', 'clientId', 'title', 'priority', 'status'])
         && data.id is string && isValidId(data.id)
         && data.clientId is string && isValidId(data.clientId)
@@ -145,6 +152,7 @@ service cloud.firestore {
         && data.status in ['pending', 'in_progress', 'completed', 'cancelled']
         && (!('userId' in data) || (data.userId is string && data.userId == userId))
         && (!('meetingId' in data) || (data.meetingId is string && isValidId(data.meetingId)))
+        && (!('opportunityId' in data) || (data.opportunityId is string && isValidId(data.opportunityId)))
         && (!('description' in data) || (data.description is string && data.description.size() <= 2000))
         && (!('dueDate' in data) || (data.dueDate is string && data.dueDate.size() <= 50))
         && (!('reminderDate' in data) || (data.reminderDate is string && data.reminderDate.size() <= 50))
@@ -204,11 +212,13 @@ service cloud.firestore {
         ])
         && data.keys().hasAll(['id', 'sourceType', 'sourceId', 'reason', 'status', 'sourceFingerprint'])
         && data.id is string && isValidId(data.id)
-        && data.sourceType in ['task', 'meeting', 'client']
+        && data.sourceType in ['task', 'meeting', 'client', 'opportunity']
         && data.sourceId is string && isValidId(data.sourceId)
         && data.reason in [
           'task_overdue', 'task_due_today', 'task_due_soon', 'task_high_priority',
-          'meeting_imminent', 'meeting_follow_up', 'client_stale_contact'
+          'meeting_imminent', 'meeting_follow_up', 'client_stale_contact',
+          'opportunity_overdue_action', 'opportunity_closing_soon',
+          'opportunity_missing_next_action', 'opportunity_stale'
         ]
         && data.status in ['snoozed', 'resolved', 'invalidated']
         && data.sourceFingerprint is string && data.sourceFingerprint.size() > 0 && data.sourceFingerprint.size() <= 200
@@ -243,6 +253,56 @@ service cloud.firestore {
         && (!('userId' in data) || (data.userId is string && data.userId == userId))
         && (!('staleClientDays' in data) || (data.staleClientDays is number && data.staleClientDays >= 7 && data.staleClientDays <= 365))
         && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50));
+    }
+
+    // Opportunity Validation (Task 008: Business Opportunities & Relationship Pipeline)
+    function isValidDateOnlyString(val) {
+      return val is string && val.size() == 10 && val.matches('^\\d{4}-\\d{2}-\\d{2}$');
+    }
+
+    function isValidOpportunity(data, userId) {
+      return data.keys().hasOnly([
+          'id', 'userId', 'clientId', 'title', 'description', 'type', 'stage',
+          'priority', 'estimatedValue', 'currency', 'expectedCloseDate',
+          'nextAction', 'nextActionDate', 'source', 'lostReason',
+          'closedAt', 'reopenedAt', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasAll(['id', 'clientId', 'title', 'type', 'stage', 'priority', 'createdAt', 'updatedAt'])
+        && data.id is string && isValidId(data.id)
+        && data.clientId is string && isValidId(data.clientId)
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 200
+        && data.type in ['service', 'consulting', 'retainer', 'partnership', 'project', 'other']
+        && data.stage in ['new', 'qualification', 'proposal', 'negotiation', 'won', 'lost']
+        && data.priority in ['urgent', 'high', 'medium', 'low']
+        && (!('userId' in data) || (data.userId is string && data.userId == userId))
+        && (!('description' in data) || (data.description is string && data.description.size() <= 3000))
+        && (!('estimatedValue' in data) || (data.estimatedValue is number && data.estimatedValue >= 0 && data.estimatedValue <= 1000000000 && ('currency' in data)))
+        && (!('currency' in data) || (data.currency in ['JOD', 'SAR', 'USD', 'EUR', 'AED', 'EGP']))
+        && (!('expectedCloseDate' in data) || isValidDateOnlyString(data.expectedCloseDate))
+        && (!('nextAction' in data) || (data.nextAction is string && data.nextAction.size() <= 300))
+        && (!('nextActionDate' in data) || isValidDateOnlyString(data.nextActionDate))
+        && (!('source' in data) || (data.source is string && data.source.size() <= 150))
+        && (!('lostReason' in data) || (data.lostReason is string && data.lostReason.size() <= 500))
+        && (!('closedAt' in data) || (data.closedAt is string && data.closedAt.size() <= 50))
+        && (!('reopenedAt' in data) || (data.reopenedAt is string && data.reopenedAt.size() <= 50))
+        && data.createdAt is string && data.createdAt.size() > 0 && data.createdAt.size() <= 50
+        && data.updatedAt is string && data.updatedAt.size() > 0 && data.updatedAt.size() <= 50;
+    }
+
+    // Opportunity Stage Event Validation (Append-only operational stage transition log)
+    function isValidOpportunityStageEvent(data, userId) {
+      return data.keys().hasOnly([
+          'id', 'userId', 'opportunityId', 'eventType', 'fromStage', 'toStage', 'note', 'occurredAt'
+        ])
+        && data.keys().hasAll(['id', 'opportunityId', 'eventType', 'toStage', 'occurredAt'])
+        && data.id is string && isValidId(data.id)
+        && data.opportunityId is string && isValidId(data.opportunityId)
+        && data.eventType in ['created', 'stage_changed', 'closed_won', 'closed_lost', 'reopened']
+        && (!('fromStage' in data) || (data.fromStage in ['new', 'qualification', 'proposal', 'negotiation', 'won', 'lost']))
+        && data.toStage in ['new', 'qualification', 'proposal', 'negotiation', 'won', 'lost']
+        && (!('note' in data) || (data.note is string && data.note.size() <= 500))
+        && data.occurredAt is string && data.occurredAt.size() > 0 && data.occurredAt.size() <= 50
+        && (!('userId' in data) || (data.userId is string && data.userId == userId));
     }
 
     // 5. User-Scoped Data Hierarchy (/users/{userId}/...)
@@ -373,6 +433,36 @@ service cloud.firestore {
           && (!('userId' in existing()) || incoming().userId == existing().userId)
           && isValidFollowUpPreference(incoming(), userId);
         allow delete: if isOwner(userId) && isValidId(preferenceId);
+      }
+
+      // Scoped Subcollection: Business Opportunities & Relationship Pipeline
+      match /opportunities/{opportunityId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && isValidId(opportunityId)
+          && incoming().id == opportunityId
+          && (!('userId' in incoming()) || incoming().userId == userId)
+          && isValidOpportunity(incoming(), userId);
+        allow update: if isOwner(userId)
+          && isValidId(opportunityId)
+          && incoming().id == opportunityId
+          && incoming().id == existing().id
+          && incoming().createdAt == existing().createdAt
+          && (!('userId' in existing()) || incoming().userId == existing().userId)
+          && isValidOpportunity(incoming(), userId);
+        allow delete: if isOwner(userId) && isValidId(opportunityId);
+      }
+
+      // Scoped Subcollection: Opportunity Stage History Events (Separate docs prevent concurrent array overwrite)
+      match /opportunityStageEvents/{eventId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && isValidId(eventId)
+          && incoming().id == eventId
+          && (!('userId' in incoming()) || incoming().userId == userId)
+          && isValidOpportunityStageEvent(incoming(), userId);
+        allow update: if false;
+        allow delete: if isOwner(userId) && isValidId(eventId);
       }
     }
   }

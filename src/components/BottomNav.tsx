@@ -3,6 +3,7 @@ import {
   LayoutDashboard,
   CalendarCheck,
   Users,
+  Briefcase,
   Calendar,
   CheckSquare,
   BarChart3,
@@ -12,6 +13,7 @@ export type NavTab =
   | 'dashboard'
   | 'today'
   | 'clients'
+  | 'opportunities'
   | 'meetings'
   | 'tasks'
   | 'notes'
@@ -23,6 +25,7 @@ interface BottomNavProps {
   overdueTasksCount: number;
   upcomingMeetingsCount: number;
   activeRemindersCount?: number;
+  overdueOpportunitiesCount?: number;
   language: 'ar' | 'en';
 }
 
@@ -32,6 +35,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({
   overdueTasksCount,
   upcomingMeetingsCount,
   activeRemindersCount = 0,
+  overdueOpportunitiesCount = 0,
   language,
 }) => {
   const tabs = [
@@ -53,6 +57,13 @@ export const BottomNav: React.FC<BottomNavProps> = ({
       label: language === 'ar' ? 'العملاء' : 'Clients',
       icon: Users,
       badge: 0,
+    },
+    {
+      id: 'opportunities' as NavTab,
+      label: language === 'ar' ? 'الفرص' : 'Pipeline',
+      icon: Briefcase,
+      badge: overdueOpportunitiesCount,
+      badgeColor: 'bg-amber-600',
     },
     {
       id: 'meetings' as NavTab,
@@ -77,7 +88,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({
   ];
 
   return (
-    <nav className="sticky bottom-0 z-30 bg-white/95 backdrop-blur-md border-t border-stone-200 px-1.5 py-1.5 transition-all">
+    <nav className="sticky bottom-0 z-30 bg-white/95 backdrop-blur-md border-t border-stone-200 px-1 py-1.5 transition-all">
       <div className="flex items-center justify-around max-w-2xl mx-auto gap-0.5">
         {tabs.map((tab) => {
           const Icon = tab.icon;
@@ -89,7 +100,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({
               type="button"
               data-testid={`nav-tab-${tab.id}`}
               onClick={() => onChangeTab(tab.id)}
-              className={`relative flex flex-col items-center justify-center py-1 px-1.5 sm:px-2.5 rounded-xl transition-all duration-150 min-w-0 whitespace-nowrap shrink-0 ${
+              className={`relative flex flex-col items-center justify-center py-1 px-1 sm:px-2.5 rounded-xl transition-all duration-150 min-w-0 whitespace-nowrap shrink-0 ${
                 isActive
                   ? 'text-emerald-700 font-semibold'
                   : 'text-stone-500 hover:text-stone-800'
@@ -113,7 +124,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({
                 )}
               </div>
               <span
-                className={`text-[10px] sm:text-[11px] mt-1 whitespace-nowrap ${
+                className={`text-[9.5px] sm:text-[11px] mt-1 whitespace-nowrap ${
                   isActive ? 'font-bold' : 'font-medium'
                 }`}
               >

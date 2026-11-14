@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
-import { ActionItem, Client, Meeting, Note } from '../../types';
+import { ActionItem, Client, Meeting, Note, Opportunity } from '../../types';
 import { formatArabicDate, getHijriDateString } from '../../utils/logic';
+import { computeOpportunityPipelineMetrics } from '../../utils/opportunities';
 import {
   ANALYTICS_DATE_PRESETS,
   AnalyticsDatePreset,
@@ -15,6 +16,7 @@ import {
   AlertCircle,
   AlertTriangle,
   ArrowUpLeft,
+  Briefcase,
   Calendar,
   CalendarCheck,
   CheckCircle2,
@@ -38,6 +40,7 @@ export interface DashboardViewProps {
   meetings: Meeting[];
   tasks: ActionItem[];
   notes: Note[];
+  opportunities?: Opportunity[];
   onSelectMeeting: (meeting: Meeting) => void;
   onSelectClient: (client: Client) => void;
   onToggleTask?: (taskId: string) => void;
@@ -66,6 +69,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   meetings,
   tasks,
   notes,
+  opportunities = [],
   onSelectMeeting,
   onSelectClient,
   onNewMeeting,
@@ -158,8 +162,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     <div className="space-y-5 pb-8" data-testid="analytics-dashboard-view">
       {/* Header & Workspace Title */}
       <section className="bg-white rounded-2xl border border-stone-200 p-4 sm:p-5 space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
-          <div className="space-y-1">
+        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3 sm:gap-4">
+          <div className="space-y-1.5 min-w-0 flex-1">
             <div className="flex items-center gap-2 text-[11px] text-stone-500 flex-wrap">
               <span>{dateFormatted}</span>
               {showHijri && (
@@ -179,7 +183,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
 
           {/* Print & Export Actions */}
-          <div className="flex items-center gap-2 flex-wrap shrink-0">
+          <div className="flex items-center gap-2 flex-wrap shrink-0 sm:self-start">
             <button
               type="button"
               data-testid="analytics-export-csv"
@@ -204,7 +208,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
 
         {/* Quick Actions Bar */}
-        <div className="flex items-center gap-2 overflow-x-auto pb-0.5 pt-1 border-t border-stone-100">
+        <div className="flex items-center gap-2 flex-wrap pt-3 border-t border-stone-100">
           <button
             type="button"
             onClick={() => onNewMeeting()}
@@ -232,7 +236,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <button
             type="button"
             onClick={() => onGoToTab('today')}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium bg-white text-emerald-800 hover:bg-emerald-50 border border-emerald-200 shrink-0 transition-colors ltr:ml-auto rtl:mr-auto"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium bg-white text-emerald-800 hover:bg-emerald-50 border border-emerald-200 shrink-0 transition-colors ltr:sm:ml-auto rtl:sm:mr-auto"
           >
             <CalendarCheck className="w-3.5 h-3.5" />
             <span>{isAr ? 'فتح «يومي»' : 'Open Today'}</span>
@@ -1301,6 +1305,74 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </div>
             )}
           </section>
+
+          {/* Compact Non-Disruptive Business Opportunities Summary Card (Task 008) */}
+          {(() => {
+            const oppMetrics = computeOpportunityPipelineMetrics(
+              opportunities,
+              effectiveRefDate,
+              timeZone
+            );
+            return (
+              <section
+                data-testid="dashboard-opportunities-summary"
+                className="bg-white rounded-2xl border border-stone-200 p-4 space-y-3"
+              >
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <Briefcase className="w-4 h-4 text-emerald-700" />
+                    <h3 className="font-heading font-bold text-sm text-stone-900">
+                      {isAr ? 'ملخص فرص الأعمال' : 'Business Opportunities Summary'}
+                    </h3>
+                  </div>
+                  <button
+                    type="button"
+                    data-testid="dashboard-open-opportunities-btn"
+                    onClick={() => onGoToTab('opportunities')}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-900 text-xs font-bold transition-colors"
+                  >
+                    <span>{isAr ? 'فتح مسار الفرص' : 'Open Pipeline'}</span>
+                    <ArrowUpLeft className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
+                  <div className="p-2.5 rounded-xl bg-stone-50 border border-stone-200/80">
+                    <span className="text-stone-500 block text-[11px]">
+                      {isAr ? 'الفرص المفتوحة' : 'Open'}
+                    </span>
+                    <span className="font-extrabold text-stone-900 text-base tabular-nums">
+                      {oppMetrics.openCount}
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-emerald-50/70 border border-emerald-200/80">
+                    <span className="text-emerald-800 block text-[11px]">
+                      {isAr ? 'ناجحة (30 يوماً)' : 'Won (30d)'}
+                    </span>
+                    <span className="font-extrabold text-emerald-900 text-base tabular-nums">
+                      {oppMetrics.wonInPeriodCount}
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-rose-50/70 border border-rose-200/80">
+                    <span className="text-rose-800 block text-[11px]">
+                      {isAr ? 'غير ناجحة (30 يوماً)' : 'Lost (30d)'}
+                    </span>
+                    <span className="font-extrabold text-rose-900 text-base tabular-nums">
+                      {oppMetrics.lostInPeriodCount}
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-amber-50/70 border border-amber-200/80">
+                    <span className="text-amber-900 block text-[11px]">
+                      {isAr ? 'تتطلب متابعة' : 'Needs Follow-Up'}
+                    </span>
+                    <span className="font-extrabold text-amber-900 text-base tabular-nums">
+                      {oppMetrics.needsFollowUpCount}
+                    </span>
+                  </div>
+                </div>
+              </section>
+            );
+          })()}
         </>
       )}
 

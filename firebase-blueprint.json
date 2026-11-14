@@ -67,6 +67,7 @@
         "minutesIncludedSections": { "type": "array" },
         "minutesAdditionalNotes": { "type": "string", "maxLength": 5000 },
         "appliedTemplateId": { "type": "string", "maxLength": 100 },
+        "opportunityId": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string", "maxLength": 50 },
         "updatedAt": { "type": "string", "maxLength": 50 }
       },
@@ -81,6 +82,7 @@
         "userId": { "type": "string", "maxLength": 128 },
         "clientId": { "type": "string", "maxLength": 128 },
         "meetingId": { "type": "string", "maxLength": 128 },
+        "opportunityId": { "type": "string", "maxLength": 128 },
         "title": { "type": "string", "maxLength": 250 },
         "description": { "type": "string", "maxLength": 2000 },
         "dueDate": { "type": "string", "maxLength": 50 },
@@ -165,7 +167,7 @@
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
         "userId": { "type": "string", "maxLength": 128 },
-        "sourceType": { "type": "string", "enum": ["task", "meeting", "client"] },
+        "sourceType": { "type": "string", "enum": ["task", "meeting", "client", "opportunity"] },
         "sourceId": { "type": "string", "maxLength": 128 },
         "reason": {
           "type": "string",
@@ -176,7 +178,11 @@
             "task_high_priority",
             "meeting_imminent",
             "meeting_follow_up",
-            "client_stale_contact"
+            "client_stale_contact",
+            "opportunity_overdue_action",
+            "opportunity_closing_soon",
+            "opportunity_missing_next_action",
+            "opportunity_stale"
           ]
         },
         "clientId": { "type": "string", "maxLength": 128 },
@@ -216,6 +222,49 @@
         "upcomingTaskWindowDays",
         "showStaleClients"
       ]
+    },
+    "Opportunity": {
+      "title": "Opportunity",
+      "description": "A user-isolated business opportunity or collaboration linked to a client.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "clientId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 3000 },
+        "type": { "type": "string", "enum": ["service", "consulting", "retainer", "partnership", "project", "other"] },
+        "stage": { "type": "string", "enum": ["new", "qualification", "proposal", "negotiation", "won", "lost"] },
+        "priority": { "type": "string", "enum": ["urgent", "high", "medium", "low"] },
+        "estimatedValue": { "type": "number" },
+        "currency": { "type": "string", "enum": ["JOD", "SAR", "USD", "EUR", "AED", "EGP"] },
+        "expectedCloseDate": { "type": "string", "maxLength": 50, "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "nextAction": { "type": "string", "maxLength": 300 },
+        "nextActionDate": { "type": "string", "maxLength": 50, "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "source": { "type": "string", "maxLength": 150 },
+        "lostReason": { "type": "string", "maxLength": 500 },
+        "closedAt": { "type": "string", "maxLength": 50 },
+        "reopenedAt": { "type": "string", "maxLength": 50 },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "clientId", "title", "type", "stage", "priority", "createdAt", "updatedAt"]
+    },
+    "OpportunityStageEvent": {
+      "title": "OpportunityStageEvent",
+      "description": "Immutable operational stage transition record for an opportunity.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "opportunityId": { "type": "string", "maxLength": 128 },
+        "eventType": { "type": "string", "enum": ["created", "stage_changed", "closed_won", "closed_lost", "reopened"] },
+        "fromStage": { "type": "string", "enum": ["new", "qualification", "proposal", "negotiation", "won", "lost"] },
+        "toStage": { "type": "string", "enum": ["new", "qualification", "proposal", "negotiation", "won", "lost"] },
+        "note": { "type": "string", "maxLength": 500 },
+        "occurredAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "opportunityId", "eventType", "toStage", "occurredAt"]
     }
   },
   "firestore": {
@@ -250,6 +299,14 @@
     "/users/{userId}/preferences/{preferenceId}": {
       "schema": { "$ref": "entities/FollowUpPreference" },
       "description": "Stores user-isolated follow-up and reminder preferences"
+    },
+    "/users/{userId}/opportunities/{opportunityId}": {
+      "schema": { "$ref": "entities/Opportunity" },
+      "description": "Stores user-isolated business opportunities and pipeline state"
+    },
+    "/users/{userId}/opportunityStageEvents/{eventId}": {
+      "schema": { "$ref": "entities/OpportunityStageEvent" },
+      "description": "Stores append-only operational stage transition events for opportunities"
     }
   }
 }

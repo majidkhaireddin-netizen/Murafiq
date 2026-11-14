@@ -9,6 +9,7 @@ import {
   MeetingStatus,
   MeetingType,
   MinutesStatus,
+  Opportunity,
   ParticipantParty,
   TaskPriority,
 } from '../../types';
@@ -57,6 +58,7 @@ import {
   AlertTriangle,
   ArrowDown,
   ArrowUp,
+  Briefcase,
   Calendar,
   Check,
   CheckCircle2,
@@ -92,6 +94,7 @@ interface MeetingsViewProps {
   meetings: Meeting[];
   clients: Client[];
   tasks: ActionItem[];
+  opportunities?: Opportunity[];
   onSaveMeeting: (meeting: Meeting) => Promise<void> | void;
   onDeleteMeeting?: (
     meetingId: string,
@@ -101,11 +104,12 @@ interface MeetingsViewProps {
   onToggleTask?: (taskId: string) => void;
   onOpenPdfModal: (meeting: Meeting) => void;
   onNewTaskFromMeeting: (meeting: Meeting) => void;
+  onSelectOpportunity?: (opportunityId: string) => void;
   selectedMeetingId?: string | null;
   onSelectMeetingChange?: (meeting: Meeting | null) => void;
   preselectedClientId?: string | null;
   initialWorkspaceTab?: WorkspaceSectionTab | null;
-  createTrigger?: { clientId?: string; nonce: number } | null;
+  createTrigger?: { clientId?: string; opportunityId?: string; nonce: number } | null;
   filterTrigger?: MeetingsFilterTrigger | null;
   pendingMeetingIds?: string[];
   failedMeetingIds?: string[];
@@ -146,12 +150,14 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
   meetings,
   clients,
   tasks,
+  opportunities = [],
   onSaveMeeting,
   onDeleteMeeting,
   onSaveTask,
   onToggleTask,
   onOpenPdfModal,
   onNewTaskFromMeeting,
+  onSelectOpportunity,
   selectedMeetingId,
   onSelectMeetingChange,
   preselectedClientId,
@@ -259,7 +265,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
 
   useEffect(() => {
     if (createTrigger && createTrigger.nonce > 0) {
-      handleOpenCreate(createTrigger.clientId);
+      handleOpenCreate(createTrigger.clientId, createTrigger.opportunityId);
     }
   }, [createTrigger?.nonce]);
 
@@ -399,9 +405,11 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
     }
   };
 
-  const handleOpenCreate = (overrideClientId?: string) => {
+  const handleOpenCreate = (overrideClientId?: string, overrideOpportunityId?: string) => {
+    const resolvedClientId = overrideClientId || preselectedClientId || clients[0]?.id || '';
     setCreatingMeeting({
-      clientId: overrideClientId || preselectedClientId || clients[0]?.id || '',
+      clientId: resolvedClientId,
+      opportunityId: overrideOpportunityId || undefined,
       title: '',
       dateTime: getCurrentLocalDateTimeInput(new Date(Date.now() + 86400000)),
       duration: 45,
@@ -1388,9 +1396,18 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
                         </label>
                         <select
                           value={activeMeeting.clientId}
-                          onChange={(e) =>
-                            setActiveMeeting({ ...activeMeeting, clientId: e.target.value })
-                          }
+                          onChange={(e) => {
+                            const nextClientId = e.target.value;
+                            const keepOpp = opportunities.some(
+                              (o) =>
+                                o.id === activeMeeting.opportunityId && o.clientId === nextClientId
+                            );
+                            setActiveMeeting({
+                              ...activeMeeting,
+                              clientId: nextClientId,
+                              opportunityId: keepOpp ? activeMeeting.opportunityId : undefined,
+                            });
+                          }}
                           className="w-full bg-stone-50 border border-stone-200 rounded-xl p-2 text-xs"
                         >
                           {clients.map((c) => (
@@ -1398,6 +1415,32 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
                               {c.name} {c.company ? `(${c.company})` : ''}
                             </option>
                           ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block font-semibold text-stone-700 mb-1">
+                          فرصة العمل المرتبطة (اختياري)
+                        </label>
+                        <select
+                          data-testid="meeting-basic-opportunity-select"
+                          value={activeMeeting.opportunityId || ''}
+                          onChange={(e) =>
+                            setActiveMeeting({
+                              ...activeMeeting,
+                              opportunityId: e.target.value || undefined,
+                            })
+                          }
+                          className="w-full bg-stone-50 border border-stone-200 rounded-xl p-2 text-xs"
+                        >
+                          <option value="">-- بدون ربط بفرصة عمل --</option>
+                          {opportunities
+                            .filter((o) => o.clientId === activeMeeting.clientId)
+                            .map((o) => (
+                              <option key={o.id} value={o.id}>
+                                {o.title}
+                              </option>
+                            ))}
                         </select>
                       </div>
 
@@ -1541,6 +1584,26 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
                           {MEETING_STATUS_LABELS[activeMeeting.status][language]}
                         </span>
                       </div>
+                      {activeMeeting.opportunityId && (
+                        <div className="col-span-2 sm:col-span-3 pt-1">
+                          <span className="text-stone-500 block text-[11px]">فرصة العمل المرتبطة</span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onSelectOpportunity &&
+                              activeMeeting.opportunityId &&
+                              onSelectOpportunity(activeMeeting.opportunityId)
+                            }
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200 font-bold text-xs mt-0.5 hover:bg-emerald-100"
+                          >
+                            <Briefcase className="w-3.5 h-3.5" />
+                            <span>
+                              {opportunities.find((o) => o.id === activeMeeting.opportunityId)
+                                ?.title || 'فرصة مرتبطة'}
+                            </span>
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
                 </section>
@@ -2463,9 +2526,18 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
                 <select
                   required
                   value={creatingMeeting.clientId || ''}
-                  onChange={(e) =>
-                    setCreatingMeeting({ ...creatingMeeting, clientId: e.target.value })
-                  }
+                  onChange={(e) => {
+                    const nextClientId = e.target.value;
+                    const keepOpp = opportunities.some(
+                      (o) =>
+                        o.id === creatingMeeting.opportunityId && o.clientId === nextClientId
+                    );
+                    setCreatingMeeting({
+                      ...creatingMeeting,
+                      clientId: nextClientId,
+                      opportunityId: keepOpp ? creatingMeeting.opportunityId : undefined,
+                    });
+                  }}
                   className="w-full bg-stone-50 rounded-xl border border-stone-200 p-2 text-xs"
                 >
                   {clients.length === 0 ? (
@@ -2479,6 +2551,35 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
                   )}
                 </select>
               </div>
+
+              {creatingMeeting.clientId &&
+                opportunities.some((o) => o.clientId === creatingMeeting.clientId) && (
+                  <div>
+                    <label className="block font-semibold text-stone-700 mb-1">
+                      ربط بفرصة عمل قائمة للعميل (اختياري)
+                    </label>
+                    <select
+                      data-testid="create-meeting-opportunity-select"
+                      value={creatingMeeting.opportunityId || ''}
+                      onChange={(e) =>
+                        setCreatingMeeting({
+                          ...creatingMeeting,
+                          opportunityId: e.target.value || undefined,
+                        })
+                      }
+                      className="w-full bg-stone-50 rounded-xl border border-stone-200 p-2 text-xs"
+                    >
+                      <option value="">-- بدون ربط بفرصة عمل --</option>
+                      {opportunities
+                        .filter((o) => o.clientId === creatingMeeting.clientId)
+                        .map((o) => (
+                          <option key={o.id} value={o.id}>
+                            {o.title}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                )}
 
               <div>
                 <label className="block font-semibold text-stone-700 mb-1">

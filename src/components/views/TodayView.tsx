@@ -6,10 +6,16 @@ import {
   DailyTaskBucketKey,
   FollowUpPreferences,
   Meeting,
+  Opportunity,
   ReminderItem,
   ReminderStatus,
   SnoozePreset,
 } from '../../types';
+import {
+  OPPORTUNITY_STAGE_CONFIG,
+  evaluateOpportunityFollowUpAlerts,
+  isOpportunityClosed,
+} from '../../utils/opportunities';
 import {
   CLIENT_FOLLOW_UP_DISCLOSURE_AR,
   CategorizedDailyTasks,
@@ -31,6 +37,7 @@ import {
   AlertCircle,
   Bell,
   BellOff,
+  Briefcase,
   Calendar,
   CalendarCheck,
   Check,
@@ -50,6 +57,7 @@ interface TodayViewProps {
   clients: Client[];
   meetings: Meeting[];
   tasks: ActionItem[];
+  opportunities?: Opportunity[];
   categorizedDaily: CategorizedDailyTasks;
   upcomingMeetings: DailyUpcomingMeetingItem[];
   clientFollowUps: DailyClientFollowUpEntry[];
@@ -74,6 +82,7 @@ interface TodayViewProps {
   onSaveTask: (task: ActionItem) => Promise<void> | void;
   onSelectMeeting: (meeting: Meeting) => void;
   onSelectClient: (client: Client) => void;
+  onSelectOpportunity?: (opportunity: Opportunity) => void;
   onNewTask: (clientId?: string) => void;
   onNewMeeting: (clientId?: string) => void;
   onNewNote: (clientId?: string) => void;
@@ -116,6 +125,7 @@ const PRIORITY_LABEL_AR: Record<ActionItem['priority'], { label: string; cls: st
 
 export const TodayView: React.FC<TodayViewProps> = ({
   clients,
+  opportunities = [],
   categorizedDaily,
   upcomingMeetings,
   clientFollowUps,
@@ -134,6 +144,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
   onSaveTask,
   onSelectMeeting,
   onSelectClient,
+  onSelectOpportunity,
   onNewTask,
   onNewMeeting,
   onNewNote,
@@ -223,9 +234,20 @@ export const TodayView: React.FC<TodayViewProps> = ({
       ? evaluatedReminders.resolved
       : evaluatedReminders.invalidated;
 
+  const opportunitiesNeedingFollowUp = useMemo(() => {
+    return opportunities
+      .filter((opp) => !isOpportunityClosed(opp.stage))
+      .map((opp) => ({
+        opportunity: opp,
+        alerts: evaluateOpportunityFollowUpAlerts({ opportunity: opp, referenceDate }),
+      }))
+      .filter((item) => item.alerts.length > 0);
+  }, [opportunities, referenceDate]);
+
   const getReminderTypeLabel = (rem: ReminderItem) => {
     if (rem.sourceType === 'task') return 'مهمة';
     if (rem.sourceType === 'meeting') return 'اجتماع';
+    if (rem.sourceType === 'opportunity') return 'فرصة';
     return 'عميل';
   };
 
@@ -1112,6 +1134,90 @@ export const TodayView: React.FC<TodayViewProps> = ({
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+          </section>
+
+          {/* فرص الأعمال التي تتطلب متابعة */}
+          <section
+            data-testid="today-opportunity-followups"
+            className="bg-white rounded-2xl border border-stone-200 p-4 space-y-3"
+          >
+            <div className="flex items-center justify-between pb-2 border-b border-stone-100">
+              <div className="flex items-center gap-1.5">
+                <Briefcase className="w-4 h-4 text-emerald-700" />
+                <h3 className="font-heading font-bold text-sm text-stone-900">
+                  فرص الأعمال للمتابعة
+                </h3>
+              </div>
+              <span className="text-xs font-bold text-stone-600 tabular-nums">
+                {opportunitiesNeedingFollowUp.length}
+              </span>
+            </div>
+
+            {opportunitiesNeedingFollowUp.length === 0 ? (
+              <div className="py-5 text-center border border-dashed border-stone-200 rounded-xl space-y-1">
+                <Briefcase className="w-5 h-5 text-stone-400 mx-auto" />
+                <p className="text-xs font-semibold text-stone-700">
+                  جميع الفرص المفتوحة محدّثة ولا توجد خطوات متأخرة
+                </p>
+              </div>
+            ) : (
+              <div className="divide-y divide-stone-100 border border-stone-200 rounded-xl overflow-hidden">
+                {opportunitiesNeedingFollowUp.map(({ opportunity: opp, alerts }) => {
+                  const clientObj = clientsById.get(opp.clientId);
+                  const stCfg = OPPORTUNITY_STAGE_CONFIG[opp.stage];
+                  return (
+                    <div
+                      key={opp.id}
+                      data-testid={`today-opp-followup-${opp.id}`}
+                      className="p-3 bg-white space-y-1.5"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <button
+                            type="button"
+                            onClick={() => onSelectOpportunity && onSelectOpportunity(opp)}
+                            className="text-xs font-bold text-stone-900 hover:text-emerald-800 text-start block truncate"
+                          >
+                            {opp.title}
+                          </button>
+                          <span className="text-[11px] text-stone-500 block truncate">
+                            {clientObj ? clientObj.name : 'عميل محذوف أو غير متوفر'}
+                          </span>
+                        </div>
+                        <span
+                          className={`text-[10px] font-bold px-2 py-0.5 rounded border shrink-0 ${stCfg.badgeClass}`}
+                        >
+                          {stCfg.labelAr}
+                        </span>
+                      </div>
+
+                      <p className="text-[11px] text-amber-800 font-medium">
+                        {alerts.map((a) => a.messageArabic).join(' • ')}
+                      </p>
+
+                      <div className="flex items-center justify-between gap-2 pt-0.5">
+                        <button
+                          type="button"
+                          onClick={() => onSelectOpportunity && onSelectOpportunity(opp)}
+                          className="text-[11px] font-semibold text-emerald-700 hover:text-emerald-800"
+                        >
+                          فتح الفرصة
+                        </button>
+                        {clientObj && (
+                          <button
+                            type="button"
+                            onClick={() => onSelectClient(clientObj)}
+                            className="text-[11px] font-medium text-stone-600 hover:text-stone-900"
+                          >
+                            ملف العميل
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </section>

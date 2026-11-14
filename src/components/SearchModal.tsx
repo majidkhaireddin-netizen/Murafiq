@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { Client, Meeting, ActionItem, Note } from '../types';
+import { Client, Meeting, ActionItem, Note, Opportunity } from '../types';
 import { universalSearch, formatArabicDate } from '../utils/logic';
-import { Search, Users, Calendar, CheckSquare, StickyNote, X, ArrowLeft } from 'lucide-react';
+import { OPPORTUNITY_STAGE_CONFIG } from '../utils/opportunities';
+import { Search, Users, Calendar, CheckSquare, StickyNote, Briefcase, X, ArrowLeft } from 'lucide-react';
 
 interface SearchModalProps {
   isOpen: boolean;
@@ -11,10 +12,12 @@ interface SearchModalProps {
     meetings: Meeting[];
     tasks: ActionItem[];
     notes: Note[];
+    opportunities?: Opportunity[];
   };
   onSelectClient: (client: Client) => void;
   onSelectMeeting: (meeting: Meeting) => void;
   onSelectTask: (task: ActionItem) => void;
+  onSelectOpportunity?: (opportunity: Opportunity) => void;
   language: 'ar' | 'en';
 }
 
@@ -25,6 +28,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
   onSelectClient,
   onSelectMeeting,
   onSelectTask,
+  onSelectOpportunity,
   language,
 }) => {
   const [query, setQuery] = useState('');
@@ -33,7 +37,11 @@ export const SearchModal: React.FC<SearchModalProps> = ({
 
   const results = universalSearch(query, data);
   const totalResults =
-    results.clients.length + results.meetings.length + results.tasks.length + results.notes.length;
+    results.clients.length +
+    results.meetings.length +
+    results.tasks.length +
+    results.notes.length +
+    (results.opportunities?.length || 0);
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center p-2 sm:p-4 pt-16 bg-stone-900/60 backdrop-blur-xs">
@@ -46,7 +54,11 @@ export const SearchModal: React.FC<SearchModalProps> = ({
             autoFocus
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={language === 'ar' ? 'ابحث في العملاء، محاضر اللقاءات، المهام، الملاحظات...' : 'Search clients, meetings, tasks, notes...'}
+            placeholder={
+              language === 'ar'
+                ? 'ابحث في العملاء، الفرص، محاضر اللقاءات، المهام، الملاحظات...'
+                : 'Search clients, opportunities, meetings, tasks, notes...'
+            }
             className="flex-1 bg-transparent text-sm text-stone-900 placeholder-stone-400 focus:outline-hidden"
           />
           {query && (
@@ -70,7 +82,9 @@ export const SearchModal: React.FC<SearchModalProps> = ({
           {!query.trim() ? (
             <div className="text-center py-8 text-stone-400">
               <p>اكتب أي كلمة للبحث الفوري في كافة عناصر مرافق</p>
-              <p className="text-[11px] mt-1 text-stone-400">جرب البحث عن: &quot;عقد&quot;، &quot;أحمد&quot;، &quot;تصميم&quot;، أو &quot;فاتورة&quot;</p>
+              <p className="text-[11px] mt-1 text-stone-400">
+                جرب البحث عن: &quot;عقد&quot;، &quot;أحمد&quot;، &quot;تصميم&quot;، أو &quot;عرض&quot;
+              </p>
             </div>
           ) : totalResults === 0 ? (
             <div className="text-center py-8 text-stone-400">
@@ -100,6 +114,36 @@ export const SearchModal: React.FC<SearchModalProps> = ({
                           {client.company && (
                             <span className="text-[11px] text-stone-500">{client.company}</span>
                           )}
+                        </div>
+                        <ArrowLeft className="w-3.5 h-3.5 text-stone-400 rtl:rotate-0 ltr:rotate-180" />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Opportunities Results */}
+              {results.opportunities && results.opportunities.length > 0 && (
+                <div className="space-y-1.5">
+                  <span className="font-bold text-stone-600 flex items-center gap-1.5 text-[11px]">
+                    <Briefcase className="w-3.5 h-3.5 text-emerald-700" />
+                    <span>فرص الأعمال ({results.opportunities.length})</span>
+                  </span>
+                  <div className="space-y-1">
+                    {results.opportunities.map((opp) => (
+                      <div
+                        key={opp.id}
+                        onClick={() => {
+                          if (onSelectOpportunity) onSelectOpportunity(opp);
+                          onClose();
+                        }}
+                        className="p-2.5 rounded-xl border border-stone-200 hover:bg-stone-50 cursor-pointer flex items-center justify-between"
+                      >
+                        <div>
+                          <span className="font-bold text-stone-900 block">{opp.title}</span>
+                          <span className="text-[11px] text-stone-500">
+                            {OPPORTUNITY_STAGE_CONFIG[opp.stage]?.labelAr || opp.stage}
+                          </span>
                         </div>
                         <ArrowLeft className="w-3.5 h-3.5 text-stone-400 rtl:rotate-0 ltr:rotate-180" />
                       </div>

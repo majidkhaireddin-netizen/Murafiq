@@ -7,6 +7,7 @@ import {
   ClientRelationshipStatus,
   Meeting,
   Note,
+  Opportunity,
 } from '../../types';
 import { getRelativeTimeArabic } from '../../utils/logic';
 import {
@@ -49,6 +50,7 @@ interface ClientsViewProps {
   meetings: Meeting[];
   tasks: ActionItem[];
   notes: Note[];
+  opportunities?: Opportunity[];
   onSelectMeeting: (meeting: Meeting) => void;
   onOpenMeetingAttachments: (meeting: Meeting) => void;
   onNewMeeting: (clientId: string) => void;
@@ -58,6 +60,8 @@ interface ClientsViewProps {
   onNewNote: (clientId: string) => void;
   onOpenNote: (note: Note) => void;
   onDeleteNote: (noteId: string) => void;
+  onNewOpportunity?: (clientId: string) => void;
+  onSelectOpportunity?: (opportunity: Opportunity) => void;
   onSaveClient: (client: Client) => Promise<void> | void;
   onDeleteClient: (clientId: string) => Promise<void> | void;
   selectedClientId?: string | null;
@@ -83,6 +87,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
   meetings,
   tasks,
   notes,
+  opportunities = [],
   onSelectMeeting,
   onOpenMeetingAttachments,
   onNewMeeting,
@@ -92,6 +97,8 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
   onNewNote,
   onOpenNote,
   onDeleteNote,
+  onNewOpportunity,
+  onSelectOpportunity,
   onSaveClient,
   onDeleteClient,
   selectedClientId,
@@ -322,6 +329,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
           meetings={meetings}
           tasks={tasks}
           notes={notes}
+          opportunities={opportunities}
           syncDisplay={activeClientSyncDisplay}
           collectionsLoaded={allCollectionsLoaded}
           onBack={() => selectClient(null)}
@@ -337,6 +345,8 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
           onNewNote={onNewNote}
           onOpenNote={onOpenNote}
           onDeleteNote={onDeleteNote}
+          onNewOpportunity={onNewOpportunity}
+          onSelectOpportunity={onSelectOpportunity}
           language={language}
         />
       ) : (
@@ -388,7 +398,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
           </div>
 
           {/* Quick Filter Tabs */}
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs">
+          <div className="flex items-center gap-1.5 flex-wrap pb-1 text-xs">
             <button
               type="button"
               onClick={() => setQuickFilter('all')}

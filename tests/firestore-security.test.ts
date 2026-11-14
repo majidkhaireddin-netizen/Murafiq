@@ -481,6 +481,86 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
         await assertFails(getDoc(doc(aliceDb, 'meetings/legacy_1')));
         await assertFails(getDoc(doc(aliceDb, 'tasks/legacy_1')));
         await assertFails(getDoc(doc(aliceDb, 'notes/legacy_1')));
+        await assertFails(getDoc(doc(aliceDb, 'opportunities/legacy_1')));
+        await assertFails(getDoc(doc(aliceDb, 'opportunityStageEvents/legacy_1')));
+      });
+
+      // 7b. Task 008: Opportunities & Immutable Stage Events Security Rules
+      await st.test(`7b. Opportunities & Stage Events enforce owner isolation, schema validation, and immutable stage events on ${dbId}`, async () => {
+        const aliceCtx = testEnv.authenticatedContext(USER_A_UID);
+        const aliceDb = getDbInstance(aliceCtx, dbId);
+        const bobCtx = testEnv.authenticatedContext(USER_B_UID);
+        const bobDb = getDbInstance(bobCtx, dbId);
+        const unauthDb = getDbInstance(testEnv.unauthenticatedContext(), dbId);
+
+        const oppRef = doc(aliceDb, `users/${USER_A_UID}/opportunities/opp_1`);
+        await assertSucceeds(
+          setDoc(
+            oppRef,
+            sanitizeFirestorePayload({
+              id: 'opp_1',
+              userId: USER_A_UID,
+              clientId: 'client_1',
+              title: 'مشروع استشارات التحول الرقمي',
+              type: 'consulting',
+              stage: 'proposal',
+              priority: 'high',
+              estimatedValue: 75000,
+              currency: 'SAR',
+              expectedCloseDate: '2026-12-15',
+              nextAction: 'مراجعة العرض مع المدير التنفيذي',
+              nextActionDate: '2026-11-20',
+              createdAt: '2026-11-14T10:00:00.000Z',
+              updatedAt: '2026-11-14T10:00:00.000Z',
+            })
+          )
+        );
+        await assertSucceeds(getDoc(oppRef));
+
+        // Valid update preserving createdAt succeeds
+        await assertSucceeds(
+          updateDoc(oppRef, {
+            stage: 'negotiation',
+            updatedAt: '2026-11-15T10:00:00.000Z',
+          })
+        );
+
+        // Mutating createdAt or setting invalid stage/currency fails
+        await assertFails(updateDoc(oppRef, { createdAt: '2020-01-01T00:00:00.000Z' }));
+        await assertFails(updateDoc(oppRef, { stage: 'invalid_stage' }));
+        await assertFails(updateDoc(oppRef, { currency: 'BTC' }));
+
+        // Cross-user Bob and unauthenticated user cannot read/write Alice's opportunity
+        await assertFails(getDoc(doc(bobDb, `users/${USER_A_UID}/opportunities/opp_1`)));
+        await assertFails(updateDoc(doc(bobDb, `users/${USER_A_UID}/opportunities/opp_1`), { title: 'Hacked' }));
+        await assertFails(deleteDoc(doc(bobDb, `users/${USER_A_UID}/opportunities/opp_1`)));
+        await assertFails(getDoc(doc(unauthDb, `users/${USER_A_UID}/opportunities/opp_1`)));
+
+        // Stage Event creation succeeds for owner, but UPDATE is strictly forbidden (immutable audit log)
+        const evtRef = doc(aliceDb, `users/${USER_A_UID}/opportunityStageEvents/evt_init_opp_1`);
+        await assertSucceeds(
+          setDoc(
+            evtRef,
+            sanitizeFirestorePayload({
+              id: 'evt_init_opp_1',
+              userId: USER_A_UID,
+              opportunityId: 'opp_1',
+              eventType: 'created',
+              toStage: 'proposal',
+              note: 'إنشاء الفرصة',
+              occurredAt: '2026-11-14T10:00:00.000Z',
+            })
+          )
+        );
+        await assertSucceeds(getDoc(evtRef));
+        await assertFails(updateDoc(evtRef, { note: 'تعديل سجل غير مسموح' }));
+
+        // Cross-user Bob denied on stage events
+        await assertFails(getDoc(doc(bobDb, `users/${USER_A_UID}/opportunityStageEvents/evt_init_opp_1`)));
+        await assertFails(deleteDoc(doc(bobDb, `users/${USER_A_UID}/opportunityStageEvents/evt_init_opp_1`)));
+
+        await assertSucceeds(deleteDoc(evtRef));
+        await assertSucceeds(deleteDoc(oppRef));
       });
 
       // 8. Empty collections return empty

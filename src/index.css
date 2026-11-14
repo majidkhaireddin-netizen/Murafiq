@@ -1,5 +1,10 @@
 @import "tailwindcss";
 
+@custom-variant sm (@container (width >= 40rem));
+@custom-variant md (@container (width >= 48rem));
+@custom-variant lg (@container (width >= 64rem));
+@custom-variant xl (@container (width >= 80rem));
+
 @layer base {
   body {
     font-family: 'IBM Plex Sans Arabic', 'Tajawal', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;

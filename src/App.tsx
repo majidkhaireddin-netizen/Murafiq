@@ -9,7 +9,7 @@ import { Wifi, BatteryMedium, Signal } from 'lucide-react';
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [isAuthRestoring, setIsAuthRestoring] = useState<boolean>(true);
-  const [isMobileFrame, setIsMobileFrame] = useState<boolean>(true);
+  const [isMobileFrame, setIsMobileFrame] = useState<boolean>(false);
 
   // Monitor Authentication State
   useEffect(() => {
@@ -53,7 +53,7 @@ export default function App() {
   // Unauthenticated Screen
   if (!currentUser) {
     return (
-      <div className="min-h-screen bg-stone-100 flex items-center justify-center p-0 sm:p-4">
+      <div className="@container min-h-screen bg-stone-100 flex items-center justify-center p-0 sm:p-4">
         <div
           className={`w-full bg-white flex flex-col overflow-hidden transition-all duration-300 ${
             isMobileFrame
@@ -73,7 +73,7 @@ export default function App() {
             </div>
           )}
 
-          <div className="flex-1 overflow-y-auto">
+          <div className="@container flex-1 overflow-y-auto">
             <AuthScreen language="ar" />
           </div>
         </div>
@@ -86,12 +86,12 @@ export default function App() {
   // React immediately unmounts User A's component tree, terminating subscriptions,
   // wiping all in-memory data, modals, and selections, and mounts a fresh User B session.
   return (
-    <div className="min-h-screen bg-stone-100 flex items-center justify-center p-0 sm:p-4">
+    <div className="@container min-h-screen bg-stone-100 flex items-center justify-center p-0 sm:p-4">
       <div
         className={`w-full bg-white flex flex-col overflow-hidden transition-all duration-300 ${
           isMobileFrame
             ? 'sm:max-w-[430px] sm:h-[932px] sm:rounded-[48px] sm:shadow-2xl sm:border-[8px] sm:border-stone-800 relative'
-            : 'w-full max-w-5xl h-screen sm:h-[90vh] sm:rounded-2xl shadow-xl'
+            : 'w-full max-w-6xl h-screen sm:h-[94vh] sm:rounded-2xl shadow-xl border border-stone-200/80'
         }`}
       >
         {isMobileFrame && (
@@ -106,7 +106,7 @@ export default function App() {
           </div>
         )}
 
-        <div className="flex-1 overflow-hidden flex flex-col">
+        <div className="@container flex-1 overflow-hidden flex flex-col">
           <AuthenticatedSession
             key={currentUser.uid}
             user={currentUser}

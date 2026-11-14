@@ -15,7 +15,9 @@ export type CollectionKey =
   | 'tasks'
   | 'notes'
   | 'reminders'
-  | 'preferences';
+  | 'preferences'
+  | 'opportunities'
+  | 'opportunityStageEvents';
 
 export interface DetailedSyncSummary {
   syncState: SyncState;
@@ -219,9 +221,9 @@ export function computeDetailedSyncSummary(params: {
     labelArabic: 'متزامن تماماً',
     labelEnglish: 'Synced',
     descriptionArabic:
-      'كافة العملاء واللقاءات والمهام والملاحظات مؤكدة ومحفوظة بالكامل على خادم السحابة.',
+      'كافة العملاء واللقاءات والمهام والملاحظات وفرص الأعمال مؤكدة ومحفوظة بالكامل على خادم السحابة.',
     descriptionEnglish:
-      'All clients, meetings, tasks, and notes are confirmed and synchronized with the cloud server.',
+      'All clients, meetings, tasks, notes, and opportunities are confirmed and synchronized with the cloud server.',
   };
 }
 

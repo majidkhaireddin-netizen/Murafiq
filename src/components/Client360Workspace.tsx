@@ -6,8 +6,16 @@ import {
   ClientRelationshipStatus,
   Meeting,
   Note,
+  Opportunity,
 } from '../types';
 import { formatArabicDate, getRelativeTimeArabic } from '../utils/logic';
+import {
+  OPPORTUNITY_STAGE_CONFIG,
+  OPPORTUNITY_TYPE_LABELS,
+  computeClientOpportunitySummary,
+  evaluateOpportunityFollowUpAlerts,
+  formatOpportunityMoney,
+} from '../utils/opportunities';
 import {
   CLIENT_CATEGORY_LABELS,
   CLIENT_IMPORTANCE_CONFIG,
@@ -33,6 +41,7 @@ import {
   AlertCircle,
   AlertTriangle,
   ArrowRight,
+  Briefcase,
   Building2,
   Calendar,
   CheckCircle2,
@@ -63,6 +72,7 @@ import {
 
 export type Client360SectionTab =
   | 'overview'
+  | 'opportunities'
   | 'timeline'
   | 'meetings'
   | 'tasks'
@@ -74,6 +84,7 @@ interface Client360WorkspaceProps {
   meetings: Meeting[];
   tasks: ActionItem[];
   notes: Note[];
+  opportunities?: Opportunity[];
   syncDisplay: ClientSyncDisplayState;
   collectionsLoaded: boolean;
   onBack: () => void;
@@ -89,6 +100,8 @@ interface Client360WorkspaceProps {
   onNewNote: (clientId: string) => void;
   onOpenNote: (note: Note) => void;
   onDeleteNote: (noteId: string) => void;
+  onNewOpportunity?: (clientId: string) => void;
+  onSelectOpportunity?: (opportunity: Opportunity) => void;
   language: 'ar' | 'en';
 }
 
@@ -97,6 +110,7 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
   meetings,
   tasks,
   notes,
+  opportunities = [],
   syncDisplay,
   collectionsLoaded,
   onBack,
@@ -112,6 +126,8 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
   onNewNote,
   onOpenNote,
   onDeleteNote,
+  onNewOpportunity,
+  onSelectOpportunity,
   language,
 }) => {
   const [activeSection, setActiveSection] = useState<Client360SectionTab>('overview');
@@ -163,6 +179,19 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
           return (b.updatedAt || b.createdAt).localeCompare(a.updatedAt || a.createdAt);
         }),
     [notes, client.id]
+  );
+
+  const clientOpportunities = useMemo(
+    () =>
+      opportunities
+        .filter((o) => o.clientId === client.id)
+        .sort((a, b) => (b.updatedAt || b.createdAt).localeCompare(a.updatedAt || a.createdAt)),
+    [opportunities, client.id]
+  );
+
+  const oppSummary = useMemo(
+    () => computeClientOpportunitySummary(opportunities, client.id),
+    [opportunities, client.id]
   );
 
   const kpis = useMemo(
@@ -541,6 +570,18 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
               <span>ملاحظة جديدة</span>
             </button>
 
+            {onNewOpportunity && (
+              <button
+                type="button"
+                data-testid="client-360-new-opportunity-btn"
+                onClick={() => onNewOpportunity(client.id)}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-900 text-xs font-semibold transition-colors"
+              >
+                <Briefcase className="w-3.5 h-3.5 text-emerald-700" />
+                <span>فرصة جديدة لهذا العميل</span>
+              </button>
+            )}
+
             {validTelHref && (
               <a
                 href={`tel:${validTelHref}`}
@@ -742,6 +783,7 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
         {(
           [
             { key: 'overview', label: 'نظرة عامة' },
+            { key: 'opportunities', label: `فرص الأعمال (${clientOpportunities.length})` },
             { key: 'timeline', label: `سجل الأنشطة (${timelineEvents.length})` },
             { key: 'meetings', label: `الاجتماعات (${clientMeetings.length})` },
             { key: 'tasks', label: `المهام (${clientTasks.length})` },
@@ -967,6 +1009,103 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                     + إضافة جهة اتصال
                   </button>
                 </div>
+              )}
+            </div>
+
+            {/* Client Business Opportunities Summary Card */}
+            <div
+              data-testid="client-360-opportunities-summary"
+              className="bg-white rounded-2xl border border-stone-200 p-4 shadow-xs space-y-2.5"
+            >
+              <div className="flex items-center justify-between">
+                <h4 className="font-heading font-bold text-xs sm:text-sm text-stone-900 flex items-center gap-1.5">
+                  <Briefcase className="w-4 h-4 text-emerald-700" />
+                  <span>فرص الأعمال ({oppSummary.total})</span>
+                </h4>
+                <button
+                  type="button"
+                  onClick={() => setActiveSection('opportunities')}
+                  className="text-[11px] font-semibold text-emerald-700 hover:text-emerald-800"
+                >
+                  عرض الفرص
+                </button>
+              </div>
+
+              <div className="grid grid-cols-3 gap-1.5 text-center text-[11px]">
+                <div className="p-2 rounded-xl bg-stone-50 border border-stone-200/80">
+                  <span className="text-stone-500 block">مفتوحة</span>
+                  <span className="font-extrabold text-stone-900 tabular-nums text-sm">
+                    {oppSummary.openCount}
+                  </span>
+                </div>
+                <div className="p-2 rounded-xl bg-emerald-50/70 border border-emerald-200/80">
+                  <span className="text-emerald-800 block">ناجحة</span>
+                  <span className="font-extrabold text-emerald-900 tabular-nums text-sm">
+                    {oppSummary.wonCount}
+                  </span>
+                </div>
+                <div className="p-2 rounded-xl bg-rose-50/70 border border-rose-200/80">
+                  <span className="text-rose-800 block">غير ناجحة</span>
+                  <span className="font-extrabold text-rose-900 tabular-nums text-sm">
+                    {oppSummary.lostCount}
+                  </span>
+                </div>
+              </div>
+
+              {oppSummary.openTotalsByCurrency.length > 0 && (
+                <div className="flex flex-wrap gap-1 pt-0.5 text-[11px]">
+                  <span className="text-stone-500">المفتوحة:</span>
+                  {oppSummary.openTotalsByCurrency.map((ct) => (
+                    <span
+                      key={ct.currency}
+                      className="px-1.5 py-0.5 rounded bg-stone-100 text-stone-800 font-bold tabular-nums"
+                    >
+                      {ct.formatted}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {oppSummary.latestOpportunity ? (
+                <div className="p-2.5 rounded-xl bg-stone-50 border border-stone-200/80 text-xs space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onSelectOpportunity && onSelectOpportunity(oppSummary.latestOpportunity!)
+                      }
+                      className="font-bold text-stone-900 hover:text-emerald-700 truncate text-right"
+                    >
+                      {oppSummary.latestOpportunity.title}
+                    </button>
+                    <span
+                      className={`text-[10px] font-bold px-1.5 py-0.5 rounded border shrink-0 ${
+                        OPPORTUNITY_STAGE_CONFIG[oppSummary.latestOpportunity.stage].badgeClass
+                      }`}
+                    >
+                      {OPPORTUNITY_STAGE_CONFIG[oppSummary.latestOpportunity.stage].labelAr}
+                    </span>
+                  </div>
+                  {oppSummary.needsFollowUpCount > 0 && (
+                    <span className="text-[10px] font-bold text-amber-800 block">
+                      {oppSummary.needsFollowUpCount} فرصة تتطلب متابعة
+                    </span>
+                  )}
+                </div>
+              ) : (
+                <p className="text-xs text-stone-400 py-1">
+                  لا توجد فرص أعمال مسجلة لهذا العميل بعد.
+                </p>
+              )}
+
+              {onNewOpportunity && (
+                <button
+                  type="button"
+                  onClick={() => onNewOpportunity(client.id)}
+                  className="w-full py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-900 text-xs font-bold transition-colors"
+                >
+                  + فرصة جديدة لهذا العميل
+                </button>
               )}
             </div>
 
@@ -1709,6 +1848,117 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
         </div>
       )}
 
+      {/* SECTION: BUSINESS OPPORTUNITIES */}
+      {activeSection === 'opportunities' && (
+        <div
+          data-testid="client-360-opportunities-section"
+          className="bg-white rounded-2xl border border-stone-200 p-4 shadow-xs space-y-4"
+        >
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div>
+              <h4 className="font-heading font-bold text-sm text-stone-900">
+                فرص الأعمال المرتبطة بالعميل ({clientOpportunities.length})
+              </h4>
+              <p className="text-[11px] text-stone-500">
+                تتبع الفرص المفتوحة والناجحة والخطوات التالية الخاصة بـ {client.name}
+              </p>
+            </div>
+            {onNewOpportunity && (
+              <button
+                type="button"
+                data-testid="client-360-section-new-opp-btn"
+                onClick={() => onNewOpportunity(client.id)}
+                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>فرصة جديدة لهذا العميل</span>
+              </button>
+            )}
+          </div>
+
+          {clientOpportunities.length === 0 ? (
+            <div className="text-center py-8 bg-stone-50 rounded-xl border border-dashed border-stone-200 text-xs text-stone-400 space-y-2">
+              <p>لا توجد فرص أعمال مسجلة لهذا العميل حالياً.</p>
+              {onNewOpportunity && (
+                <button
+                  type="button"
+                  onClick={() => onNewOpportunity(client.id)}
+                  className="text-emerald-700 font-bold hover:underline"
+                >
+                  + إنشاء فرصة جديدة لهذا العميل
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {clientOpportunities.map((opp) => {
+                const stCfg = OPPORTUNITY_STAGE_CONFIG[opp.stage];
+                const alerts = evaluateOpportunityFollowUpAlerts({ opportunity: opp });
+                return (
+                  <div
+                    key={opp.id}
+                    data-testid={`client-opp-card-${opp.id}`}
+                    className="p-3.5 rounded-xl border border-stone-200 bg-stone-50/50 hover:border-emerald-300 transition-colors space-y-2 text-xs"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={() => onSelectOpportunity && onSelectOpportunity(opp)}
+                        className="font-bold text-stone-900 hover:text-emerald-700 text-right leading-snug"
+                      >
+                        {opp.title}
+                      </button>
+                      <span
+                        className={`text-[10px] font-bold px-2 py-0.5 rounded-md border shrink-0 ${stCfg.badgeClass}`}
+                      >
+                        {stCfg.labelAr}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between text-[11px] text-stone-500">
+                      <span>{OPPORTUNITY_TYPE_LABELS[opp.type]?.ar}</span>
+                      {typeof opp.estimatedValue === 'number' && opp.currency && (
+                        <span className="font-bold text-stone-800 tabular-nums">
+                          {formatOpportunityMoney(opp.estimatedValue, opp.currency)}
+                        </span>
+                      )}
+                    </div>
+
+                    {opp.nextAction && (
+                      <div className="p-2 rounded-lg bg-white border border-stone-200 text-[11px] text-stone-700">
+                        <span className="font-semibold">الخطوة التالية: </span>
+                        <span>{opp.nextAction}</span>
+                        {opp.nextActionDate && (
+                          <span className="block text-[10px] text-stone-500 tabular-nums mt-0.5">
+                            الموعد: {opp.nextActionDate}
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {alerts.length > 0 && (
+                      <div className="text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">
+                        {alerts[0].messageArabic}
+                      </div>
+                    )}
+
+                    <div className="flex justify-end pt-1">
+                      <button
+                        type="button"
+                        onClick={() => onSelectOpportunity && onSelectOpportunity(opp)}
+                        className="text-[11px] font-bold text-emerald-700 hover:underline"
+                      >
+                        فتح تفاصيل الفرصة ←
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Contact Delete Confirmation Dialog */}
       {pendingDeleteContact && (
         <div className="fixed inset-0 z-50 bg-stone-900/60 backdrop-blur-xs flex items-center justify-center p-4">
@@ -1748,8 +1998,10 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
             </h4>
             <p className="text-xs text-stone-600 leading-relaxed">
               سيتم حذف العميل «{client.name}» من قائمتك.
-              {(clientMeetings.length > 0 || clientTasks.length > 0) &&
-                ` ملاحظة: يرتبط بهذا العميل ${clientMeetings.length} اجتماعات و${clientTasks.length} مهام.`}
+              {(clientMeetings.length > 0 ||
+                clientTasks.length > 0 ||
+                clientOpportunities.length > 0) &&
+                ` تنبيه: يرتبط بهذا العميل ${clientOpportunities.length} فرص أعمال و${clientMeetings.length} اجتماعات و${clientTasks.length} مهام. لن يتم حذف الفرص أو السجلات المرتبطة تلقائياً وستظهر كسجلات لعميل محذوف.`}
             </p>
             <div className="flex items-center justify-end gap-2 text-xs pt-2">
               <button

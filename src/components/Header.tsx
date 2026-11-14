@@ -145,19 +145,19 @@ export const Header: React.FC<HeaderProps> = ({
   const syncBadge = getSyncBadge();
 
   return (
-    <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-stone-200 px-3 sm:px-4 py-2.5 transition-all">
-      <div className="flex items-center justify-between gap-2 sm:gap-3">
+    <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-stone-200 px-3 sm:px-5 py-2.5 transition-all">
+      <div className="flex items-center justify-between gap-2 sm:gap-4">
         {/* Brand & Subtitle */}
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-center gap-2 shrink-0">
           <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-emerald-600 to-teal-700 text-white flex items-center justify-center font-bold text-base shadow-sm shrink-0">
             م
           </div>
-          <div className="truncate">
+          <div className="shrink-0">
             <div className="flex items-center gap-1.5">
-              <h1 className="font-heading font-bold text-stone-900 text-base leading-tight tracking-tight">
+              <h1 className="font-heading font-bold text-stone-900 text-base leading-tight tracking-tight whitespace-nowrap">
                 {language === 'ar' ? 'مُرافق' : 'Murafiq'}
               </h1>
-              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200/60 hidden xs:inline-block">
+              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200/60 hidden sm:inline-block">
                 v1.0
               </span>
             </div>
@@ -195,7 +195,7 @@ export const Header: React.FC<HeaderProps> = ({
               aria-label="Sync status details"
             >
               {syncBadge.icon}
-              <span className="hidden sm:inline">{syncBadge.label}</span>
+              <span className="text-[11px] sm:text-xs">{syncBadge.label}</span>
             </button>
 
             {showSyncPopover && (
@@ -497,20 +497,25 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Frame Toggle */}
           <button
             type="button"
+            data-testid="toggle-frame-mode-button"
             onClick={onToggleFrame}
-            className="p-1.5 text-stone-600 hover:text-stone-900 hover:bg-stone-100 rounded-lg transition-colors hidden md:flex items-center gap-1 text-xs"
-            title={isMobileFrame ? 'عرض كامل للشاشة' : 'محاكي شاشة الجوال (390px)'}
+            className="p-1.5 text-stone-600 hover:text-stone-900 hover:bg-stone-100 rounded-lg transition-colors inline-flex items-center gap-1 text-xs"
+            title={isMobileFrame ? 'عرض كامل للشاشة' : 'محاكي شاشة الجوال (430px)'}
             aria-label="Toggle Frame Mode"
           >
             {isMobileFrame ? (
               <>
-                <Maximize2 className="w-4 h-4 text-stone-600" />
-                <span className="text-[11px] text-stone-500">شاشة كاملة</span>
+                <Maximize2 className="w-4 h-4 text-emerald-700" />
+                <span className="text-[11px] text-emerald-700 font-medium hidden sm:inline">
+                  شاشة كاملة
+                </span>
               </>
             ) : (
               <>
                 <Smartphone className="w-4 h-4 text-emerald-700" />
-                <span className="text-[11px] text-emerald-700 font-medium">إطار جوال</span>
+                <span className="text-[11px] text-emerald-700 font-medium hidden sm:inline">
+                  إطار جوال
+                </span>
               </>
             )}
           </button>

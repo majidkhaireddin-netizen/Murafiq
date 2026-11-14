@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { ActionItem, Client, Meeting, TaskPriority, TaskStatus, ProvenanceType } from '../../types';
+import { ActionItem, Client, Meeting, Opportunity, TaskPriority, TaskStatus, ProvenanceType } from '../../types';
 import { formatArabicDate, getRelativeTimeArabic, categorizeTasks, suggestFollowUpDate } from '../../utils/logic';
 import { ProvenanceBadge } from '../ProvenanceBadge';
 import {
+  Briefcase,
   CheckSquare,
   Plus,
   Clock,
@@ -32,12 +33,19 @@ interface TasksViewProps {
   tasks: ActionItem[];
   clients: Client[];
   meetings: Meeting[];
+  opportunities?: Opportunity[];
   onToggleTask: (taskId: string) => void;
   onSaveTask: (task: ActionItem) => Promise<void> | void;
   onDeleteTask: (taskId: string) => void;
+  onSelectOpportunity?: (opportunityId: string) => void;
   preselectedClientId?: string | null;
   preselectedMeetingId?: string | null;
-  createTrigger?: { clientId?: string; meetingId?: string; nonce: number } | null;
+  createTrigger?: {
+    clientId?: string;
+    meetingId?: string;
+    opportunityId?: string;
+    nonce: number;
+  } | null;
   openTaskTrigger?: { taskId: string; nonce: number } | null;
   filterTrigger?: TasksFilterTrigger | null;
   language: 'ar' | 'en';
@@ -47,9 +55,11 @@ export const TasksView: React.FC<TasksViewProps> = ({
   tasks,
   clients,
   meetings,
+  opportunities = [],
   onToggleTask,
   onSaveTask,
   onDeleteTask,
+  onSelectOpportunity,
   preselectedClientId,
   preselectedMeetingId,
   createTrigger,
@@ -92,10 +102,15 @@ export const TasksView: React.FC<TasksViewProps> = ({
   const { overdue, today, thisWeek, later } = categorizeDailyWorkTasks(filteredTasks);
   const completedTasks = filteredTasks.filter((t) => t.status === 'completed');
 
-  const handleOpenCreate = (clientId?: string, meetingId?: string) => {
+  const handleOpenCreate = (
+    clientId?: string,
+    meetingId?: string,
+    opportunityId?: string
+  ) => {
     setEditingTask({
       clientId: clientId || preselectedClientId || (clients[0]?.id || ''),
       meetingId: meetingId || preselectedMeetingId || undefined,
+      opportunityId: opportunityId || undefined,
       title: '',
       description: '',
       dueDate: new Date().toISOString().split('T')[0],
@@ -113,7 +128,11 @@ export const TasksView: React.FC<TasksViewProps> = ({
 
   useEffect(() => {
     if (createTrigger && createTrigger.nonce > 0) {
-      handleOpenCreate(createTrigger.clientId, createTrigger.meetingId);
+      handleOpenCreate(
+        createTrigger.clientId,
+        createTrigger.meetingId,
+        createTrigger.opportunityId
+      );
     }
   }, [createTrigger?.nonce]);
 
@@ -151,10 +170,19 @@ export const TasksView: React.FC<TasksViewProps> = ({
     e.preventDefault();
     if (!editingTask?.title || !editingTask.clientId) return;
 
+    const validOppId =
+      editingTask.opportunityId &&
+      opportunities.some(
+        (o) => o.id === editingTask.opportunityId && o.clientId === editingTask.clientId
+      )
+        ? editingTask.opportunityId
+        : undefined;
+
     const saved: ActionItem = {
       id: editingTask.id || `t-${Date.now()}`,
       clientId: editingTask.clientId,
       meetingId: editingTask.meetingId,
+      opportunityId: validOppId,
       title: editingTask.title,
       description: editingTask.description || '',
       dueDate: editingTask.dueDate,
@@ -248,6 +276,21 @@ export const TasksView: React.FC<TasksViewProps> = ({
                 <span className="font-medium text-stone-700">
                   {client.name}
                 </span>
+              )}
+
+              {task.opportunityId && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onSelectOpportunity && task.opportunityId && onSelectOpportunity(task.opportunityId)
+                  }
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200 font-semibold text-[10px] hover:bg-emerald-100"
+                >
+                  <Briefcase className="w-3 h-3" />
+                  <span>
+                    {opportunities.find((o) => o.id === task.opportunityId)?.title || 'فرصة عمل'}
+                  </span>
+                </button>
               )}
 
               {task.dueDate && (
@@ -464,7 +507,17 @@ export const TasksView: React.FC<TasksViewProps> = ({
                 <select
                   required
                   value={editingTask.clientId || ''}
-                  onChange={(e) => setEditingTask({ ...editingTask, clientId: e.target.value })}
+                  onChange={(e) => {
+                    const nextClientId = e.target.value;
+                    const keepOpp = opportunities.some(
+                      (o) => o.id === editingTask.opportunityId && o.clientId === nextClientId
+                    );
+                    setEditingTask({
+                      ...editingTask,
+                      clientId: nextClientId,
+                      opportunityId: keepOpp ? editingTask.opportunityId : undefined,
+                    });
+                  }}
                   className="w-full bg-stone-50 rounded-xl border border-stone-200 p-2 text-xs text-stone-800 focus:bg-white focus:ring-2 focus:ring-emerald-600 focus:outline-hidden"
                 >
                   {clients.map((c) => (
@@ -474,6 +527,35 @@ export const TasksView: React.FC<TasksViewProps> = ({
                   ))}
                 </select>
               </div>
+
+              {editingTask.clientId &&
+                opportunities.some((o) => o.clientId === editingTask.clientId) && (
+                  <div>
+                    <label className="block font-semibold text-stone-700 mb-1">
+                      فرصة العمل المرتبطة (اختياري)
+                    </label>
+                    <select
+                      data-testid="task-modal-opportunity-select"
+                      value={editingTask.opportunityId || ''}
+                      onChange={(e) =>
+                        setEditingTask({
+                          ...editingTask,
+                          opportunityId: e.target.value || undefined,
+                        })
+                      }
+                      className="w-full bg-stone-50 rounded-xl border border-stone-200 p-2 text-xs text-stone-800 focus:bg-white focus:ring-2 focus:ring-emerald-600 focus:outline-hidden"
+                    >
+                      <option value="">-- بدون ربط بفرصة عمل --</option>
+                      {opportunities
+                        .filter((o) => o.clientId === editingTask.clientId)
+                        .map((o) => (
+                          <option key={o.id} value={o.id}>
+                            {o.title}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                )}
 
               <div>
                 <label className="block font-semibold text-stone-700 mb-1">

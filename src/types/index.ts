@@ -122,6 +122,7 @@ export interface Meeting {
   minutesIncludedSections?: MinutesSectionKey[];
   minutesAdditionalNotes?: string;
   appliedTemplateId?: string;
+  opportunityId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -131,6 +132,7 @@ export interface ActionItem {
   userId?: string;
   meetingId?: string;
   clientId: string;
+  opportunityId?: string;
   title: string;
   description?: string;
   dueDate?: string; // YYYY-MM-DD
@@ -155,7 +157,15 @@ export interface Note {
   updatedAt?: string;
 }
 
-export type EntityType = 'client' | 'meeting' | 'task' | 'note' | 'reminder' | 'preference';
+export type EntityType =
+  | 'client'
+  | 'meeting'
+  | 'task'
+  | 'note'
+  | 'reminder'
+  | 'preference'
+  | 'opportunity'
+  | 'opportunityStageEvent';
 
 export type ResolutionChoice = 'keep_local' | 'keep_remote' | 'merge';
 
@@ -211,7 +221,15 @@ export interface RejectedWriteRecord {
   category: WriteErrorCategory;
   messageArabic: string;
   rawMessage: string;
-  payload?: Client | Meeting | ActionItem | Note | ReminderStateRecord | FollowUpPreferences;
+  payload?:
+    | Client
+    | Meeting
+    | ActionItem
+    | Note
+    | ReminderStateRecord
+    | FollowUpPreferences
+    | Opportunity
+    | OpportunityStageEvent;
   occurredAt: string;
 }
 
@@ -410,7 +428,7 @@ export type DailyTaskBucketKey =
   | 'later'
   | 'no_due_date';
 
-export type ReminderSourceType = 'task' | 'meeting' | 'client';
+export type ReminderSourceType = 'task' | 'meeting' | 'client' | 'opportunity';
 
 export type ReminderReason =
   | 'task_overdue'
@@ -419,7 +437,11 @@ export type ReminderReason =
   | 'task_high_priority'
   | 'meeting_imminent'
   | 'meeting_follow_up'
-  | 'client_stale_contact';
+  | 'client_stale_contact'
+  | 'opportunity_overdue_action'
+  | 'opportunity_closing_soon'
+  | 'opportunity_missing_next_action'
+  | 'opportunity_stale';
 
 export type ReminderStatus = 'active' | 'snoozed' | 'resolved' | 'invalidated';
 
@@ -488,5 +510,68 @@ export interface DailyCommandSummary {
   upcomingMeetingsCount: number;
   followUpsRequiredCount: number;
   highPriorityTasksCount: number;
+  overdueOpportunitiesCount?: number;
+}
+
+// =========================================================================
+// Task 008: Opportunity Management & Relationship Pipeline Types
+// =========================================================================
+
+export type OpportunityStage =
+  | 'new'
+  | 'qualification'
+  | 'proposal'
+  | 'negotiation'
+  | 'won'
+  | 'lost';
+
+export type OpportunityType =
+  | 'service'
+  | 'consulting'
+  | 'retainer'
+  | 'partnership'
+  | 'project'
+  | 'other';
+
+export type OpportunityCurrency = 'JOD' | 'SAR' | 'USD' | 'EUR' | 'AED' | 'EGP';
+
+export type OpportunityStageEventType =
+  | 'created'
+  | 'stage_changed'
+  | 'closed_won'
+  | 'closed_lost'
+  | 'reopened';
+
+export interface Opportunity {
+  id: string;
+  userId?: string;
+  clientId: string;
+  title: string;
+  description?: string;
+  type: OpportunityType;
+  stage: OpportunityStage;
+  priority: TaskPriority;
+  estimatedValue?: number;
+  currency?: OpportunityCurrency;
+  expectedCloseDate?: string; // YYYY-MM-DD
+  nextAction?: string;
+  nextActionDate?: string; // YYYY-MM-DD
+  source?: string;
+  lostReason?: string;
+  closedAt?: string;
+  reopenedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OpportunityStageEvent {
+  id: string;
+  userId?: string;
+  opportunityId: string;
+  eventType: OpportunityStageEventType;
+  fromStage?: OpportunityStage;
+  toStage: OpportunityStage;
+  note?: string;
+  occurredAt: string;
 }
 

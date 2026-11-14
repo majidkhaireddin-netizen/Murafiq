@@ -41,6 +41,8 @@ import {
   MeetingAttachment,
   ReminderStateRecord,
   FollowUpPreferences,
+  Opportunity,
+  OpportunityStageEvent,
 } from '../types';
 import {
   DEFAULT_FOLLOW_UP_PREFERENCES,
@@ -63,6 +65,7 @@ import {
 } from '../utils/attachmentPolicy';
 import { sanitizeMeetingForSave } from '../utils/meetingMinutes';
 import { sanitizeClientForSave } from '../utils/client360';
+import { sanitizeOpportunityForSave } from '../utils/opportunities';
 
 // Initialize Firebase App
 const app = initializeApp(firebaseConfig);
@@ -464,7 +467,15 @@ export async function getCurrentUserIdToken(forceRefresh: boolean = false): Prom
  * Returns user-scoped collection path.
  */
 export function getUserCollectionPath(
-  subcollection: 'clients' | 'meetings' | 'tasks' | 'notes' | 'reminders' | 'preferences'
+  subcollection:
+    | 'clients'
+    | 'meetings'
+    | 'tasks'
+    | 'notes'
+    | 'reminders'
+    | 'preferences'
+    | 'opportunities'
+    | 'opportunityStageEvents'
 ): string {
   const uid = getAuthenticatedUid();
   return `users/${uid}/${subcollection}`;
@@ -1089,6 +1100,132 @@ export function saveFollowUpPreferences(prefs: FollowUpPreferences): QueuedWrite
   const serverPromise = trackInFlightWrite(
     setDoc(doc(db, 'users', uid, 'preferences', normalized.id), payload).catch((error) =>
       handleFirestoreError(error, OperationType.WRITE, path)
+    )
+  );
+  return { localAccepted: true, path, serverPromise };
+}
+
+// =========================================================================
+// Task 008: Business Opportunities & Stage Transition Events
+// =========================================================================
+
+export function subscribeOpportunities(
+  onData: (opportunities: Opportunity[], metadata: SyncMetadata) => void,
+  onError?: (err: Error) => void
+) {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/opportunities`;
+  const colRef = collection(db, 'users', uid, 'opportunities');
+  return onSnapshot(
+    colRef,
+    { includeMetadataChanges: true },
+    (snapshot) => {
+      const items: Opportunity[] = [];
+      const pendingDocIds: string[] = [];
+      snapshot.forEach((d) => {
+        items.push(d.data() as Opportunity);
+        if (d.metadata.hasPendingWrites) {
+          pendingDocIds.push(d.id);
+        }
+      });
+      onData(items, {
+        fromCache: snapshot.metadata.fromCache,
+        hasPendingWrites: snapshot.metadata.hasPendingWrites,
+        pendingDocIds,
+      });
+    },
+    (error) => {
+      logFirestoreError(error, OperationType.LIST, path);
+      if (onError) onError(error as Error);
+    }
+  );
+}
+
+export function saveOpportunity(opportunity: Opportunity): QueuedWriteHandle {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/opportunities/${opportunity.id}`;
+  const now = new Date().toISOString();
+  const rawPayload: Opportunity = sanitizeOpportunityForSave({
+    ...opportunity,
+    userId: uid,
+    createdAt: opportunity.createdAt || now,
+    updatedAt: opportunity.updatedAt || now,
+  });
+  const payload = sanitizeFirestorePayload(rawPayload);
+  const serverPromise = trackInFlightWrite(
+    setDoc(doc(db, 'users', uid, 'opportunities', rawPayload.id), payload).catch((error) =>
+      handleFirestoreError(error, OperationType.WRITE, path)
+    )
+  );
+  return { localAccepted: true, path, serverPromise };
+}
+
+export function deleteOpportunity(opportunityId: string): QueuedWriteHandle {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/opportunities/${opportunityId}`;
+  const serverPromise = trackInFlightWrite(
+    deleteDoc(doc(db, 'users', uid, 'opportunities', opportunityId)).catch((error) =>
+      handleFirestoreError(error, OperationType.DELETE, path)
+    )
+  );
+  return { localAccepted: true, path, serverPromise };
+}
+
+export function subscribeOpportunityStageEvents(
+  onData: (events: OpportunityStageEvent[], metadata: SyncMetadata) => void,
+  onError?: (err: Error) => void
+) {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/opportunityStageEvents`;
+  const colRef = collection(db, 'users', uid, 'opportunityStageEvents');
+  return onSnapshot(
+    colRef,
+    { includeMetadataChanges: true },
+    (snapshot) => {
+      const items: OpportunityStageEvent[] = [];
+      const pendingDocIds: string[] = [];
+      snapshot.forEach((d) => {
+        items.push(d.data() as OpportunityStageEvent);
+        if (d.metadata.hasPendingWrites) {
+          pendingDocIds.push(d.id);
+        }
+      });
+      onData(items, {
+        fromCache: snapshot.metadata.fromCache,
+        hasPendingWrites: snapshot.metadata.hasPendingWrites,
+        pendingDocIds,
+      });
+    },
+    (error) => {
+      logFirestoreError(error, OperationType.LIST, path);
+      if (onError) onError(error as Error);
+    }
+  );
+}
+
+export function saveOpportunityStageEvent(event: OpportunityStageEvent): QueuedWriteHandle {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/opportunityStageEvents/${event.id}`;
+  const rawPayload: OpportunityStageEvent = {
+    ...event,
+    userId: uid,
+    occurredAt: (event.occurredAt || new Date().toISOString()).slice(0, 50),
+  };
+  const payload = sanitizeFirestorePayload(rawPayload);
+  const serverPromise = trackInFlightWrite(
+    setDoc(doc(db, 'users', uid, 'opportunityStageEvents', event.id), payload).catch((error) =>
+      handleFirestoreError(error, OperationType.WRITE, path)
+    )
+  );
+  return { localAccepted: true, path, serverPromise };
+}
+
+export function deleteOpportunityStageEvent(eventId: string): QueuedWriteHandle {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/opportunityStageEvents/${eventId}`;
+  const serverPromise = trackInFlightWrite(
+    deleteDoc(doc(db, 'users', uid, 'opportunityStageEvents', eventId)).catch((error) =>
+      handleFirestoreError(error, OperationType.DELETE, path)
     )
   );
   return { localAccepted: true, path, serverPromise };

@@ -686,6 +686,9 @@ export function sanitizeMeetingForSave(meeting: Partial<Meeting> & { id: string;
   if (meeting.appliedTemplateId) {
     sanitized.appliedTemplateId = meeting.appliedTemplateId.slice(0, 100);
   }
+  if (meeting.opportunityId && meeting.opportunityId.trim()) {
+    sanitized.opportunityId = meeting.opportunityId.trim().slice(0, 128);
+  }
 
   return sanitized;
 }
