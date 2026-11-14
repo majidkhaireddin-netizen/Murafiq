@@ -1081,11 +1081,16 @@ export function AuthenticatedSession({
               onSaveMeeting={handleSaveMeeting}
               onDeleteMeeting={handleDeleteMeeting}
               onSaveTask={handleSaveTask}
+              onToggleTask={handleToggleTask}
               onOpenPdfModal={(m: Meeting) => setPdfMeeting(m)}
               onNewTaskFromMeeting={(m: Meeting) => handleOpenNewTask(m.clientId)}
               selectedMeetingId={selectedMeetingId}
               onSelectMeetingChange={(m: Meeting | null) => setSelectedMeetingId(m ? m.id : null)}
               preselectedClientId={preselectedClientIdForMeeting}
+              pendingMeetingIds={collectionSync.meetings.pendingDocIds}
+              failedMeetingIds={rejectedWrites
+                .filter((r) => r.entityType === 'meeting')
+                .map((r) => r.entityId)}
               language={language}
               isOnline={isOnline}
             />
@@ -1177,10 +1182,11 @@ export function AuthenticatedSession({
       {pdfMeeting && (
         <MeetingMinutesPdfModal
           isOpen={Boolean(pdfMeeting)}
-          meeting={pdfMeeting}
+          meeting={meetings.find((m) => m.id === pdfMeeting.id) || pdfMeeting}
           client={clients.find((c) => c.id === pdfMeeting.clientId)}
           tasks={tasks}
           onClose={() => setPdfMeeting(null)}
+          onSaveMeeting={handleSaveMeeting}
           language={language}
         />
       )}

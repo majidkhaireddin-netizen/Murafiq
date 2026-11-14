@@ -5,7 +5,7 @@ export const FIELD_LABELS_ARABIC: Record<string, string> = {
   company: 'الشركة أو الجهة',
   phone: 'رقم الهاتف',
   email: 'البريد الإلكتروني',
-  notes: 'الملاحظات ومحضر اللقاء',
+  notes: 'الملاحظات السابقة / المحضر النصي',
   title: 'العنوان / الموضوع',
   dateTime: 'موعد اللقاء',
   location: 'مكان اللقاء',
@@ -17,6 +17,15 @@ export const FIELD_LABELS_ARABIC: Record<string, string> = {
   content: 'نص الملاحظة',
   color: 'اللون',
   isFavorite: 'المفضلة',
+  attendees: 'الحضور (قائمة مختصرة)',
+  participants: 'المشاركون',
+  agendaItems: 'جدول الأعمال',
+  discussionSummary: 'ملخص المناقشات',
+  decisions: 'القرارات المعتمدة',
+  followUpDateTime: 'موعد المتابعة القادم',
+  minutesStatus: 'حالة المحضر',
+  minutesAdditionalNotes: 'ملاحظات إضافية للمحضر',
+  minutesIncludedSections: 'أقسام المحضر المختارة',
 };
 
 /**
@@ -38,7 +47,7 @@ export function detectEntityConflict(
   if (!local || !remote || local.id !== remote.id) return null;
 
   // Fields to ignore in diff comparison
-  const ignoredFields = new Set(['updatedAt', 'createdAt', 'userId']);
+  const ignoredFields = new Set(['updatedAt', 'createdAt', 'userId', 'minutesStatusUpdatedAt']);
 
   const differingFields: {
     field: string;
@@ -55,10 +64,12 @@ export function detectEntityConflict(
     const locVal = local[key];
     const remVal = remote[key];
 
-    // Deep compare arrays or primitives
+    // Deep compare arrays/objects or primitives
+    const isLocObj = typeof locVal === 'object' && locVal !== null;
+    const isRemObj = typeof remVal === 'object' && remVal !== null;
     const areDifferent =
-      Array.isArray(locVal) && Array.isArray(remVal)
-        ? JSON.stringify(locVal) !== JSON.stringify(remVal)
+      isLocObj || isRemObj
+        ? JSON.stringify(locVal ?? null) !== JSON.stringify(remVal ?? null)
         : locVal !== remVal;
 
     if (areDifferent) {

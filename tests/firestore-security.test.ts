@@ -130,7 +130,7 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
         await assertSucceeds(updateDoc(clientRef, { name: 'شركة الأفق المحدثة' }));
         await assertSucceeds(deleteDoc(clientRef));
 
-        // Meetings
+        // Meetings (Legacy shape)
         const meetingRef = doc(aliceDb, `users/${USER_A_UID}/meetings/meet_1`);
         await assertSucceeds(
           setDoc(
@@ -152,6 +152,55 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
         );
         await assertSucceeds(getDoc(meetingRef));
         await assertSucceeds(deleteDoc(meetingRef));
+
+        // Meetings (Structured Workspace & Minutes Task 004-B)
+        const structuredMeetingRef = doc(aliceDb, `users/${USER_A_UID}/meetings/meet_structured_1`);
+        await assertSucceeds(
+          setDoc(
+            structuredMeetingRef,
+            sanitizeFirestorePayload({
+              id: 'meet_structured_1',
+              userId: USER_A_UID,
+              clientId: 'client_1',
+              title: 'اجتماع مناقشة المشروع المنظّم',
+              dateTime: '2026-11-16T10:00:00.000Z',
+              type: 'video',
+              status: 'confirmed',
+              notes: 'ملاحظات قديمة محفوظة',
+              discussionSummary: 'ملخص المناقشة التفصيلي للمرحلة الأولى.',
+              participants: [
+                { id: 'p1', name: 'أ. فيصل', role: 'العميل', party: 'external' },
+                { id: 'p2', name: 'أنت', party: 'internal' },
+              ],
+              attendees: ['أ. فيصل (العميل)', 'أنت'],
+              agendaItems: [
+                { id: 'ag1', title: 'مراجعة النطاق', durationMinutes: 20, order: 1 },
+              ],
+              decisions: [
+                {
+                  id: 'dec1',
+                  text: 'اعتماد خطة المرحلة الأولى',
+                  agendaItemId: 'ag1',
+                  ownerName: 'أ. فيصل',
+                  createdAt: '2026-11-16T10:30:00.000Z',
+                },
+              ],
+              followUpDateTime: '2026-11-23T10:00',
+              isFollowUpScheduled: true,
+              minutesStatus: 'final',
+              minutesStatusUpdatedAt: '2026-11-16T11:00:00.000Z',
+              minutesIncludedSections: ['basicInfo', 'participants', 'agenda', 'decisions'],
+              minutesAdditionalNotes: 'ملاحظة تنظيمية للمحضر.',
+              appliedTemplateId: 'requirements_workshop',
+              createdAt: '2026-11-16T09:00:00.000Z',
+              updatedAt: '2026-11-16T11:00:00.000Z',
+            })
+          )
+        );
+        await assertSucceeds(getDoc(structuredMeetingRef));
+        // Invalid minutesStatus rejected
+        await assertFails(updateDoc(structuredMeetingRef, { minutesStatus: 'signed_legally' }));
+        await assertSucceeds(deleteDoc(structuredMeetingRef));
 
         // Notes
         const noteRef = doc(aliceDb, `users/${USER_A_UID}/notes/note_1`);

@@ -10,11 +10,39 @@
   }
 }
 
-/* Print layout for Official Meeting Minutes PDF export */
+/* Print layout for Official A4 RTL Meeting Minutes PDF export */
+#murafiq-print-portal {
+  display: none;
+}
+
+@page {
+  size: A4 portrait;
+  margin: 14mm 15mm 16mm 15mm;
+}
+
 @media print {
+  html,
   body {
-    background: white !important;
-    color: black !important;
+    background: #ffffff !important;
+    color: #1c1917 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    overflow: visible !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  #root {
+    display: none !important;
+  }
+
+  #murafiq-print-portal {
+    display: block !important;
+    position: static !important;
+    width: 100% !important;
+    background: #ffffff !important;
   }
 
   .no-print {
@@ -29,8 +57,41 @@
     padding: 0 !important;
     margin: 0 !important;
     max-width: 100% !important;
+    width: 100% !important;
     box-shadow: none !important;
     border: none !important;
+    overflow: visible !important;
+  }
+
+  .pdf-section {
+    margin-bottom: 14pt;
+  }
+
+  .pdf-heading {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  .pdf-atomic,
+  tr,
+  .pdf-card {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+  }
+
+  thead {
+    display: table-header-group;
+  }
+
+  p,
+  li {
+    orphans: 3;
+    widows: 3;
   }
 }
 

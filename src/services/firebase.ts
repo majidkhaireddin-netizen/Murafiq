@@ -54,6 +54,7 @@ import {
   MEETING_HAS_ATTACHMENTS_MESSAGE_AR,
   MEETING_HAS_PENDING_ATTACHMENTS_MESSAGE_AR,
 } from '../utils/attachmentPolicy';
+import { sanitizeMeetingForSave } from '../utils/meetingMinutes';
 
 // Initialize Firebase App
 const app = initializeApp(firebaseConfig);
@@ -732,12 +733,12 @@ export function deleteClient(clientId: string): QueuedWriteHandle {
 export function saveMeeting(meeting: Meeting): QueuedWriteHandle {
   const uid = getAuthenticatedUid();
   const path = `users/${uid}/meetings/${meeting.id}`;
-  const rawPayload: Meeting = {
+  const rawPayload: Meeting = sanitizeMeetingForSave({
     ...meeting,
     userId: uid,
     createdAt: meeting.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-  };
+  });
   const payload = sanitizeFirestorePayload(rawPayload);
   const serverPromise = trackInFlightWrite(
     setDoc(doc(db, 'users', uid, 'meetings', meeting.id), payload).catch((error) =>

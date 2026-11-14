@@ -82,7 +82,14 @@ service cloud.firestore {
 
     // Meeting Validation
     function isValidMeeting(data, userId) {
-      return data.keys().hasOnly(['id', 'userId', 'clientId', 'title', 'dateTime', 'duration', 'type', 'location', 'notes', 'status', 'photoPaths', 'isFollowUpScheduled', 'attendees', 'createdAt', 'updatedAt'])
+      return data.keys().hasOnly([
+          'id', 'userId', 'clientId', 'title', 'dateTime', 'duration', 'type',
+          'location', 'notes', 'status', 'photoPaths', 'isFollowUpScheduled', 'attendees',
+          'participants', 'agendaItems', 'discussionSummary', 'decisions',
+          'followUpDateTime', 'minutesStatus', 'minutesStatusUpdatedAt',
+          'minutesIncludedSections', 'minutesAdditionalNotes', 'appliedTemplateId',
+          'createdAt', 'updatedAt'
+        ])
         && data.keys().hasAll(['id', 'clientId', 'title', 'dateTime', 'type', 'status', 'notes'])
         && data.id is string && isValidId(data.id)
         && data.clientId is string && isValidId(data.clientId)
@@ -97,6 +104,16 @@ service cloud.firestore {
         && (!('photoPaths' in data) || (data.photoPaths is list && data.photoPaths.size() <= 20))
         && (!('isFollowUpScheduled' in data) || data.isFollowUpScheduled is bool)
         && (!('attendees' in data) || (data.attendees is list && data.attendees.size() <= 50))
+        && (!('participants' in data) || (data.participants is list && data.participants.size() <= 50))
+        && (!('agendaItems' in data) || (data.agendaItems is list && data.agendaItems.size() <= 60))
+        && (!('discussionSummary' in data) || (data.discussionSummary is string && data.discussionSummary.size() <= 15000))
+        && (!('decisions' in data) || (data.decisions is list && data.decisions.size() <= 60))
+        && (!('followUpDateTime' in data) || (data.followUpDateTime is string && data.followUpDateTime.size() <= 50))
+        && (!('minutesStatus' in data) || (data.minutesStatus in ['draft', 'review', 'final']))
+        && (!('minutesStatusUpdatedAt' in data) || (data.minutesStatusUpdatedAt is string && data.minutesStatusUpdatedAt.size() <= 50))
+        && (!('minutesIncludedSections' in data) || (data.minutesIncludedSections is list && data.minutesIncludedSections.size() <= 12))
+        && (!('minutesAdditionalNotes' in data) || (data.minutesAdditionalNotes is string && data.minutesAdditionalNotes.size() <= 5000))
+        && (!('appliedTemplateId' in data) || (data.appliedTemplateId is string && data.appliedTemplateId.size() <= 100))
         && (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 50))
         && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50));
     }

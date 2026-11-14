@@ -25,6 +25,43 @@ export interface Client {
   updatedAt: string;
 }
 
+export type ParticipantParty = 'internal' | 'external';
+
+export interface MeetingParticipant {
+  id: string;
+  name: string;
+  role?: string;
+  party: ParticipantParty;
+}
+
+export interface MeetingAgendaItem {
+  id: string;
+  title: string;
+  notes?: string;
+  durationMinutes?: number;
+  order: number;
+}
+
+export interface MeetingDecision {
+  id: string;
+  text: string;
+  agendaItemId?: string;
+  ownerName?: string;
+  createdAt: string;
+}
+
+export type MinutesStatus = 'draft' | 'review' | 'final';
+
+export type MinutesSectionKey =
+  | 'basicInfo'
+  | 'participants'
+  | 'agenda'
+  | 'discussions'
+  | 'decisions'
+  | 'tasks'
+  | 'followUp'
+  | 'additionalNotes';
+
 export interface Meeting {
   id: string;
   userId?: string;
@@ -34,11 +71,22 @@ export interface Meeting {
   duration?: number; // Minutes
   type: MeetingType;
   location?: string;
-  notes: string; // Meeting minutes in Markdown
+  notes: string; // Legacy & Markdown meeting minutes (preserved for backward compatibility)
   status: MeetingStatus;
   photoPaths: string[];
   isFollowUpScheduled?: boolean;
   attendees?: string[];
+  // Structured Workspace & Minutes fields (Task 004-B — strictly optional for legacy compatibility)
+  participants?: MeetingParticipant[];
+  agendaItems?: MeetingAgendaItem[];
+  discussionSummary?: string;
+  decisions?: MeetingDecision[];
+  followUpDateTime?: string; // ISO/datetime string for next meeting or follow-up
+  minutesStatus?: MinutesStatus;
+  minutesStatusUpdatedAt?: string;
+  minutesIncludedSections?: MinutesSectionKey[];
+  minutesAdditionalNotes?: string;
+  appliedTemplateId?: string;
   createdAt: string;
   updatedAt: string;
 }
