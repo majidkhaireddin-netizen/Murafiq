@@ -1,4 +1,9 @@
 import { ActionItem, Client, Meeting, Note, TaskPriority } from '../types';
+import {
+  calendarDaysDiff,
+  extractZonedCalendarParts,
+  resolveCalendarParts,
+} from './followUpEngine';
 
 /**
  * Format Gregorian date into authentic Arabic string representation
@@ -52,17 +57,19 @@ export function getHijriDateString(dateString?: string): string {
 
 /**
  * Return relative Arabic time format ('اليوم', 'أمس', 'غداً', 'منذ X أيام', etc.)
+ * Safe against YYYY-MM-DD UTC midnight shift across negative-UTC timezones.
  */
-export function getRelativeTimeArabic(dateString: string): string {
+export function getRelativeTimeArabic(
+  dateString: string,
+  referenceDate: Date = new Date(),
+  timeZone?: string
+): string {
   if (!dateString) return '';
-  const target = new Date(dateString);
-  if (isNaN(target.getTime())) return dateString;
+  const targetParts = resolveCalendarParts(dateString, timeZone);
+  if (!targetParts) return dateString;
 
-  const now = new Date();
-  const targetMidnight = new Date(target.getFullYear(), target.getMonth(), target.getDate()).getTime();
-  const nowMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-
-  const diffDays = Math.round((targetMidnight - nowMidnight) / (1000 * 60 * 60 * 24));
+  const nowParts = extractZonedCalendarParts(referenceDate, timeZone);
+  const diffDays = calendarDaysDiff(targetParts, nowParts);
 
   if (diffDays === 0) return 'اليوم';
   if (diffDays === 1) return 'غداً';
@@ -89,9 +96,12 @@ export const PRIORITY_RANK: Record<TaskPriority, number> = {
  * Categorize action items into standard Murafiq buckets:
  * Overdue (متأخرة), Today (اليوم), This Week (هذا الأسبوع), Later (لاحقاً)
  */
-export function categorizeTasks(tasks: ActionItem[], referenceDate = new Date()) {
-  const refMidnight = new Date(referenceDate.getFullYear(), referenceDate.getMonth(), referenceDate.getDate()).getTime();
-  const dayMs = 1000 * 60 * 60 * 24;
+export function categorizeTasks(
+  tasks: ActionItem[],
+  referenceDate = new Date(),
+  timeZone?: string
+) {
+  const refParts = extractZonedCalendarParts(referenceDate, timeZone);
 
   const overdue: ActionItem[] = [];
   const today: ActionItem[] = [];
@@ -108,9 +118,13 @@ export function categorizeTasks(tasks: ActionItem[], referenceDate = new Date())
       continue;
     }
 
-    const taskDate = new Date(task.dueDate);
-    const taskMidnight = new Date(taskDate.getFullYear(), taskDate.getMonth(), taskDate.getDate()).getTime();
-    const diffDays = Math.round((taskMidnight - refMidnight) / dayMs);
+    const taskParts = resolveCalendarParts(task.dueDate, timeZone);
+    if (!taskParts) {
+      later.push(task);
+      continue;
+    }
+
+    const diffDays = calendarDaysDiff(taskParts, refParts);
 
     if (diffDays < 0) {
       overdue.push(task);

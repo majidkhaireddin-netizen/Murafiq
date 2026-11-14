@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { User } from 'firebase/auth';
 import {
   AppState,
@@ -9,11 +9,16 @@ import {
   ConflictItem,
   ResolutionChoice,
   RejectedWriteRecord,
+  ReminderStateRecord,
+  FollowUpPreferences,
+  ReminderItem,
+  SnoozePreset,
 } from '../types';
 import { categorizeTasks } from '../utils/logic';
 import { Header } from './Header';
 import { BottomNav, NavTab } from './BottomNav';
 import { DashboardView } from './views/DashboardView';
+import { TodayView } from './views/TodayView';
 import { ClientsView } from './views/ClientsView';
 import { MeetingsView } from './views/MeetingsView';
 import { TasksView } from './views/TasksView';
@@ -31,11 +36,26 @@ import {
   CollectionKey,
 } from '../utils/syncLogic';
 import {
+  DEFAULT_FOLLOW_UP_PREFERENCES,
+  FOLLOW_UP_PREFERENCES_DOC_ID,
+  buildDailyClientFollowUps,
+  buildResolvedStateRecord,
+  buildSnoozeStateRecord,
+  categorizeDailyWorkTasks,
+  computeDailyCommandSummary,
+  computeSnoozeUntilIso,
+  evaluateReminders,
+  getUpcomingMeetingsForDailyCenter,
+  normalizeFollowUpPreferences,
+} from '../utils/followUpEngine';
+import {
   getCacheRuntimeState,
   subscribeClients,
   subscribeMeetings,
   subscribeTasks,
   subscribeNotes,
+  subscribeReminders,
+  subscribeFollowUpPreferences,
   saveClient as fbSaveClient,
   deleteClient as fbDeleteClient,
   saveMeeting as fbSaveMeeting,
@@ -44,6 +64,9 @@ import {
   deleteTask as fbDeleteTask,
   saveNote as fbSaveNote,
   deleteNote as fbDeleteNote,
+  saveReminderState as fbSaveReminderState,
+  deleteReminderState as fbDeleteReminderState,
+  saveFollowUpPreferences as fbSaveFollowUpPreferences,
 } from '../services/firebase';
 import { AlertTriangle, WifiOff, RefreshCw, X, Download, Copy, Check } from 'lucide-react';
 import {
@@ -75,22 +98,36 @@ export function AuthenticatedSession({
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [tasks, setTasks] = useState<ActionItem[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
+  const [reminders, setReminders] = useState<ReminderStateRecord[]>([]);
+  const [followUpPreferences, setFollowUpPreferences] = useState<FollowUpPreferences>(() => ({
+    ...DEFAULT_FOLLOW_UP_PREFERENCES,
+    userId: user.uid,
+  }));
+
+  // Live clock referenceDate so day rollovers, overdue transitions, imminent meetings, and snooze wake-ups update dynamically
+  const [referenceDate, setReferenceDate] = useState<Date>(() => new Date());
 
   // Live refs for deterministic per-entity previous-state lookup across concurrent operations
   const clientsRef = useRef<Client[]>(clients);
   const meetingsRef = useRef<Meeting[]>(meetings);
   const tasksRef = useRef<ActionItem[]>(tasks);
   const notesRef = useRef<Note[]>(notes);
+  const remindersRef = useRef<ReminderStateRecord[]>(reminders);
+  const followUpPrefsRef = useRef<FollowUpPreferences>(followUpPreferences);
   clientsRef.current = clients;
   meetingsRef.current = meetings;
   tasksRef.current = tasks;
   notesRef.current = notes;
+  remindersRef.current = reminders;
+  followUpPrefsRef.current = followUpPreferences;
 
   // Operation-scoped coordinators (prevent cross-entity or out-of-order array clobbering)
   const clientOpsRef = useRef(new OperationCoordinator<Client>());
   const meetingOpsRef = useRef(new OperationCoordinator<Meeting>());
   const taskOpsRef = useRef(new OperationCoordinator<ActionItem>());
   const noteOpsRef = useRef(new OperationCoordinator<Note>());
+  const reminderOpsRef = useRef(new OperationCoordinator<ReminderStateRecord>());
+  const followUpPrefOpsRef = useRef(new OperationCoordinator<FollowUpPreferences>());
 
   // Track active in-flight deletes per collection so pending counts stay accurate when docs leave local snapshots
   const pendingDeleteIdsRef = useRef<Record<CollectionKey, Set<string>>>({
@@ -98,6 +135,8 @@ export function AuthenticatedSession({
     meetings: new Set(),
     tasks: new Set(),
     notes: new Set(),
+    reminders: new Set(),
+    preferences: new Set(),
   });
 
   // Connectivity & Cache Runtime Status
@@ -107,12 +146,14 @@ export function AuthenticatedSession({
   const cacheRuntime = getCacheRuntimeState();
   const [dismissedCacheError, setDismissedCacheError] = useState(false);
 
-  // Detailed Synchronization Tracking across all 4 collections
+  // Detailed Synchronization Tracking across all user collections
   const [collectionSync, setCollectionSync] = useState<Record<CollectionKey, CollectionSyncStatus>>({
     clients: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
     meetings: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
     tasks: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
     notes: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
+    reminders: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
+    preferences: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
   });
 
   // Preserved rejected writes (stored ONLY in React session memory — never auto-saved to localStorage)
@@ -152,19 +193,40 @@ export function AuthenticatedSession({
   const [noteOpenTrigger, setNoteOpenTrigger] = useState<{ noteId: string; nonce: number } | null>(null);
   const [createClientTrigger, setCreateClientTrigger] = useState(0);
 
-  // Listen to browser online/offline transitions
+  // Listen to browser online/offline transitions + live 60s / visibility clock refresh
   useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
+    const refreshClock = () => setReferenceDate(new Date());
+    const handleOnline = () => {
+      setIsOnline(true);
+      refreshClock();
+    };
     const handleOffline = () => setIsOnline(false);
+    const handleVisibility = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        refreshClock();
+      }
+    };
+
+    const intervalId =
+      typeof window !== 'undefined' ? window.setInterval(refreshClock, 60000) : null;
 
     if (typeof window !== 'undefined') {
       window.addEventListener('online', handleOnline);
       window.addEventListener('offline', handleOffline);
     }
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibility);
+    }
     return () => {
+      if (intervalId !== null && typeof window !== 'undefined') {
+        window.clearInterval(intervalId);
+      }
       if (typeof window !== 'undefined') {
         window.removeEventListener('online', handleOnline);
         window.removeEventListener('offline', handleOffline);
+      }
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibility);
       }
     };
   }, []);
@@ -311,6 +373,60 @@ export function AuthenticatedSession({
       }
     );
 
+    const unsubReminders = subscribeReminders(
+      (data, meta) => {
+        if (!isSubscribed) return;
+        remindersRef.current = data;
+        setReminders(data);
+        setCollectionSync((prev) => ({
+          ...prev,
+          reminders: {
+            loaded: true,
+            hasPendingWrites: meta.hasPendingWrites,
+            fromCache: meta.fromCache,
+            hasError: false,
+            pendingDocIds: meta.pendingDocIds,
+            pendingDeletesCount: pendingDeleteIdsRef.current.reminders.size,
+          },
+        }));
+      },
+      (err) => {
+        if (!isSubscribed) return;
+        console.warn(`[User ${sessionUid}] Reminders subscription warning:`, err);
+        setCollectionSync((prev) => ({
+          ...prev,
+          reminders: { ...prev.reminders, hasError: true },
+        }));
+      }
+    );
+
+    const unsubFollowUpPrefs = subscribeFollowUpPreferences(
+      (prefs, meta) => {
+        if (!isSubscribed) return;
+        followUpPrefsRef.current = prefs;
+        setFollowUpPreferences(prefs);
+        setCollectionSync((prev) => ({
+          ...prev,
+          preferences: {
+            loaded: true,
+            hasPendingWrites: meta.hasPendingWrites,
+            fromCache: meta.fromCache,
+            hasError: false,
+            pendingDocIds: meta.pendingDocIds,
+            pendingDeletesCount: pendingDeleteIdsRef.current.preferences.size,
+          },
+        }));
+      },
+      (err) => {
+        if (!isSubscribed) return;
+        console.warn(`[User ${sessionUid}] Follow-up preferences subscription warning:`, err);
+        setCollectionSync((prev) => ({
+          ...prev,
+          preferences: { ...prev.preferences, hasError: true },
+        }));
+      }
+    );
+
     return () => {
       isSubscribed = false;
       clearAttachmentDownloadCache();
@@ -318,6 +434,8 @@ export function AuthenticatedSession({
       unsubMeetings();
       unsubTasks();
       unsubNotes();
+      unsubReminders();
+      unsubFollowUpPrefs();
     };
   }, [user.uid]);
 
@@ -345,7 +463,7 @@ export function AuthenticatedSession({
     operation: 'save' | 'delete';
     classification: WriteErrorClassification;
     error: Error;
-    payload?: Client | Meeting | ActionItem | Note;
+    payload?: Client | Meeting | ActionItem | Note | ReminderStateRecord | FollowUpPreferences;
     wasSuperseded?: boolean;
   }) => {
     if (params.wasSuperseded) return;
@@ -423,13 +541,66 @@ export function AuthenticatedSession({
     onSignOut();
   };
 
-  // Counts for UI
-  const { overdue } = categorizeTasks(tasks);
-  const now = new Date();
+  // Live Derived Counts & Daily Command Center Data
+  const { overdue } = categorizeTasks(tasks, referenceDate);
   const upcomingMeetingsCount = meetings.filter((m) => {
-    const diffMs = new Date(m.dateTime).getTime() - now.getTime();
+    if (m.status === 'cancelled' || m.status === 'completed') return false;
+    const diffMs = new Date(m.dateTime).getTime() - referenceDate.getTime();
     return diffMs >= -3600000 && diffMs <= 7 * 24 * 3600000;
   }).length;
+
+  const categorizedDaily = useMemo(
+    () => categorizeDailyWorkTasks(tasks, referenceDate),
+    [tasks, referenceDate]
+  );
+
+  const upcomingMeetingsForToday = useMemo(
+    () =>
+      getUpcomingMeetingsForDailyCenter({
+        meetings,
+        clients,
+        referenceDate,
+        leadMinutes: followUpPreferences.meetingLeadMinutes,
+      }),
+    [meetings, clients, referenceDate, followUpPreferences.meetingLeadMinutes]
+  );
+
+  const clientFollowUps = useMemo(
+    () =>
+      buildDailyClientFollowUps({
+        clients,
+        meetings,
+        tasks,
+        preferences: followUpPreferences,
+        referenceDate,
+      }),
+    [clients, meetings, tasks, followUpPreferences, referenceDate]
+  );
+
+  const dailySummary = useMemo(
+    () =>
+      computeDailyCommandSummary({
+        clients,
+        meetings,
+        tasks,
+        preferences: followUpPreferences,
+        referenceDate,
+      }),
+    [clients, meetings, tasks, followUpPreferences, referenceDate]
+  );
+
+  const evaluatedReminders = useMemo(
+    () =>
+      evaluateReminders({
+        clients,
+        meetings,
+        tasks,
+        persistedStates: reminders,
+        preferences: followUpPreferences,
+        referenceDate,
+      }),
+    [clients, meetings, tasks, reminders, followUpPreferences, referenceDate]
+  );
 
   // Task Mutations (Non-blocking offline UI + operation-scoped recovery)
   const handleToggleTask = (taskId: string) => {
@@ -833,6 +1004,167 @@ export function AuthenticatedSession({
     });
   };
 
+  // Reminder State & Follow-Up Preferences Mutations (Operation-Scoped + Offline-Honest)
+  const handleSaveReminderState = (record: ReminderStateRecord) => {
+    const prevEntity = remindersRef.current.find((r) => r.id === record.id);
+    const applyUpsert = (prev: ReminderStateRecord[]) => {
+      const idx = prev.findIndex((r) => r.id === record.id);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = record;
+        return next;
+      }
+      return [record, ...prev];
+    };
+    remindersRef.current = applyUpsert(remindersRef.current);
+
+    reminderOpsRef.current.runScopedMutation({
+      entityId: record.id,
+      entityType: 'reminder',
+      previousEntity: prevEntity,
+      setState: setReminders,
+      applyOptimistic: applyUpsert,
+      dispatchWrite: () => fbSaveReminderState(record),
+      onServerConfirmed: ({ wasSuperseded }) => {
+        clearRejectedForEntity('reminder', record.id, wasSuperseded);
+      },
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+        console.warn('Save reminder state rejected by server:', error);
+        recordRejectedWrite({
+          opId,
+          entityType: 'reminder',
+          entityId: record.id,
+          entityTitle: `حالة التذكير (${record.sourceId})`,
+          operation: 'save',
+          classification,
+          error,
+          payload: record,
+          wasSuperseded,
+        });
+      },
+    });
+  };
+
+  const handleDeleteReminderState = (reminderId: string) => {
+    const prevEntity = remindersRef.current.find((r) => r.id === reminderId);
+    if (!prevEntity) return;
+    const applyDelete = (prev: ReminderStateRecord[]) =>
+      prev.filter((r) => r.id !== reminderId);
+    remindersRef.current = applyDelete(remindersRef.current);
+    markDeleteInFlight('reminders', reminderId, true);
+
+    reminderOpsRef.current.runScopedMutation({
+      entityId: reminderId,
+      entityType: 'reminder',
+      isDelete: true,
+      previousEntity: prevEntity,
+      setState: setReminders,
+      applyOptimistic: applyDelete,
+      dispatchWrite: () => fbDeleteReminderState(reminderId),
+      onServerConfirmed: ({ wasSuperseded }) => {
+        markDeleteInFlight('reminders', reminderId, false);
+        clearRejectedForEntity('reminder', reminderId, wasSuperseded);
+      },
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+        markDeleteInFlight('reminders', reminderId, false);
+        console.warn('Delete reminder state rejected by server:', error);
+        recordRejectedWrite({
+          opId,
+          entityType: 'reminder',
+          entityId: reminderId,
+          entityTitle: `تذكير (${reminderId})`,
+          operation: 'delete',
+          classification,
+          error,
+          payload: prevEntity,
+          wasSuperseded,
+        });
+      },
+    });
+  };
+
+  const handleSnoozeReminder = (
+    reminder: ReminderItem,
+    preset: SnoozePreset,
+    customDateTime?: string
+  ): { ok: boolean; errorArabic?: string } => {
+    const calc = computeSnoozeUntilIso({
+      preset,
+      customDateTime,
+      referenceDate,
+    });
+    if (!calc.ok || !calc.snoozedUntilIso) {
+      return { ok: false, errorArabic: calc.errorArabic };
+    }
+    const existing = remindersRef.current.find((r) => r.id === reminder.id);
+    const record = buildSnoozeStateRecord({
+      reminder,
+      snoozedUntilIso: calc.snoozedUntilIso,
+      existing,
+      nowIso: new Date().toISOString(),
+      userId: user.uid,
+    });
+    handleSaveReminderState(record);
+    return { ok: true };
+  };
+
+  const handleUnsnoozeReminder = (reminder: ReminderItem) => {
+    handleDeleteReminderState(reminder.id);
+  };
+
+  const handleDismissReminder = (reminder: ReminderItem) => {
+    const existing = remindersRef.current.find((r) => r.id === reminder.id);
+    const record = buildResolvedStateRecord({
+      reminder,
+      existing,
+      nowIso: new Date().toISOString(),
+      userId: user.uid,
+    });
+    handleSaveReminderState(record);
+  };
+
+  const handleUpdateFollowUpPreferences = (nextRaw: FollowUpPreferences) => {
+    const prevEntity = followUpPrefsRef.current;
+    const normalized = normalizeFollowUpPreferences({
+      ...nextRaw,
+      id: FOLLOW_UP_PREFERENCES_DOC_ID,
+      userId: user.uid,
+      updatedAt: new Date().toISOString(),
+    });
+    followUpPrefsRef.current = normalized;
+
+    followUpPrefOpsRef.current.runScopedMutation({
+      entityId: normalized.id,
+      entityType: 'preference',
+      previousEntity: prevEntity,
+      setState: (updater) => {
+        setFollowUpPreferences((curr) => {
+          const arr = updater([curr]);
+          return arr[0] || curr;
+        });
+      },
+      applyOptimistic: () => [normalized],
+      dispatchWrite: () => fbSaveFollowUpPreferences(normalized),
+      onServerConfirmed: ({ wasSuperseded }) => {
+        clearRejectedForEntity('preference', normalized.id, wasSuperseded);
+      },
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+        console.warn('Save follow-up preferences rejected by server:', error);
+        recordRejectedWrite({
+          opId,
+          entityType: 'preference',
+          entityId: normalized.id,
+          entityTitle: 'تفضيلات المتابعات والتذكيرات',
+          operation: 'save',
+          classification,
+          error,
+          payload: normalized,
+          wasSuperseded,
+        });
+      },
+    });
+  };
+
   // Retry a rejected write using its preserved payload
   const handleRetryRejectedWrite = (rec: RejectedWriteRecord) => {
     clearRejectedForEntity(rec.entityType, rec.entityId);
@@ -843,6 +1175,8 @@ export function AuthenticatedSession({
       else if (rec.entityType === 'note') void handleDeleteNote(rec.entityId);
       else if (rec.entityType === 'meeting') {
         void handleDeleteMeeting(rec.entityId);
+      } else if (rec.entityType === 'reminder') {
+        handleDeleteReminderState(rec.entityId);
       }
       return;
     }
@@ -852,6 +1186,10 @@ export function AuthenticatedSession({
     else if (rec.entityType === 'meeting') void handleSaveMeeting(rec.payload as Meeting);
     else if (rec.entityType === 'task') void handleSaveTask(rec.payload as ActionItem);
     else if (rec.entityType === 'note') void handleSaveNote(rec.payload as Note);
+    else if (rec.entityType === 'reminder') handleSaveReminderState(rec.payload as ReminderStateRecord);
+    else if (rec.entityType === 'preference') {
+      handleUpdateFollowUpPreferences(rec.payload as FollowUpPreferences);
+    }
   };
 
   // Conflict Resolution Handlers
@@ -970,6 +1308,29 @@ export function AuthenticatedSession({
     setActiveTab('meetings');
   };
 
+  const handleOpenReminderSource = (reminder: ReminderItem) => {
+    if (reminder.sourceType === 'task') {
+      const task = tasksRef.current.find((t) => t.id === reminder.sourceId);
+      if (task) {
+        handleOpenExistingTask(task);
+        return;
+      }
+    }
+    if (reminder.sourceType === 'meeting') {
+      const meeting = meetingsRef.current.find((m) => m.id === reminder.sourceId);
+      if (meeting) {
+        setSelectedMeetingId(meeting.id);
+        setMeetingInitialTab('all');
+        setActiveTab('meetings');
+        return;
+      }
+    }
+    if (reminder.clientId) {
+      setSelectedClientId(reminder.clientId);
+      setActiveTab('clients');
+    }
+  };
+
   const fullAppState: AppState = {
     clients,
     meetings,
@@ -1005,6 +1366,14 @@ export function AuthenticatedSession({
           }}
           currentUser={user}
           onLogOut={handleInitiateSignOut}
+          activeReminders={evaluatedReminders.active}
+          remindersEnabled={followUpPreferences.remindersEnabled}
+          onOpenReminderSource={handleOpenReminderSource}
+          onSnoozeReminder={(rem, preset) => {
+            void handleSnoozeReminder(rem, preset);
+          }}
+          onDismissReminder={handleDismissReminder}
+          onViewAllReminders={() => setActiveTab('today')}
         />
 
         <main className="flex-1 overflow-y-auto px-4 py-4">
@@ -1154,6 +1523,65 @@ export function AuthenticatedSession({
             />
           )}
 
+          {activeTab === 'today' && (
+            <TodayView
+              clients={clients}
+              meetings={meetings}
+              tasks={tasks}
+              categorizedDaily={categorizedDaily}
+              upcomingMeetings={upcomingMeetingsForToday}
+              clientFollowUps={clientFollowUps}
+              evaluatedReminders={evaluatedReminders}
+              summary={dailySummary}
+              preferences={followUpPreferences}
+              referenceDate={referenceDate}
+              showHijri={showHijri}
+              language={language}
+              isOnline={isOnline}
+              collectionsLoaded={{
+                clients: collectionSync.clients.loaded,
+                meetings: collectionSync.meetings.loaded,
+                tasks: collectionSync.tasks.loaded,
+                reminders: collectionSync.reminders.loaded,
+                preferences: collectionSync.preferences.loaded,
+              }}
+              hasSyncError={
+                collectionSync.clients.hasError ||
+                collectionSync.meetings.hasError ||
+                collectionSync.tasks.hasError ||
+                collectionSync.reminders.hasError ||
+                collectionSync.preferences.hasError
+              }
+              hasPendingWrites={
+                collectionSync.clients.hasPendingWrites ||
+                collectionSync.meetings.hasPendingWrites ||
+                collectionSync.tasks.hasPendingWrites ||
+                collectionSync.reminders.hasPendingWrites ||
+                collectionSync.preferences.hasPendingWrites
+              }
+              onToggleTask={handleToggleTask}
+              onOpenTask={handleOpenExistingTask}
+              onSaveTask={handleSaveTask}
+              onSelectMeeting={(m: Meeting) => {
+                setSelectedMeetingId(m.id);
+                setMeetingInitialTab('all');
+                setActiveTab('meetings');
+              }}
+              onSelectClient={(c: Client) => {
+                setSelectedClientId(c.id);
+                setActiveTab('clients');
+              }}
+              onNewTask={handleOpenNewTask}
+              onNewMeeting={handleOpenNewMeeting}
+              onNewNote={handleOpenNewNote}
+              onOpenReminderSource={handleOpenReminderSource}
+              onSnoozeReminder={handleSnoozeReminder}
+              onUnsnoozeReminder={handleUnsnoozeReminder}
+              onDismissReminder={handleDismissReminder}
+              onOpenSettings={() => setIsSettingsOpen(true)}
+            />
+          )}
+
           {activeTab === 'clients' && (
             <ClientsView
               clients={clients}
@@ -1266,6 +1694,9 @@ export function AuthenticatedSession({
           onChangeTab={setActiveTab}
           overdueTasksCount={overdue.length}
           upcomingMeetingsCount={upcomingMeetingsCount}
+          activeRemindersCount={
+            followUpPreferences.remindersEnabled ? evaluatedReminders.activeCount : 0
+          }
           language={language}
         />
       </div>
@@ -1315,6 +1746,8 @@ export function AuthenticatedSession({
           onTriggerSimulatedConflict={handleSimulateConflict}
           pendingOperationsCount={syncSummary.pendingOperationsCount}
           rejectedWritesCount={rejectedWrites.length}
+          followUpPreferences={followUpPreferences}
+          onUpdateFollowUpPreferences={handleUpdateFollowUpPreferences}
         />
       )}
 

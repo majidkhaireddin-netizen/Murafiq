@@ -158,7 +158,7 @@ test('Stale asynchronous callbacks from previous user cannot mutate the active u
 
 // P1 Task 002-Fix: Multi-Collection Sync State Aggregation Tests
 test('computeAggregatedSyncState does not let a successful snapshot for one collection override pending writes elsewhere', () => {
-  const statuses: Record<CollectionKey, CollectionSyncStatus> = {
+  const statuses: Partial<Record<CollectionKey, CollectionSyncStatus>> = {
     clients: { loaded: true, hasPendingWrites: false, fromCache: false, hasError: false },
     meetings: { loaded: true, hasPendingWrites: true, fromCache: false, hasError: false }, // Meeting write in flight!
     tasks: { loaded: true, hasPendingWrites: false, fromCache: false, hasError: false },
@@ -170,7 +170,7 @@ test('computeAggregatedSyncState does not let a successful snapshot for one coll
 });
 
 test('computeAggregatedSyncState marks failed if any single collection encounters an error', () => {
-  const statuses: Record<CollectionKey, CollectionSyncStatus> = {
+  const statuses: Partial<Record<CollectionKey, CollectionSyncStatus>> = {
     clients: { loaded: true, hasPendingWrites: false, fromCache: false, hasError: false },
     meetings: { loaded: true, hasPendingWrites: false, fromCache: false, hasError: false },
     tasks: { loaded: false, hasPendingWrites: false, fromCache: false, hasError: true }, // Network error!
@@ -182,7 +182,7 @@ test('computeAggregatedSyncState marks failed if any single collection encounter
 });
 
 test('computeAggregatedSyncState marks local if any collection is still loaded from cache or not loaded', () => {
-  const statuses: Record<CollectionKey, CollectionSyncStatus> = {
+  const statuses: Partial<Record<CollectionKey, CollectionSyncStatus>> = {
     clients: { loaded: true, hasPendingWrites: false, fromCache: false, hasError: false },
     meetings: { loaded: true, hasPendingWrites: false, fromCache: true, hasError: false }, // From cache
     tasks: { loaded: true, hasPendingWrites: false, fromCache: false, hasError: false },
@@ -194,7 +194,7 @@ test('computeAggregatedSyncState marks local if any collection is still loaded f
 });
 
 test('computeAggregatedSyncState marks synced ONLY when all four collections are loaded, server-confirmed, with no pending writes or errors', () => {
-  const statuses: Record<CollectionKey, CollectionSyncStatus> = {
+  const statuses: Partial<Record<CollectionKey, CollectionSyncStatus>> = {
     clients: { loaded: true, hasPendingWrites: false, fromCache: false, hasError: false },
     meetings: { loaded: true, hasPendingWrites: false, fromCache: false, hasError: false },
     tasks: { loaded: true, hasPendingWrites: false, fromCache: false, hasError: false },
@@ -235,7 +235,7 @@ test('sanitizeFirestorePayload strips undefined keys while preserving valid fals
 
 // P1 Task 002-Fix: Safe Sign-Out Guard Tests
 test('canSafelySignOut prevents signing out with unacknowledged local writes', () => {
-  const dirtyStatuses: Record<CollectionKey, CollectionSyncStatus> = {
+  const dirtyStatuses: Partial<Record<CollectionKey, CollectionSyncStatus>> = {
     clients: { loaded: true, hasPendingWrites: false, fromCache: false, hasError: false },
     meetings: { loaded: true, hasPendingWrites: true, fromCache: false, hasError: false }, // Pending write!
     tasks: { loaded: true, hasPendingWrites: false, fromCache: false, hasError: false },
@@ -246,7 +246,7 @@ test('canSafelySignOut prevents signing out with unacknowledged local writes', (
   assert.equal(checkDirty.safe, false);
   assert.deepEqual(checkDirty.pendingCollections, ['meetings']);
 
-  const cleanStatuses: Record<CollectionKey, CollectionSyncStatus> = {
+  const cleanStatuses: Partial<Record<CollectionKey, CollectionSyncStatus>> = {
     clients: { loaded: true, hasPendingWrites: false, fromCache: false, hasError: false },
     meetings: { loaded: true, hasPendingWrites: false, fromCache: false, hasError: false },
     tasks: { loaded: true, hasPendingWrites: false, fromCache: false, hasError: false },

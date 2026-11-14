@@ -74,6 +74,7 @@ export const MEETING_STATUS_LABELS: Record<MeetingStatus, { ar: string; en: stri
   draft: { ar: 'مسودة', en: 'Draft' },
   confirmed: { ar: 'مؤكدة', en: 'Confirmed' },
   completed: { ar: 'منتهية', en: 'Completed' },
+  cancelled: { ar: 'ملغاة', en: 'Cancelled' },
 };
 
 export const MEETING_TYPE_LABELS: Record<MeetingType, { ar: string; en: string }> = {

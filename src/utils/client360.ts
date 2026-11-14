@@ -412,6 +412,13 @@ function parseValidTime(iso?: string): number | null {
 
 function parseTaskDueMidnight(dueDate?: string): number | null {
   if (!dueDate) return null;
+  const match = dueDate.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (match) {
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    return new Date(year, month - 1, day).getTime();
+  }
   const d = new Date(dueDate);
   if (Number.isNaN(d.getTime())) return null;
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
@@ -446,7 +453,7 @@ export function computeClientKpis(params: {
 
   for (const m of clientMeetings) {
     const mTime = parseValidTime(m.dateTime);
-    if (mTime !== null) {
+    if (m.status !== 'cancelled' && mTime !== null) {
       if (mTime >= refTime && m.status !== 'completed') {
         upcomingMeetings += 1;
         if (nextFollowUpMs === null || mTime < nextFollowUpMs) {
@@ -670,7 +677,13 @@ export function buildClientActivityTimeline(params: {
 
     const mMs = parseValidTime(m.dateTime) ?? parseValidTime(m.createdAt) ?? 0;
     const statusLabelAr =
-      m.status === 'completed' ? 'منتهي' : m.status === 'confirmed' ? 'مؤكد' : 'مسودة';
+      m.status === 'completed'
+        ? 'منتهي'
+        : m.status === 'confirmed'
+        ? 'مؤكد'
+        : m.status === 'cancelled'
+        ? 'ملغي'
+        : 'مسودة';
 
     pushUnique({
       id: `meeting:${m.id}`,
@@ -878,7 +891,7 @@ export function evaluateClientAttentionAlerts(params: {
 
   // C. Upcoming meeting within next 48 hours
   const upcomingSoonMeetings = clientMeetings
-    .filter((m) => m.status !== 'completed')
+    .filter((m) => m.status !== 'completed' && m.status !== 'cancelled')
     .map((m) => ({ meeting: m, ms: parseValidTime(m.dateTime) }))
     .filter((x): x is { meeting: Meeting; ms: number } => {
       if (x.ms === null) return false;

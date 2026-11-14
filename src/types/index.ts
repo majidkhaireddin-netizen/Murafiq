@@ -1,6 +1,6 @@
 export type MeetingType = 'in_person' | 'phone' | 'video' | 'chat';
 
-export type MeetingStatus = 'draft' | 'confirmed' | 'completed';
+export type MeetingStatus = 'draft' | 'confirmed' | 'completed' | 'cancelled';
 
 export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
 
@@ -155,7 +155,7 @@ export interface Note {
   updatedAt?: string;
 }
 
-export type EntityType = 'client' | 'meeting' | 'task' | 'note';
+export type EntityType = 'client' | 'meeting' | 'task' | 'note' | 'reminder' | 'preference';
 
 export type ResolutionChoice = 'keep_local' | 'keep_remote' | 'merge';
 
@@ -211,7 +211,7 @@ export interface RejectedWriteRecord {
   category: WriteErrorCategory;
   messageArabic: string;
   rawMessage: string;
-  payload?: Client | Meeting | ActionItem | Note;
+  payload?: Client | Meeting | ActionItem | Note | ReminderStateRecord | FollowUpPreferences;
   occurredAt: string;
 }
 
@@ -397,3 +397,96 @@ export interface MeetingAiAnalysisResult {
 }
 
 export type AiReviewItemState = 'pending' | 'approved' | 'ignored' | 'save_failed';
+
+// =========================================================================
+// Task 006: Smart Follow-Up, Reminders & Daily Command Center Types
+// =========================================================================
+
+export type DailyTaskBucketKey =
+  | 'overdue'
+  | 'today'
+  | 'tomorrow'
+  | 'this_week'
+  | 'later'
+  | 'no_due_date';
+
+export type ReminderSourceType = 'task' | 'meeting' | 'client';
+
+export type ReminderReason =
+  | 'task_overdue'
+  | 'task_due_today'
+  | 'task_due_soon'
+  | 'task_high_priority'
+  | 'meeting_imminent'
+  | 'meeting_follow_up'
+  | 'client_stale_contact';
+
+export type ReminderStatus = 'active' | 'snoozed' | 'resolved' | 'invalidated';
+
+export type SnoozePreset = '1h' | 'tomorrow' | '3d' | 'next_week' | 'custom';
+
+export type MeetingLeadMinutesOption = 15 | 30 | 60 | 120 | 1440;
+export type UpcomingTaskWindowDaysOption = 0 | 2 | 3 | 7;
+
+export interface FollowUpPreferences {
+  id: string;
+  userId?: string;
+  remindersEnabled: boolean;
+  showOverdueTasks: boolean;
+  showUpcomingMeetings: boolean;
+  meetingLeadMinutes: MeetingLeadMinutesOption;
+  upcomingTaskWindowDays: UpcomingTaskWindowDaysOption;
+  showStaleClients: boolean;
+  staleClientDays?: number;
+  updatedAt: string;
+}
+
+export interface ReminderStateRecord {
+  id: string;
+  userId?: string;
+  sourceType: ReminderSourceType;
+  sourceId: string;
+  reason: ReminderReason;
+  clientId?: string;
+  status: 'snoozed' | 'resolved' | 'invalidated';
+  sourceFingerprint: string;
+  snoozedUntil?: string;
+  resolvedAt?: string;
+  invalidatedAt?: string;
+  invalidationReason?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReminderItem {
+  id: string;
+  sourceType: ReminderSourceType;
+  sourceId: string;
+  reason: ReminderReason;
+  clientId?: string;
+  clientName?: string;
+  meetingId?: string;
+  taskId?: string;
+  titleArabic: string;
+  titleEnglish: string;
+  subtitleArabic: string;
+  subtitleEnglish: string;
+  dueAt?: string;
+  severity: 'high' | 'medium' | 'info';
+  status: ReminderStatus;
+  sourceFingerprint: string;
+  snoozedUntil?: string;
+  invalidationReasonArabic?: string;
+  basisDisclosureArabic?: string;
+  provenance: ProvenanceType;
+}
+
+export interface DailyCommandSummary {
+  dueTodayTasksCount: number;
+  overdueTasksCount: number;
+  todayMeetingsCount: number;
+  upcomingMeetingsCount: number;
+  followUpsRequiredCount: number;
+  highPriorityTasksCount: number;
+}
+

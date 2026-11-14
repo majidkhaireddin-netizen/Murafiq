@@ -1203,6 +1203,8 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                               ? 'bg-emerald-50 text-emerald-700'
                               : meeting.status === 'confirmed'
                               ? 'bg-sky-50 text-sky-700'
+                              : meeting.status === 'cancelled'
+                              ? 'bg-rose-50 text-rose-700'
                               : 'bg-stone-100 text-stone-600'
                           }`}
                         >
@@ -1210,6 +1212,8 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                             ? 'منتهي'
                             : meeting.status === 'confirmed'
                             ? 'مؤكد'
+                            : meeting.status === 'cancelled'
+                            ? 'ملغي'
                             : 'مسودة'}
                         </span>
                         {meeting.minutesStatus && (

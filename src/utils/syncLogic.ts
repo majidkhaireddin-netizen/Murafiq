@@ -9,7 +9,13 @@ export interface CollectionSyncStatus {
   pendingDeletesCount?: number;
 }
 
-export type CollectionKey = 'clients' | 'meetings' | 'tasks' | 'notes';
+export type CollectionKey =
+  | 'clients'
+  | 'meetings'
+  | 'tasks'
+  | 'notes'
+  | 'reminders'
+  | 'preferences';
 
 export interface DetailedSyncSummary {
   syncState: SyncState;
@@ -29,11 +35,12 @@ export interface DetailedSyncSummary {
  * plus in-flight local deletes (since deleted documents leave snapshot.docs immediately).
  */
 export function countPendingOperations(
-  statuses: Record<CollectionKey, CollectionSyncStatus>
+  statuses: Partial<Record<CollectionKey, CollectionSyncStatus>>
 ): number {
   let total = 0;
   (Object.keys(statuses) as CollectionKey[]).forEach((key) => {
     const s = statuses[key];
+    if (!s) return;
     const docPending = s.pendingDocIds ? new Set(s.pendingDocIds).size : 0;
     const delPending = s.pendingDeletesCount ?? 0;
     const combined = docPending + delPending;
@@ -57,7 +64,7 @@ export function countPendingOperations(
  * 5. Only when ALL collections are loaded, server-confirmed, online, with no pending writes and no errors, status is 'synced'.
  */
 export function computeAggregatedSyncState(
-  statuses: Record<CollectionKey, CollectionSyncStatus>,
+  statuses: Partial<Record<CollectionKey, CollectionSyncStatus>>,
   hasActiveConflict: boolean = false,
   options?: { isOnline?: boolean; rejectedWritesCount?: number }
 ): SyncState {
@@ -65,7 +72,7 @@ export function computeAggregatedSyncState(
     return 'conflict';
   }
 
-  const values = Object.values(statuses);
+  const values = Object.values(statuses).filter((v): v is CollectionSyncStatus => Boolean(v));
   if (values.length === 0) {
     return 'local';
   }
@@ -85,7 +92,7 @@ export function computeAggregatedSyncState(
     return 'local';
   }
 
-  // All 4 collections are loaded from server, confirmed with 0 pending writes and 0 errors
+  // All monitored collections are loaded from server, confirmed with 0 pending writes and 0 errors
   return 'synced';
 }
 
@@ -93,7 +100,7 @@ export function computeAggregatedSyncState(
  * Produces full user-facing Arabic & English sync descriptions grounded in real Firestore metadata & network state.
  */
 export function computeDetailedSyncSummary(params: {
-  statuses: Record<CollectionKey, CollectionSyncStatus>;
+  statuses: Partial<Record<CollectionKey, CollectionSyncStatus>>;
   hasActiveConflict: boolean;
   conflictCount?: number;
   isOnline: boolean;
@@ -108,11 +115,12 @@ export function computeDetailedSyncSummary(params: {
   } = params;
 
   const pendingOperationsCount = countPendingOperations(statuses);
-  const pendingCollections = (Object.keys(statuses) as CollectionKey[]).filter(
-    (k) => statuses[k].hasPendingWrites || (statuses[k].pendingDeletesCount ?? 0) > 0
-  );
+  const pendingCollections = (Object.keys(statuses) as CollectionKey[]).filter((k) => {
+    const s = statuses[k];
+    return Boolean(s && (s.hasPendingWrites || (s.pendingDeletesCount ?? 0) > 0));
+  });
   const hasErrors =
-    Object.values(statuses).some((s) => s.hasError) || rejectedWritesCount > 0;
+    Object.values(statuses).some((s) => Boolean(s?.hasError)) || rejectedWritesCount > 0;
 
   const syncState = computeAggregatedSyncState(statuses, hasActiveConflict, {
     isOnline,
@@ -221,7 +229,7 @@ export function computeDetailedSyncSummary(params: {
  * Validates if the user can sign out without risking unacknowledged local data loss.
  */
 export function canSafelySignOut(
-  statuses: Record<CollectionKey, CollectionSyncStatus>,
+  statuses: Partial<Record<CollectionKey, CollectionSyncStatus>>,
   options?: { cacheMode?: CacheMode; rejectedWritesCount?: number }
 ): {
   safe: boolean;
@@ -232,7 +240,8 @@ export function canSafelySignOut(
 } {
   const pending: string[] = [];
   (Object.keys(statuses) as CollectionKey[]).forEach((key) => {
-    if (statuses[key].hasPendingWrites || (statuses[key].pendingDeletesCount ?? 0) > 0) {
+    const s = statuses[key];
+    if (s && (s.hasPendingWrites || (s.pendingDeletesCount ?? 0) > 0)) {
       pending.push(key);
     }
   });

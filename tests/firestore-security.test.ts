@@ -261,6 +261,100 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
         await assertSucceeds(getDoc(noteRef));
         await assertFails(updateDoc(noteRef, { clientId: '' }));
         await assertSucceeds(deleteDoc(noteRef));
+
+        // Meeting cancelled status (Task 006)
+        const cancelledMeetingRef = doc(aliceDb, `users/${USER_A_UID}/meetings/meet_cancelled_1`);
+        await assertSucceeds(
+          setDoc(
+            cancelledMeetingRef,
+            sanitizeFirestorePayload({
+              id: 'meet_cancelled_1',
+              userId: USER_A_UID,
+              clientId: 'client_1',
+              title: 'لقاء ملغي للاختبار',
+              dateTime: '2026-11-18T10:00:00.000Z',
+              type: 'phone',
+              status: 'cancelled',
+              notes: '',
+              createdAt: '2026-11-12T00:00:00.000Z',
+            })
+          )
+        );
+        await assertSucceeds(deleteDoc(cancelledMeetingRef));
+
+        // Task 006: User-Scoped Reminders State & Cross-User Isolation
+        const reminderRef = doc(aliceDb, `users/${USER_A_UID}/reminders/rem_task_t1_task_overdue`);
+        await assertSucceeds(
+          setDoc(
+            reminderRef,
+            sanitizeFirestorePayload({
+              id: 'rem_task_t1_task_overdue',
+              userId: USER_A_UID,
+              sourceType: 'task',
+              sourceId: 't1',
+              reason: 'task_overdue',
+              clientId: 'client_1',
+              status: 'snoozed',
+              sourceFingerprint: 'task|pending|2026-11-14|high|Test',
+              snoozedUntil: '2026-11-16T09:00:00.000Z',
+              createdAt: '2026-11-15T09:00:00.000Z',
+              updatedAt: '2026-11-15T09:00:00.000Z',
+            })
+          )
+        );
+        await assertSucceeds(getDoc(reminderRef));
+        // Invalid status & empty sourceId rejected
+        await assertFails(updateDoc(reminderRef, { status: 'invalid_state' }));
+        await assertFails(updateDoc(reminderRef, { sourceId: '' }));
+
+        // Cross-user Bob and unauthenticated user cannot read/write Alice's reminder
+        const bobCtx = testEnv.authenticatedContext(USER_B_UID);
+        const bobDb = getDbInstance(bobCtx, dbId);
+        const unauthDb = getDbInstance(testEnv.unauthenticatedContext(), dbId);
+        await assertFails(getDoc(doc(bobDb, `users/${USER_A_UID}/reminders/rem_task_t1_task_overdue`)));
+        await assertFails(
+          setDoc(doc(bobDb, `users/${USER_A_UID}/reminders/rem_bob_inject`), {
+            id: 'rem_bob_inject',
+            userId: USER_B_UID,
+            sourceType: 'task',
+            sourceId: 't1',
+            reason: 'task_overdue',
+            status: 'snoozed',
+            sourceFingerprint: 'x',
+            createdAt: '2026-11-15T09:00:00.000Z',
+            updatedAt: '2026-11-15T09:00:00.000Z',
+          })
+        );
+        await assertFails(getDoc(doc(unauthDb, `users/${USER_A_UID}/reminders/rem_task_t1_task_overdue`)));
+        await assertSucceeds(deleteDoc(reminderRef));
+
+        // Task 006: User-Scoped Follow-Up Preferences & Schema Validation
+        const prefRef = doc(aliceDb, `users/${USER_A_UID}/preferences/follow_up`);
+        await assertSucceeds(
+          setDoc(
+            prefRef,
+            sanitizeFirestorePayload({
+              id: 'follow_up',
+              userId: USER_A_UID,
+              remindersEnabled: true,
+              showOverdueTasks: true,
+              showUpcomingMeetings: true,
+              meetingLeadMinutes: 60,
+              upcomingTaskWindowDays: 3,
+              showStaleClients: true,
+              staleClientDays: 30,
+              updatedAt: '2026-11-15T09:00:00.000Z',
+            })
+          )
+        );
+        await assertSucceeds(getDoc(prefRef));
+        // Invalid lead minutes or out-of-range task window rejected
+        await assertFails(updateDoc(prefRef, { meetingLeadMinutes: 999 }));
+        await assertFails(updateDoc(prefRef, { upcomingTaskWindowDays: 99 }));
+        // Cross-user Bob denied
+        await assertFails(getDoc(doc(bobDb, `users/${USER_A_UID}/preferences/follow_up`)));
+        await assertFails(updateDoc(doc(bobDb, `users/${USER_A_UID}/preferences/follow_up`), { remindersEnabled: false }));
+        await assertSucceeds(deleteDoc(prefRef));
       });
 
       // 3. Optional Fields Serialization (Task with and without meetingId & dueDate)

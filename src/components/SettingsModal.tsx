@@ -1,5 +1,12 @@
 import React, { useState } from 'react';
-import { AppState, CacheRuntimeState } from '../types';
+import {
+  AppState,
+  CacheRuntimeState,
+  FollowUpPreferences,
+  MeetingLeadMinutesOption,
+  UpcomingTaskWindowDaysOption,
+} from '../types';
+import { DEFAULT_FOLLOW_UP_PREFERENCES } from '../utils/followUpEngine';
 import {
   getCacheRuntimeState,
   optOutPersistentStorageAndClearCache,
@@ -22,6 +29,7 @@ import {
   ShieldAlert,
   Info,
   Trash2,
+  Bell,
 } from 'lucide-react';
 
 interface SettingsModalProps {
@@ -34,6 +42,8 @@ interface SettingsModalProps {
   onTriggerSimulatedConflict?: () => void;
   pendingOperationsCount?: number;
   rejectedWritesCount?: number;
+  followUpPreferences?: FollowUpPreferences;
+  onUpdateFollowUpPreferences?: (next: FollowUpPreferences) => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -45,6 +55,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onTriggerSimulatedConflict,
   pendingOperationsCount = 0,
   rejectedWritesCount = 0,
+  followUpPreferences = DEFAULT_FOLLOW_UP_PREFERENCES,
+  onUpdateFollowUpPreferences,
 }) => {
   const [activeTab, setActiveTab] = useState<'general' | 'assumptions'>('general');
   const [cacheState, setCacheState] = useState<CacheRuntimeState>(() => getCacheRuntimeState());
@@ -432,7 +444,147 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 )}
               </div>
 
-              {/* 3. Hijri Calendar */}
+              {/* 3. Follow-Up & Reminders Settings (Task 006) */}
+              <div
+                data-testid="followup-preferences-section"
+                className="pt-3 border-t border-stone-200 space-y-3"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-bold text-stone-900 flex items-center gap-1.5">
+                    <Bell className="w-4 h-4 text-emerald-700" />
+                    <span>المتابعات والتذكيرات</span>
+                  </span>
+                  <span className="text-[10px] text-stone-500">
+                    إشعارات داخل التطبيق فقط
+                  </span>
+                </div>
+
+                <div className="p-3.5 bg-stone-50 border border-stone-200 rounded-xl space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <label htmlFor="pref-reminders-enabled" className="font-bold text-stone-900 block cursor-pointer">
+                        تفعيل التذكيرات داخل التطبيق
+                      </label>
+                      <span className="text-[11px] text-stone-500 block">
+                        تعطيلها يخفي التنبيهات فقط ولا يحذف المهام أو الاجتماعات
+                      </span>
+                    </div>
+                    <input
+                      id="pref-reminders-enabled"
+                      data-testid="pref-reminders-enabled"
+                      type="checkbox"
+                      checked={followUpPreferences.remindersEnabled}
+                      onChange={(e) =>
+                        onUpdateFollowUpPreferences?.({
+                          ...followUpPreferences,
+                          remindersEnabled: e.target.checked,
+                        })
+                      }
+                      className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-600 cursor-pointer"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-stone-200/80">
+                    <div>
+                      <label htmlFor="pref-meeting-lead" className="block font-semibold text-stone-800 mb-1">
+                        توقيت التذكير قبل الاجتماع
+                      </label>
+                      <select
+                        id="pref-meeting-lead"
+                        data-testid="pref-meeting-lead"
+                        value={followUpPreferences.meetingLeadMinutes}
+                        onChange={(e) =>
+                          onUpdateFollowUpPreferences?.({
+                            ...followUpPreferences,
+                            meetingLeadMinutes: Number(e.target.value) as MeetingLeadMinutesOption,
+                          })
+                        }
+                        className="w-full bg-white border border-stone-200 rounded-lg px-2.5 py-1.5 text-xs text-stone-800"
+                      >
+                        <option value={15}>قبل الاجتماع بـ 15 دقيقة</option>
+                        <option value={30}>قبل الاجتماع بـ 30 دقيقة</option>
+                        <option value={60}>قبل الاجتماع بساعة واحدة</option>
+                        <option value={120}>قبل الاجتماع بساعتين</option>
+                        <option value={1440}>قبل الاجتماع بيوم واحد (24 ساعة)</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label htmlFor="pref-task-window" className="block font-semibold text-stone-800 mb-1">
+                        نافذة تنبيهات المهام القادمة
+                      </label>
+                      <select
+                        id="pref-task-window"
+                        data-testid="pref-task-window"
+                        value={followUpPreferences.upcomingTaskWindowDays}
+                        onChange={(e) =>
+                          onUpdateFollowUpPreferences?.({
+                            ...followUpPreferences,
+                            upcomingTaskWindowDays: Number(e.target.value) as UpcomingTaskWindowDaysOption,
+                          })
+                        }
+                        className="w-full bg-white border border-stone-200 rounded-lg px-2.5 py-1.5 text-xs text-stone-800"
+                      >
+                        <option value={0}>مهام اليوم فقط</option>
+                        <option value={2}>خلال يومين</option>
+                        <option value={3}>خلال 3 أيام</option>
+                        <option value={7}>خلال أسبوع (7 أيام)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2 pt-2 border-t border-stone-200/80">
+                    <label className="flex items-center justify-between gap-2 cursor-pointer">
+                      <span className="text-stone-700 font-medium">إظهار تنبيهات المهام المتأخرة</span>
+                      <input
+                        type="checkbox"
+                        checked={followUpPreferences.showOverdueTasks}
+                        onChange={(e) =>
+                          onUpdateFollowUpPreferences?.({
+                            ...followUpPreferences,
+                            showOverdueTasks: e.target.checked,
+                          })
+                        }
+                        className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-600"
+                      />
+                    </label>
+                    <label className="flex items-center justify-between gap-2 cursor-pointer">
+                      <span className="text-stone-700 font-medium">إظهار تنبيهات الاجتماعات القادمة والمتابعات</span>
+                      <input
+                        type="checkbox"
+                        checked={followUpPreferences.showUpcomingMeetings}
+                        onChange={(e) =>
+                          onUpdateFollowUpPreferences?.({
+                            ...followUpPreferences,
+                            showUpcomingMeetings: e.target.checked,
+                          })
+                        }
+                        className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-600"
+                      />
+                    </label>
+                    <label className="flex items-center justify-between gap-2 cursor-pointer">
+                      <span className="text-stone-700 font-medium">تنبيهات العملاء دون تواصل مسجّل حديثاً</span>
+                      <input
+                        type="checkbox"
+                        checked={followUpPreferences.showStaleClients}
+                        onChange={(e) =>
+                          onUpdateFollowUpPreferences?.({
+                            ...followUpPreferences,
+                            showStaleClients: e.target.checked,
+                          })
+                        }
+                        className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-600"
+                      />
+                    </label>
+                  </div>
+
+                  <p className="text-[10px] text-stone-500 leading-relaxed">
+                    ملاحظة: تعمل التذكيرات داخل التطبيق أثناء فتحه وتُحفظ إعداداتها وحالات التأجيل لكل حساب على حدة دون إرسال رسائل نصية أو بريد إلكتروني عند الإغلاق.
+                  </p>
+                </div>
+              </div>
+
+              {/* 4. Hijri Calendar */}
               <div className="pt-3 border-t border-stone-200 flex items-center justify-between">
                 <div>
                   <span className="font-bold text-stone-900 block">عرض التاريخ الهجري</span>

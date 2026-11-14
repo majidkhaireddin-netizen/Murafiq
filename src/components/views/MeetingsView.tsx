@@ -803,8 +803,8 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
         </div>
 
         <div className="flex items-center justify-between sm:justify-end gap-2 flex-wrap">
-          <div className="flex items-center gap-1 text-xs">
-            {(['all', 'confirmed', 'completed', 'draft'] as const).map((status) => (
+          <div className="flex items-center gap-1 text-xs flex-wrap">
+            {(['all', 'confirmed', 'completed', 'draft', 'cancelled'] as const).map((status) => (
               <button
                 key={status}
                 type="button"
@@ -819,6 +819,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
                 {status === 'confirmed' && MEETING_STATUS_LABELS.confirmed[language]}
                 {status === 'completed' && MEETING_STATUS_LABELS.completed[language]}
                 {status === 'draft' && MEETING_STATUS_LABELS.draft[language]}
+                {status === 'cancelled' && MEETING_STATUS_LABELS.cancelled[language]}
               </button>
             ))}
           </div>
@@ -1442,6 +1443,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
                           <option value="confirmed">مؤكدة</option>
                           <option value="completed">منتهية</option>
                           <option value="draft">مسودة</option>
+                          <option value="cancelled">ملغاة</option>
                         </select>
                       </div>
 

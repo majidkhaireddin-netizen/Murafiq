@@ -39,7 +39,14 @@ import {
   ActionItem,
   Note,
   MeetingAttachment,
+  ReminderStateRecord,
+  FollowUpPreferences,
 } from '../types';
+import {
+  DEFAULT_FOLLOW_UP_PREFERENCES,
+  FOLLOW_UP_PREFERENCES_DOC_ID,
+  normalizeFollowUpPreferences,
+} from '../utils/followUpEngine';
 import {
   deriveCacheRuntimeState,
   formatOptOutExecutionResult,
@@ -456,7 +463,9 @@ export async function getCurrentUserIdToken(forceRefresh: boolean = false): Prom
 /**
  * Returns user-scoped collection path.
  */
-export function getUserCollectionPath(subcollection: 'clients' | 'meetings' | 'tasks' | 'notes'): string {
+export function getUserCollectionPath(
+  subcollection: 'clients' | 'meetings' | 'tasks' | 'notes' | 'reminders' | 'preferences'
+): string {
   const uid = getAuthenticatedUid();
   return `users/${uid}/${subcollection}`;
 }
@@ -963,3 +972,125 @@ export function subscribeMeetingAttachments(
     }
   );
 }
+
+// =========================================================================
+// Task 006: User-Isolated Reminders State & Follow-Up Preferences
+// =========================================================================
+
+export function subscribeReminders(
+  onData: (reminders: ReminderStateRecord[], metadata: SyncMetadata) => void,
+  onError?: (err: Error) => void
+) {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/reminders`;
+  const colRef = collection(db, 'users', uid, 'reminders');
+  return onSnapshot(
+    colRef,
+    { includeMetadataChanges: true },
+    (snapshot) => {
+      const items: ReminderStateRecord[] = [];
+      const pendingDocIds: string[] = [];
+      snapshot.forEach((d) => {
+        items.push(d.data() as ReminderStateRecord);
+        if (d.metadata.hasPendingWrites) {
+          pendingDocIds.push(d.id);
+        }
+      });
+      onData(items, {
+        fromCache: snapshot.metadata.fromCache,
+        hasPendingWrites: snapshot.metadata.hasPendingWrites,
+        pendingDocIds,
+      });
+    },
+    (error) => {
+      logFirestoreError(error, OperationType.LIST, path);
+      if (onError) onError(error as Error);
+    }
+  );
+}
+
+export function saveReminderState(record: ReminderStateRecord): QueuedWriteHandle {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/reminders/${record.id}`;
+  const nowIso = new Date().toISOString();
+  const rawPayload: ReminderStateRecord = {
+    ...record,
+    userId: uid,
+    createdAt: record.createdAt || nowIso,
+    updatedAt: record.updatedAt || nowIso,
+  };
+  const payload = sanitizeFirestorePayload(rawPayload);
+  const serverPromise = trackInFlightWrite(
+    setDoc(doc(db, 'users', uid, 'reminders', record.id), payload).catch((error) =>
+      handleFirestoreError(error, OperationType.WRITE, path)
+    )
+  );
+  return { localAccepted: true, path, serverPromise };
+}
+
+export function deleteReminderState(reminderId: string): QueuedWriteHandle {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/reminders/${reminderId}`;
+  const serverPromise = trackInFlightWrite(
+    deleteDoc(doc(db, 'users', uid, 'reminders', reminderId)).catch((error) =>
+      handleFirestoreError(error, OperationType.DELETE, path)
+    )
+  );
+  return { localAccepted: true, path, serverPromise };
+}
+
+export function subscribeFollowUpPreferences(
+  onData: (prefs: FollowUpPreferences, metadata: SyncMetadata) => void,
+  onError?: (err: Error) => void
+) {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/preferences`;
+  const colRef = collection(db, 'users', uid, 'preferences');
+  return onSnapshot(
+    colRef,
+    { includeMetadataChanges: true },
+    (snapshot) => {
+      let found: Partial<FollowUpPreferences> | null = null;
+      const pendingDocIds: string[] = [];
+      snapshot.forEach((d) => {
+        if (d.id === FOLLOW_UP_PREFERENCES_DOC_ID || !found) {
+          found = d.data() as Partial<FollowUpPreferences>;
+        }
+        if (d.metadata.hasPendingWrites) {
+          pendingDocIds.push(d.id);
+        }
+      });
+      const normalized = normalizeFollowUpPreferences(
+        found || { ...DEFAULT_FOLLOW_UP_PREFERENCES, userId: uid }
+      );
+      onData(normalized, {
+        fromCache: snapshot.metadata.fromCache,
+        hasPendingWrites: snapshot.metadata.hasPendingWrites,
+        pendingDocIds,
+      });
+    },
+    (error) => {
+      logFirestoreError(error, OperationType.LIST, path);
+      if (onError) onError(error as Error);
+    }
+  );
+}
+
+export function saveFollowUpPreferences(prefs: FollowUpPreferences): QueuedWriteHandle {
+  const uid = getAuthenticatedUid();
+  const normalized = normalizeFollowUpPreferences({
+    ...prefs,
+    id: prefs.id || FOLLOW_UP_PREFERENCES_DOC_ID,
+    userId: uid,
+    updatedAt: new Date().toISOString(),
+  });
+  const path = `users/${uid}/preferences/${normalized.id}`;
+  const payload = sanitizeFirestorePayload(normalized);
+  const serverPromise = trackInFlightWrite(
+    setDoc(doc(db, 'users', uid, 'preferences', normalized.id), payload).catch((error) =>
+      handleFirestoreError(error, OperationType.WRITE, path)
+    )
+  );
+  return { localAccepted: true, path, serverPromise };
+}
+

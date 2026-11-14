@@ -53,7 +53,7 @@
         "type": { "type": "string", "enum": ["in_person", "phone", "video", "chat"] },
         "location": { "type": "string", "maxLength": 200 },
         "notes": { "type": "string", "maxLength": 10000 },
-        "status": { "type": "string", "enum": ["draft", "confirmed", "completed"] },
+        "status": { "type": "string", "enum": ["draft", "confirmed", "completed", "cancelled"] },
         "photoPaths": { "type": "array" },
         "isFollowUpScheduled": { "type": "boolean" },
         "attendees": { "type": "array" },
@@ -157,6 +157,65 @@
         "cleanupReason": { "type": "string", "enum": ["client_abandoned", "expired_uncommitted", "verification_failed"] }
       },
       "required": ["attachmentId", "userId", "meetingId", "fileName", "contentType", "sizeBytes", "storageKey", "status", "expiresAt", "createdAt", "updatedAt"]
+    },
+    "ReminderState": {
+      "title": "ReminderState",
+      "description": "User-isolated snooze, resolution, or invalidation state for a deterministic reminder.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "sourceType": { "type": "string", "enum": ["task", "meeting", "client"] },
+        "sourceId": { "type": "string", "maxLength": 128 },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "task_overdue",
+            "task_due_today",
+            "task_due_soon",
+            "task_high_priority",
+            "meeting_imminent",
+            "meeting_follow_up",
+            "client_stale_contact"
+          ]
+        },
+        "clientId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["snoozed", "resolved", "invalidated"] },
+        "sourceFingerprint": { "type": "string", "maxLength": 200 },
+        "snoozedUntil": { "type": "string", "maxLength": 50 },
+        "resolvedAt": { "type": "string", "maxLength": 50 },
+        "invalidatedAt": { "type": "string", "maxLength": 50 },
+        "invalidationReason": { "type": "string", "maxLength": 200 },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "sourceType", "sourceId", "reason", "status", "sourceFingerprint"]
+    },
+    "FollowUpPreference": {
+      "title": "FollowUpPreference",
+      "description": "User-isolated follow-up and in-app reminder preferences.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "remindersEnabled": { "type": "boolean" },
+        "showOverdueTasks": { "type": "boolean" },
+        "showUpcomingMeetings": { "type": "boolean" },
+        "meetingLeadMinutes": { "type": "number" },
+        "upcomingTaskWindowDays": { "type": "number" },
+        "showStaleClients": { "type": "boolean" },
+        "staleClientDays": { "type": "number" },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": [
+        "id",
+        "remindersEnabled",
+        "showOverdueTasks",
+        "showUpcomingMeetings",
+        "meetingLeadMinutes",
+        "upcomingTaskWindowDays",
+        "showStaleClients"
+      ]
     }
   },
   "firestore": {
@@ -183,6 +242,14 @@
     "/users/{userId}/notes/{noteId}": {
       "schema": { "$ref": "entities/Note" },
       "description": "Stores user-isolated reference notes and checklists"
+    },
+    "/users/{userId}/reminders/{reminderId}": {
+      "schema": { "$ref": "entities/ReminderState" },
+      "description": "Stores user-isolated reminder snooze, resolution, and invalidation state"
+    },
+    "/users/{userId}/preferences/{preferenceId}": {
+      "schema": { "$ref": "entities/FollowUpPreference" },
+      "description": "Stores user-isolated follow-up and reminder preferences"
     }
   }
 }

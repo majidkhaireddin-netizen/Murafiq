@@ -112,7 +112,7 @@ service cloud.firestore {
         && data.title is string && data.title.size() > 0 && data.title.size() <= 200
         && data.dateTime is string && data.dateTime.size() <= 50
         && data.type in ['in_person', 'phone', 'video', 'chat']
-        && data.status in ['draft', 'confirmed', 'completed']
+        && data.status in ['draft', 'confirmed', 'completed', 'cancelled']
         && data.notes is string && data.notes.size() <= 10000
         && (!('userId' in data) || (data.userId is string && data.userId == userId))
         && (!('duration' in data) || (data.duration is number && data.duration >= 0 && data.duration <= 1440))
@@ -192,6 +192,56 @@ service cloud.firestore {
         && data.uploadStatus == 'completed'
         && data.createdAt is string && data.createdAt.size() > 0 && data.createdAt.size() <= 50
         && (!('etag' in data) || (data.etag is string && data.etag.size() <= 128))
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50));
+    }
+
+    // Reminder State Validation (Per-user in-app reminders, snooze, and resolution metadata)
+    function isValidReminderState(data, userId) {
+      return data.keys().hasOnly([
+          'id', 'userId', 'sourceType', 'sourceId', 'reason', 'clientId',
+          'status', 'sourceFingerprint', 'snoozedUntil', 'resolvedAt',
+          'invalidatedAt', 'invalidationReason', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasAll(['id', 'sourceType', 'sourceId', 'reason', 'status', 'sourceFingerprint'])
+        && data.id is string && isValidId(data.id)
+        && data.sourceType in ['task', 'meeting', 'client']
+        && data.sourceId is string && isValidId(data.sourceId)
+        && data.reason in [
+          'task_overdue', 'task_due_today', 'task_due_soon', 'task_high_priority',
+          'meeting_imminent', 'meeting_follow_up', 'client_stale_contact'
+        ]
+        && data.status in ['snoozed', 'resolved', 'invalidated']
+        && data.sourceFingerprint is string && data.sourceFingerprint.size() > 0 && data.sourceFingerprint.size() <= 200
+        && (!('userId' in data) || (data.userId is string && data.userId == userId))
+        && (!('clientId' in data) || (data.clientId is string && isValidId(data.clientId)))
+        && (!('snoozedUntil' in data) || (data.snoozedUntil is string && data.snoozedUntil.size() <= 50))
+        && (!('resolvedAt' in data) || (data.resolvedAt is string && data.resolvedAt.size() <= 50))
+        && (!('invalidatedAt' in data) || (data.invalidatedAt is string && data.invalidatedAt.size() <= 50))
+        && (!('invalidationReason' in data) || (data.invalidationReason is string && data.invalidationReason.size() <= 200))
+        && (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 50))
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50));
+    }
+
+    // Follow-Up & Reminder Preferences Validation
+    function isValidFollowUpPreference(data, userId) {
+      return data.keys().hasOnly([
+          'id', 'userId', 'remindersEnabled', 'showOverdueTasks', 'showUpcomingMeetings',
+          'meetingLeadMinutes', 'upcomingTaskWindowDays', 'showStaleClients',
+          'staleClientDays', 'updatedAt'
+        ])
+        && data.keys().hasAll([
+          'id', 'remindersEnabled', 'showOverdueTasks', 'showUpcomingMeetings',
+          'meetingLeadMinutes', 'upcomingTaskWindowDays', 'showStaleClients'
+        ])
+        && data.id is string && isValidId(data.id)
+        && data.remindersEnabled is bool
+        && data.showOverdueTasks is bool
+        && data.showUpcomingMeetings is bool
+        && data.showStaleClients is bool
+        && data.meetingLeadMinutes in [15, 30, 60, 120, 1440]
+        && data.upcomingTaskWindowDays in [0, 2, 3, 7]
+        && (!('userId' in data) || (data.userId is string && data.userId == userId))
+        && (!('staleClientDays' in data) || (data.staleClientDays is number && data.staleClientDays >= 7 && data.staleClientDays <= 365))
         && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50));
     }
 
@@ -289,6 +339,40 @@ service cloud.firestore {
           && (!('userId' in existing()) || incoming().userId == existing().userId)
           && isValidNote(incoming(), userId);
         allow delete: if isOwner(userId) && isValidId(noteId);
+      }
+
+      // Scoped Subcollection: Reminders State (Snooze / Resolution / Invalidation)
+      match /reminders/{reminderId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && isValidId(reminderId)
+          && incoming().id == reminderId
+          && (!('userId' in incoming()) || incoming().userId == userId)
+          && isValidReminderState(incoming(), userId);
+        allow update: if isOwner(userId)
+          && isValidId(reminderId)
+          && incoming().id == reminderId
+          && incoming().id == existing().id
+          && (!('userId' in existing()) || incoming().userId == existing().userId)
+          && isValidReminderState(incoming(), userId);
+        allow delete: if isOwner(userId) && isValidId(reminderId);
+      }
+
+      // Scoped Subcollection: Per-User Preferences
+      match /preferences/{preferenceId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && isValidId(preferenceId)
+          && incoming().id == preferenceId
+          && (!('userId' in incoming()) || incoming().userId == userId)
+          && isValidFollowUpPreference(incoming(), userId);
+        allow update: if isOwner(userId)
+          && isValidId(preferenceId)
+          && incoming().id == preferenceId
+          && incoming().id == existing().id
+          && (!('userId' in existing()) || incoming().userId == existing().userId)
+          && isValidFollowUpPreference(incoming(), userId);
+        allow delete: if isOwner(userId) && isValidId(preferenceId);
       }
     }
   }

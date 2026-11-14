@@ -103,6 +103,8 @@ export function classifyWriteError(
     meeting: 'اللقاء',
     task: 'المهمة',
     note: 'الملاحظة',
+    reminder: 'التذكير',
+    preference: 'إعدادات المتابعة',
   };
   const entityName = names[entityType];
   const actionVerb = isDelete ? 'حذف' : 'حفظ';
@@ -335,11 +337,13 @@ export class OperationCoordinator<T extends { id: string }> {
  * User-friendly Arabic error message formatter for Firestore save/delete failures.
  */
 export function getArabicSaveErrorMessage(entityType: EntityType, isDelete: boolean = false): string {
-  const names = {
+  const names: Record<EntityType, string> = {
     client: 'العميل',
     meeting: 'اللقاء',
     task: 'المهمة',
     note: 'الملاحظة',
+    reminder: 'التذكير',
+    preference: 'إعدادات المتابعة',
   };
 
   const entityName = names[entityType];
