@@ -14,6 +14,8 @@ import {
 } from '../../types';
 import { formatArabicDate } from '../../utils/logic';
 import { MeetingAttachmentsSection } from '../MeetingAttachmentsSection';
+import { MeetingAiAssistant } from '../MeetingAiAssistant';
+import type { requestMeetingAiSuggestions } from '../../services/meetingAi';
 import {
   CustomTemplateOverride,
   MeetingTemplateModal,
@@ -99,6 +101,7 @@ interface MeetingsViewProps {
   failedMeetingIds?: string[];
   language: 'ar' | 'en';
   isOnline?: boolean;
+  requestAiAnalysisFn?: typeof requestMeetingAiSuggestions;
 }
 
 type WorkspaceSectionTab =
@@ -109,6 +112,7 @@ type WorkspaceSectionTab =
   | 'discussions'
   | 'decisions'
   | 'followUp'
+  | 'ai'
   | 'attachments';
 
 function getCurrentLocalDateTimeInput(date = new Date()): string {
@@ -145,6 +149,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
   failedMeetingIds = [],
   language,
   isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true,
+  requestAiAnalysisFn,
 }) => {
   const isArabic = language === 'ar';
 
@@ -220,6 +225,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
   const [deleteMeetingNotice, setDeleteMeetingNotice] = useState<string | null>(null);
   const [isDeletingMeeting, setIsDeletingMeeting] = useState<boolean>(false);
   const [isCleaningExpired, setIsCleaningExpired] = useState<boolean>(false);
+  const [aiConsentTrigger, setAiConsentTrigger] = useState<number>(0);
 
   // Sync external selectedMeetingId
   useEffect(() => {
@@ -261,6 +267,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
     setDeleteMeetingError(null);
     setDeleteMeetingNotice(null);
     setIsDeletingMeeting(false);
+    setAiConsentTrigger(0);
   }, [activeMeeting?.id]);
 
   const filteredMeetings = useMemo(() => {
@@ -335,6 +342,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
       updatedAt: new Date().toISOString(),
     });
     setActiveMeeting(sanitized);
+    setDraftDiscussionSummary(sanitized.discussionSummary ?? '');
     setWorkspaceSaveError(null);
     try {
       await onSaveMeeting(sanitized);
@@ -1033,6 +1041,24 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
                 <div className="flex items-center gap-1.5 flex-wrap justify-end shrink-0">
                   <button
                     type="button"
+                    data-testid="workspace-header-ai-btn"
+                    disabled={!isOnline}
+                    onClick={() => {
+                      if (workspaceTab !== 'all' && workspaceTab !== 'ai') {
+                        setWorkspaceTab('ai');
+                      }
+                      setAiConsentTrigger((c) => c + 1);
+                    }}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-medium border border-emerald-200 bg-emerald-50 text-emerald-900 hover:bg-emerald-100 disabled:opacity-50"
+                    title="تحليل الاجتماع بالذكاء الاصطناعي"
+                    aria-label="تحليل الاجتماع بالذكاء الاصطناعي"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-emerald-700" />
+                    <span className="hidden sm:inline">تحليل ذكي</span>
+                  </button>
+
+                  <button
+                    type="button"
                     data-testid="open-template-modal-btn"
                     disabled={minutesLocked}
                     onClick={() => setTemplateTarget('active')}
@@ -1241,6 +1267,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
                   { id: 'discussions', label: '4. المناقشات' },
                   { id: 'decisions', label: `5. القرارات (${activeDecisions.length})` },
                   { id: 'followUp', label: `6. المتابعة والمهام (${activeMeetingTasks.length})` },
+                  { id: 'ai', label: 'المساعد الذكي' },
                   { id: 'attachments', label: `المرفقات (${activeMeetingAttachmentsCount})` },
                 ] as { id: WorkspaceSectionTab; label: string }[]
               ).map((tab) => (
@@ -2208,6 +2235,22 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
                   meetingId={activeMeeting.id}
                   isOnline={isOnline}
                   onAttachmentsCountChange={setActiveMeetingAttachmentsCount}
+                />
+              )}
+
+              {/* Intelligent Meeting Assistant (Task 004-C) */}
+              {(workspaceTab === 'all' || workspaceTab === 'ai') && (
+                <MeetingAiAssistant
+                  meeting={activeMeeting}
+                  clientName={clients.find((c) => c.id === activeMeeting.clientId)?.name}
+                  tasks={tasks}
+                  agendaItems={activeAgenda}
+                  isOnline={isOnline}
+                  onPersistMeetingUpdate={persistActiveMeeting}
+                  onSaveTask={onSaveTask || (() => onNewTaskFromMeeting(activeMeeting))}
+                  onRequestReopenMinutes={() => setPendingReopenTarget('review')}
+                  openConsentTrigger={aiConsentTrigger}
+                  requestAnalysisFn={requestAiAnalysisFn}
                 />
               )}
             </div>

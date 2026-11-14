@@ -4,6 +4,7 @@ import * as path from 'path';
 import express from 'express';
 import { createAttachmentsRouter } from './src/server/attachmentsRouter.ts';
 import { createMeetingsRouter } from './src/server/meetingsRouter.ts';
+import { createAiRouter } from './src/server/aiRouter.ts';
 import { readB2ConfigFromEnv } from './src/server/b2Storage.ts';
 import {
   getFirebaseAdminReadinessStatus,
@@ -41,6 +42,7 @@ export async function createMurafiqServerApp() {
 
   app.use('/api/attachments', createAttachmentsRouter());
   app.use('/api/meetings', createMeetingsRouter());
+  app.use('/api/ai', createAiRouter());
 
   // Always return JSON 404 for unknown /api routes rather than falling through to SPA HTML
   app.use('/api', (_req, res) => {

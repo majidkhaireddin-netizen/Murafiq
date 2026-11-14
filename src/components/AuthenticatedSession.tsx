@@ -477,6 +477,54 @@ export function AuthenticatedSession({
     });
   };
 
+  const handleSaveTaskWithResult = (task: ActionItem): Promise<void> => {
+    const prevEntity = tasksRef.current.find((t) => t.id === task.id);
+    const applyUpsert = (prev: ActionItem[]) => {
+      const idx = prev.findIndex((t) => t.id === task.id);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = task;
+        return next;
+      }
+      return [task, ...prev];
+    };
+    tasksRef.current = applyUpsert(tasksRef.current);
+
+    return new Promise<void>((resolve, reject) => {
+      taskOpsRef.current.runScopedMutation({
+        entityId: task.id,
+        entityType: 'task',
+        previousEntity: prevEntity,
+        setState: setTasks,
+        applyOptimistic: applyUpsert,
+        dispatchWrite: () => fbSaveTask(task),
+        onServerConfirmed: ({ wasSuperseded }) => {
+          clearRejectedForEntity('task', task.id, wasSuperseded);
+          resolve();
+        },
+        onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+          console.warn('Save task rejected by server:', error);
+          recordRejectedWrite({
+            opId,
+            entityType: 'task',
+            entityId: task.id,
+            entityTitle: task.title,
+            operation: 'save',
+            classification,
+            error,
+            payload: task,
+            wasSuperseded,
+          });
+          reject(new Error(classification.messageArabic));
+        },
+      });
+
+      if (!isOnline) {
+        resolve();
+      }
+    });
+  };
+
   const handleDeleteTask = async (taskId: string): Promise<void> => {
     const prevEntity = tasksRef.current.find((t) => t.id === taskId);
     const applyDelete = (prev: ActionItem[]) => prev.filter((t) => t.id !== taskId);
@@ -1080,7 +1128,7 @@ export function AuthenticatedSession({
               tasks={tasks}
               onSaveMeeting={handleSaveMeeting}
               onDeleteMeeting={handleDeleteMeeting}
-              onSaveTask={handleSaveTask}
+              onSaveTask={handleSaveTaskWithResult}
               onToggleTask={handleToggleTask}
               onOpenPdfModal={(m: Meeting) => setPdfMeeting(m)}
               onNewTaskFromMeeting={(m: Meeting) => handleOpenNewTask(m.clientId)}

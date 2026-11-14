@@ -258,3 +258,106 @@ export interface MeetingAttachment {
   updatedAt?: string;
 }
 
+// =========================================================================
+// Task 004-C: Intelligent Meeting Assistant Types (Session-only until approved)
+// =========================================================================
+
+export type AiSectionInclusionKey =
+  | 'title'
+  | 'agenda'
+  | 'discussions'
+  | 'legacyNotes'
+  | 'participants'
+  | 'additionalNotes'
+  | 'existingTasks';
+
+export type AiSectionInclusionSelection = Record<AiSectionInclusionKey, boolean>;
+
+export type AiDecisionConfidence = 'explicit' | 'needs_confirmation';
+
+export type AiOpenPointCategory = 'open_question' | 'ambiguity' | 'risk';
+
+export interface AiMeetingInputAgendaItem {
+  id: string;
+  order: number;
+  title: string;
+  notes?: string;
+}
+
+export interface AiMeetingInputParticipant {
+  name: string;
+  role?: string;
+  party: ParticipantParty;
+}
+
+export interface AiMeetingInputPayload {
+  meetingId: string;
+  meetingTitle?: string;
+  meetingDateIso?: string;
+  meetingType?: MeetingType;
+  clientName?: string;
+  includedSections: AiSectionInclusionKey[];
+  participants?: AiMeetingInputParticipant[];
+  agendaItems?: AiMeetingInputAgendaItem[];
+  discussionSummary?: string;
+  legacyNotes?: string;
+  minutesAdditionalNotes?: string;
+  existingTasksSummary?: string[];
+}
+
+export interface AiSuggestedSummary {
+  overview: string;
+  mainTopics: string[];
+  keyOutcomes: string[];
+  nextDirection: string;
+  insufficientInfo: boolean;
+}
+
+export interface AiSuggestedDecision {
+  id: string;
+  text: string;
+  confidence: AiDecisionConfidence;
+  ownerName?: string;
+  agendaItemId?: string;
+  sourceExcerpt?: string;
+}
+
+export interface AiSuggestedActionItem {
+  id: string;
+  title: string;
+  description?: string;
+  ownerName?: string;
+  dueDate?: string; // Strict YYYY-MM-DD when resolved, otherwise undefined
+  priority: TaskPriority;
+  needsDueDateConfirmation: boolean;
+  needsOwnerConfirmation?: boolean;
+  agendaItemId?: string;
+}
+
+export interface AiOpenPoint {
+  id: string;
+  text: string;
+  category: AiOpenPointCategory;
+}
+
+export interface AiFollowUpSuggestion {
+  id: string;
+  actionText: string;
+  suggestedDate?: string; // Strict YYYY-MM-DD when resolved, otherwise undefined
+  needsDateConfirmation: boolean;
+  suggestedQuestions: string[];
+}
+
+export interface MeetingAiAnalysisResult {
+  analysisId: string;
+  generatedAt: string;
+  model: string;
+  summary: AiSuggestedSummary;
+  decisions: AiSuggestedDecision[];
+  actionItems: AiSuggestedActionItem[];
+  openQuestions: AiOpenPoint[];
+  followUpSuggestions: AiFollowUpSuggestion[];
+  warningsArabic: string[];
+}
+
+export type AiReviewItemState = 'pending' | 'approved' | 'ignored' | 'save_failed';
