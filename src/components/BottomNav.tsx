@@ -2,6 +2,7 @@ import React from 'react';
 import {
   LayoutDashboard,
   CalendarCheck,
+  CalendarRange,
   Users,
   Briefcase,
   Calendar,
@@ -12,6 +13,7 @@ import {
 export type NavTab =
   | 'dashboard'
   | 'today'
+  | 'calendar'
   | 'clients'
   | 'opportunities'
   | 'meetings'
@@ -26,6 +28,7 @@ interface BottomNavProps {
   upcomingMeetingsCount: number;
   activeRemindersCount?: number;
   overdueOpportunitiesCount?: number;
+  calendarConflictsCount?: number;
   language: 'ar' | 'en';
 }
 
@@ -36,6 +39,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({
   upcomingMeetingsCount,
   activeRemindersCount = 0,
   overdueOpportunitiesCount = 0,
+  calendarConflictsCount = 0,
   language,
 }) => {
   const tabs = [
@@ -51,6 +55,13 @@ export const BottomNav: React.FC<BottomNavProps> = ({
       icon: CalendarCheck,
       badge: activeRemindersCount,
       badgeColor: 'bg-amber-600',
+    },
+    {
+      id: 'calendar' as NavTab,
+      label: language === 'ar' ? 'التقويم' : 'Calendar',
+      icon: CalendarRange,
+      badge: calendarConflictsCount,
+      badgeColor: 'bg-rose-600',
     },
     {
       id: 'clients' as NavTab,

@@ -102,6 +102,7 @@ interface Client360WorkspaceProps {
   onDeleteNote: (noteId: string) => void;
   onNewOpportunity?: (clientId: string) => void;
   onSelectOpportunity?: (opportunity: Opportunity) => void;
+  onOpenClientCalendar?: (clientId: string) => void;
   language: 'ar' | 'en';
 }
 
@@ -128,6 +129,7 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
   onDeleteNote,
   onNewOpportunity,
   onSelectOpportunity,
+  onOpenClientCalendar,
   language,
 }) => {
   const [activeSection, setActiveSection] = useState<Client360SectionTab>('overview');
@@ -579,6 +581,18 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
               >
                 <Briefcase className="w-3.5 h-3.5 text-emerald-700" />
                 <span>فرصة جديدة لهذا العميل</span>
+              </button>
+            )}
+
+            {onOpenClientCalendar && (
+              <button
+                type="button"
+                data-testid="client-360-open-calendar-btn"
+                onClick={() => onOpenClientCalendar(client.id)}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold transition-colors"
+              >
+                <Calendar className="w-3.5 h-3.5 text-emerald-400" />
+                <span>تقويم العميل</span>
               </button>
             )}
 

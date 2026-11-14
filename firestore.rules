@@ -143,7 +143,7 @@ service cloud.firestore {
 
     // Task Validation
     function isValidTask(data, userId) {
-      return data.keys().hasOnly(['id', 'userId', 'meetingId', 'clientId', 'opportunityId', 'title', 'description', 'dueDate', 'priority', 'status', 'reminderDate', 'completedAt', 'provenance', 'createdAt'])
+      return data.keys().hasOnly(['id', 'userId', 'meetingId', 'clientId', 'opportunityId', 'title', 'description', 'dueDate', 'scheduledStartAt', 'scheduledEndAt', 'priority', 'status', 'reminderDate', 'completedAt', 'provenance', 'createdAt'])
         && data.keys().hasAll(['id', 'clientId', 'title', 'priority', 'status'])
         && data.id is string && isValidId(data.id)
         && data.clientId is string && isValidId(data.clientId)
@@ -155,6 +155,8 @@ service cloud.firestore {
         && (!('opportunityId' in data) || (data.opportunityId is string && isValidId(data.opportunityId)))
         && (!('description' in data) || (data.description is string && data.description.size() <= 2000))
         && (!('dueDate' in data) || (data.dueDate is string && data.dueDate.size() <= 50))
+        && (!('scheduledStartAt' in data) || (data.scheduledStartAt is string && data.scheduledStartAt.size() <= 50))
+        && (!('scheduledEndAt' in data) || (data.scheduledEndAt is string && data.scheduledEndAt.size() <= 50))
         && (!('reminderDate' in data) || (data.reminderDate is string && data.reminderDate.size() <= 50))
         && (!('completedAt' in data) || (data.completedAt is string && data.completedAt.size() <= 50))
         && (!('provenance' in data) || (data.provenance in ['source', 'ai_suggested', 'approved', 'uncertain']))

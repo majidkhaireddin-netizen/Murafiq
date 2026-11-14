@@ -66,6 +66,10 @@ import {
 import { sanitizeMeetingForSave } from '../utils/meetingMinutes';
 import { sanitizeClientForSave } from '../utils/client360';
 import { sanitizeOpportunityForSave } from '../utils/opportunities';
+import {
+  decodeTaskTimeBlockFromFirestore,
+  encodeTaskTimeBlockForFirestore,
+} from '../utils/calendarEngine';
 
 // Initialize Firebase App
 const app = initializeApp(firebaseConfig);
@@ -648,7 +652,7 @@ export function subscribeTasks(
       const items: ActionItem[] = [];
       const pendingDocIds: string[] = [];
       snapshot.forEach((d) => {
-        items.push(d.data() as ActionItem);
+        items.push(decodeTaskTimeBlockFromFirestore(d.data() as Record<string, any>));
         if (d.metadata.hasPendingWrites) {
           pendingDocIds.push(d.id);
         }
@@ -904,7 +908,8 @@ export function saveTask(task: ActionItem): QueuedWriteHandle {
     userId: uid,
     createdAt: task.createdAt || new Date().toISOString(),
   };
-  const payload = sanitizeFirestorePayload(rawPayload);
+  const wireCompatible = encodeTaskTimeBlockForFirestore(rawPayload);
+  const payload = sanitizeFirestorePayload(wireCompatible);
   const serverPromise = trackInFlightWrite(
     setDoc(doc(db, 'users', uid, 'tasks', task.id), payload).catch((error) =>
       handleFirestoreError(error, OperationType.WRITE, path)

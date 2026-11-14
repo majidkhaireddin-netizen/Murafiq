@@ -109,7 +109,12 @@ interface MeetingsViewProps {
   onSelectMeetingChange?: (meeting: Meeting | null) => void;
   preselectedClientId?: string | null;
   initialWorkspaceTab?: WorkspaceSectionTab | null;
-  createTrigger?: { clientId?: string; opportunityId?: string; nonce: number } | null;
+  createTrigger?: {
+    clientId?: string;
+    opportunityId?: string;
+    dateTimeIso?: string;
+    nonce: number;
+  } | null;
   filterTrigger?: MeetingsFilterTrigger | null;
   pendingMeetingIds?: string[];
   failedMeetingIds?: string[];
@@ -265,7 +270,11 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
 
   useEffect(() => {
     if (createTrigger && createTrigger.nonce > 0) {
-      handleOpenCreate(createTrigger.clientId, createTrigger.opportunityId);
+      handleOpenCreate(
+        createTrigger.clientId,
+        createTrigger.opportunityId,
+        createTrigger.dateTimeIso
+      );
     }
   }, [createTrigger?.nonce]);
 
@@ -405,13 +414,20 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
     }
   };
 
-  const handleOpenCreate = (overrideClientId?: string, overrideOpportunityId?: string) => {
+  const handleOpenCreate = (
+    overrideClientId?: string,
+    overrideOpportunityId?: string,
+    overrideDateTimeIso?: string
+  ) => {
     const resolvedClientId = overrideClientId || preselectedClientId || clients[0]?.id || '';
+    const defaultDateTime = overrideDateTimeIso
+      ? toDateTimeInputValue(overrideDateTimeIso)
+      : getCurrentLocalDateTimeInput(new Date(Date.now() + 86400000));
     setCreatingMeeting({
       clientId: resolvedClientId,
       opportunityId: overrideOpportunityId || undefined,
       title: '',
-      dateTime: getCurrentLocalDateTimeInput(new Date(Date.now() + 86400000)),
+      dateTime: defaultDateTime || getCurrentLocalDateTimeInput(new Date(Date.now() + 86400000)),
       duration: 45,
       type: 'in_person',
       location: '',

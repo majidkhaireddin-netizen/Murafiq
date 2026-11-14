@@ -138,6 +138,8 @@ const TASK_ALLOWED_KEYS = new Set([
   'title',
   'description',
   'dueDate',
+  'scheduledStartAt',
+  'scheduledEndAt',
   'priority',
   'status',
   'reminderDate',
@@ -1710,6 +1712,16 @@ export function validateAndPreviewImport(input: ValidateImportInput): ImportPrev
     if (description) task.description = description;
     const dueDate = clampStr(obj.dueDate, 50);
     if (dueDate) task.dueDate = dueDate;
+    const scheduledStartAt = clampStr(obj.scheduledStartAt, 50);
+    const scheduledEndAt = clampStr(obj.scheduledEndAt, 50);
+    if (scheduledStartAt && scheduledEndAt) {
+      const startMs = Date.parse(scheduledStartAt);
+      const endMs = Date.parse(scheduledEndAt);
+      if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
+        task.scheduledStartAt = new Date(startMs).toISOString();
+        task.scheduledEndAt = new Date(endMs).toISOString();
+      }
+    }
     const reminderDate = clampStr(obj.reminderDate, 50);
     if (reminderDate) task.reminderDate = reminderDate;
     const completedAt = clampStr(obj.completedAt, 50);

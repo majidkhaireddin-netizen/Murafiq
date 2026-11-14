@@ -20,7 +20,17 @@ import {
   Edit2,
 } from 'lucide-react';
 
-import { categorizeDailyWorkTasks, resolveCalendarParts, formatCalendarDateKey, extractZonedCalendarParts } from '../../utils/followUpEngine';
+import {
+  categorizeDailyWorkTasks,
+  resolveCalendarParts,
+  formatCalendarDateKey,
+  extractZonedCalendarParts,
+} from '../../utils/followUpEngine';
+import {
+  decodeTaskTimeBlockFromFirestore,
+  formatTimeInZone,
+  validateTimeBlockInterval,
+} from '../../utils/calendarEngine';
 
 export interface TasksFilterTrigger {
   scope?: 'all' | 'overdue' | 'open' | 'completed';
@@ -38,12 +48,16 @@ interface TasksViewProps {
   onSaveTask: (task: ActionItem) => Promise<void> | void;
   onDeleteTask: (taskId: string) => void;
   onSelectOpportunity?: (opportunityId: string) => void;
+  onScheduleInCalendar?: (task: ActionItem) => void;
   preselectedClientId?: string | null;
   preselectedMeetingId?: string | null;
   createTrigger?: {
     clientId?: string;
     meetingId?: string;
     opportunityId?: string;
+    dueDate?: string;
+    scheduledStartAt?: string;
+    scheduledEndAt?: string;
     nonce: number;
   } | null;
   openTaskTrigger?: { taskId: string; nonce: number } | null;
@@ -60,6 +74,7 @@ export const TasksView: React.FC<TasksViewProps> = ({
   onSaveTask,
   onDeleteTask,
   onSelectOpportunity,
+  onScheduleInCalendar,
   preselectedClientId,
   preselectedMeetingId,
   createTrigger,
@@ -72,6 +87,7 @@ export const TasksView: React.FC<TasksViewProps> = ({
   const [filterClientId, setFilterClientId] = useState<string>('all');
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<Partial<ActionItem> | null>(null);
+  const [formTimeBlockError, setFormTimeBlockError] = useState<string | null>(null);
 
   useEffect(() => {
     if (filterTrigger && filterTrigger.nonce > 0) {
@@ -84,20 +100,22 @@ export const TasksView: React.FC<TasksViewProps> = ({
   const todayKey = formatCalendarDateKey(extractZonedCalendarParts(new Date()));
 
   // Filter tasks
-  const filteredTasks = tasks.filter((t) => {
-    if (filterPriority !== 'all' && t.priority !== filterPriority) return false;
-    if (filterClientId !== 'all' && t.clientId !== filterClientId) return false;
-    if (filterScope === 'open') {
-      if (t.status === 'completed' || t.status === 'cancelled') return false;
-    } else if (filterScope === 'completed') {
-      if (t.status !== 'completed') return false;
-    } else if (filterScope === 'overdue') {
-      if (t.status === 'completed' || t.status === 'cancelled') return false;
-      const dueParts = resolveCalendarParts(t.dueDate);
-      if (!dueParts || formatCalendarDateKey(dueParts) >= todayKey) return false;
-    }
-    return true;
-  });
+  const filteredTasks = tasks
+    .map((t) => decodeTaskTimeBlockFromFirestore(t))
+    .filter((t) => {
+      if (filterPriority !== 'all' && t.priority !== filterPriority) return false;
+      if (filterClientId !== 'all' && t.clientId !== filterClientId) return false;
+      if (filterScope === 'open') {
+        if (t.status === 'completed' || t.status === 'cancelled') return false;
+      } else if (filterScope === 'completed') {
+        if (t.status !== 'completed') return false;
+      } else if (filterScope === 'overdue') {
+        if (t.status === 'completed' || t.status === 'cancelled') return false;
+        const dueParts = resolveCalendarParts(t.dueDate);
+        if (!dueParts || formatCalendarDateKey(dueParts) >= todayKey) return false;
+      }
+      return true;
+    });
 
   const { overdue, today, thisWeek, later } = categorizeDailyWorkTasks(filteredTasks);
   const completedTasks = filteredTasks.filter((t) => t.status === 'completed');
@@ -105,15 +123,21 @@ export const TasksView: React.FC<TasksViewProps> = ({
   const handleOpenCreate = (
     clientId?: string,
     meetingId?: string,
-    opportunityId?: string
+    opportunityId?: string,
+    dueDateOverride?: string,
+    scheduledStartAtOverride?: string,
+    scheduledEndAtOverride?: string
   ) => {
+    setFormTimeBlockError(null);
     setEditingTask({
       clientId: clientId || preselectedClientId || (clients[0]?.id || ''),
       meetingId: meetingId || preselectedMeetingId || undefined,
       opportunityId: opportunityId || undefined,
       title: '',
       description: '',
-      dueDate: new Date().toISOString().split('T')[0],
+      dueDate: dueDateOverride || new Date().toISOString().split('T')[0],
+      scheduledStartAt: scheduledStartAtOverride,
+      scheduledEndAt: scheduledEndAtOverride,
       priority: 'medium',
       status: 'pending',
       provenance: 'approved',
@@ -122,7 +146,8 @@ export const TasksView: React.FC<TasksViewProps> = ({
   };
 
   const handleOpenEdit = (task: ActionItem) => {
-    setEditingTask({ ...task });
+    setFormTimeBlockError(null);
+    setEditingTask({ ...decodeTaskTimeBlockFromFirestore(task) });
     setIsEditModalOpen(true);
   };
 
@@ -131,7 +156,10 @@ export const TasksView: React.FC<TasksViewProps> = ({
       handleOpenCreate(
         createTrigger.clientId,
         createTrigger.meetingId,
-        createTrigger.opportunityId
+        createTrigger.opportunityId,
+        createTrigger.dueDate,
+        createTrigger.scheduledStartAt,
+        createTrigger.scheduledEndAt
       );
     }
   }, [createTrigger?.nonce]);
@@ -170,6 +198,23 @@ export const TasksView: React.FC<TasksViewProps> = ({
     e.preventDefault();
     if (!editingTask?.title || !editingTask.clientId) return;
 
+    let cleanStartIso: string | undefined = undefined;
+    let cleanEndIso: string | undefined = undefined;
+    if (editingTask.scheduledStartAt || editingTask.scheduledEndAt) {
+      const check = validateTimeBlockInterval(
+        editingTask.scheduledStartAt,
+        editingTask.scheduledEndAt
+      );
+      if (!check.valid || !check.startIso || !check.endIso) {
+        setFormTimeBlockError(
+          check.errorAr || 'يرجى التأكد من صحة وقت البدء ووقت الانتهاء لوقت العمل المخطط.'
+        );
+        return;
+      }
+      cleanStartIso = check.startIso;
+      cleanEndIso = check.endIso;
+    }
+
     const validOppId =
       editingTask.opportunityId &&
       opportunities.some(
@@ -186,6 +231,8 @@ export const TasksView: React.FC<TasksViewProps> = ({
       title: editingTask.title,
       description: editingTask.description || '',
       dueDate: editingTask.dueDate,
+      scheduledStartAt: cleanStartIso,
+      scheduledEndAt: cleanEndIso,
       priority: editingTask.priority || 'medium',
       status: editingTask.status || 'pending',
       provenance: editingTask.provenance || 'approved',
@@ -196,6 +243,7 @@ export const TasksView: React.FC<TasksViewProps> = ({
       await onSaveTask(saved);
       setIsEditModalOpen(false);
       setEditingTask(null);
+      setFormTimeBlockError(null);
     } catch (err) {
       console.warn('TasksView: Save task failed, keeping modal open for retry:', err);
     }
@@ -296,14 +344,39 @@ export const TasksView: React.FC<TasksViewProps> = ({
               {task.dueDate && (
                 <span className="text-stone-600 flex items-center gap-1">
                   <Calendar className="w-3 h-3 text-stone-400" />
-                  <span>{formatArabicDate(task.dueDate)}</span>
+                  <span>الاستحقاق: {formatArabicDate(task.dueDate)}</span>
                   <span className="text-stone-400">({getRelativeTimeArabic(task.dueDate)})</span>
                 </span>
               )}
 
-              {/* Quick Postpone Shortcuts */}
+              {task.scheduledStartAt && task.scheduledEndAt && (
+                <span
+                  data-testid={`task-time-block-badge-${task.id}`}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-sky-50 text-sky-900 border border-sky-200 font-semibold text-[10px]"
+                >
+                  <Clock className="w-3 h-3 text-sky-700" />
+                  <span>
+                    وقت العمل: {task.scheduledStartAt.slice(0, 10)} ·{' '}
+                    {formatTimeInZone(task.scheduledStartAt, '12h')} -{' '}
+                    {formatTimeInZone(task.scheduledEndAt, '12h')}
+                  </span>
+                </span>
+              )}
+
+              {/* Quick Postpone & Calendar Schedule Shortcuts */}
               {!isCompleted && (
                 <div className="flex items-center gap-1 ltr:ml-auto rtl:mr-auto text-[10px]">
+                  {onScheduleInCalendar && (
+                    <button
+                      type="button"
+                      data-testid={`task-schedule-in-calendar-${task.id}`}
+                      onClick={() => onScheduleInCalendar(task)}
+                      className="px-2 py-0.5 rounded bg-sky-50 border border-sky-200 text-sky-800 hover:bg-sky-100 font-semibold"
+                      title="تخصيص وقت عمل في التقويم"
+                    >
+                      جدولة في التقويم
+                    </button>
+                  )}
                   <button
                     onClick={() => handlePostponeTask(task, 1)}
                     className="px-1.5 py-0.5 rounded bg-stone-100 text-stone-600 hover:bg-stone-200"
@@ -585,7 +658,9 @@ export const TasksView: React.FC<TasksViewProps> = ({
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <div className="flex items-center justify-between mb-1">
-                    <label className="font-semibold text-stone-700">الموعد النهائي</label>
+                    <label className="font-semibold text-stone-700">
+                      الموعد النهائي (Due Date)
+                    </label>
                     <button
                       type="button"
                       onClick={() => handleSmartSuggestDate(editingTask.priority || 'medium')}
@@ -619,6 +694,97 @@ export const TasksView: React.FC<TasksViewProps> = ({
                     <option value="low">منخفضة</option>
                   </select>
                 </div>
+              </div>
+
+              {/* Optional Task Time Block (وقت العمل المخطط - مستقل عن موعد الاستحقاق) */}
+              <div
+                data-testid="task-modal-time-block-section"
+                className="p-3 rounded-xl bg-sky-50/70 border border-sky-200 space-y-2"
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="font-bold text-sky-950 block">
+                      وقت العمل المخطط (Time Block — اختياري)
+                    </span>
+                    <span className="text-[10px] text-sky-800">
+                      حجز فترة زمنية لتنفيذ المهمة في التقويم دون تغيير الموعد النهائي أو حالة الإنجاز
+                    </span>
+                  </div>
+                  {(editingTask.scheduledStartAt || editingTask.scheduledEndAt) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFormTimeBlockError(null);
+                        setEditingTask({
+                          ...editingTask,
+                          scheduledStartAt: undefined,
+                          scheduledEndAt: undefined,
+                        });
+                      }}
+                      className="text-[10px] font-semibold text-rose-700 hover:underline shrink-0"
+                    >
+                      مسح وقت العمل
+                    </button>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-semibold text-sky-900 mb-0.5">
+                      بداية العمل المخطط
+                    </label>
+                    <input
+                      type="datetime-local"
+                      data-testid="task-modal-scheduled-start"
+                      value={
+                        editingTask.scheduledStartAt
+                          ? editingTask.scheduledStartAt.slice(0, 16)
+                          : ''
+                      }
+                      onChange={(e) => {
+                        setFormTimeBlockError(null);
+                        const val = e.target.value;
+                        setEditingTask({
+                          ...editingTask,
+                          scheduledStartAt: val || undefined,
+                        });
+                      }}
+                      className="w-full bg-white rounded-lg border border-sky-200 p-1.5 text-[11px] font-mono text-stone-800"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold text-sky-900 mb-0.5">
+                      نهاية العمل المخطط
+                    </label>
+                    <input
+                      type="datetime-local"
+                      data-testid="task-modal-scheduled-end"
+                      value={
+                        editingTask.scheduledEndAt
+                          ? editingTask.scheduledEndAt.slice(0, 16)
+                          : ''
+                      }
+                      onChange={(e) => {
+                        setFormTimeBlockError(null);
+                        const val = e.target.value;
+                        setEditingTask({
+                          ...editingTask,
+                          scheduledEndAt: val || undefined,
+                        });
+                      }}
+                      className="w-full bg-white rounded-lg border border-sky-200 p-1.5 text-[11px] font-mono text-stone-800"
+                    />
+                  </div>
+                </div>
+
+                {formTimeBlockError && (
+                  <p
+                    data-testid="task-modal-time-block-error"
+                    className="text-[11px] font-semibold text-rose-700"
+                  >
+                    {formTimeBlockError}
+                  </p>
+                )}
               </div>
 
               {/* Provenance selection */}

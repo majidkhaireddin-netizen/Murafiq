@@ -135,7 +135,9 @@ export interface ActionItem {
   opportunityId?: string;
   title: string;
   description?: string;
-  dueDate?: string; // YYYY-MM-DD
+  dueDate?: string; // YYYY-MM-DD (موعد الاستحقاق)
+  scheduledStartAt?: string; // ISO datetime string (وقت بدء العمل المخطط - Time Block)
+  scheduledEndAt?: string; // ISO datetime string (وقت انتهاء العمل المخطط - Time Block)
   priority: TaskPriority;
   status: TaskStatus;
   reminderDate?: string;
@@ -799,5 +801,135 @@ export interface ImportExecutionReport {
   totalFailed: number;
   succeededRecordKeys: string[];
 }
+
+// =========================================================================
+// Task 010: Integrated Calendar, Weekly Planner & Time Blocking Types
+// =========================================================================
+
+export type CalendarViewMode = 'month' | 'week' | 'day' | 'planner';
+
+export type CalendarWeekStartDay = 6 | 0 | 1; // 6 = Saturday, 0 = Sunday, 1 = Monday
+
+export type CalendarTimeFormat = '12h' | '24h';
+
+export type CalendarDefaultBlockMinutes = 30 | 45 | 60 | 90 | 120;
+
+export type CalendarActivityType =
+  | 'meeting'
+  | 'task_block'
+  | 'task_due'
+  | 'follow_up'
+  | 'opportunity_action'
+  | 'opportunity_close';
+
+export type CalendarFilterScope =
+  | 'all'
+  | 'meetings'
+  | 'tasks'
+  | 'follow_ups'
+  | 'opportunities';
+
+export interface CalendarSettings {
+  weekStartDay: CalendarWeekStartDay;
+  timeFormat: CalendarTimeFormat;
+  defaultBlockMinutes: CalendarDefaultBlockMinutes;
+  showMeetings: boolean;
+  showTasks: boolean;
+  showFollowUps: boolean;
+  showOpportunities: boolean;
+  showCancelledMeetings: boolean;
+  workingDayStartHour: number; // e.g. 8
+  workingDayEndHour: number; // e.g. 18
+}
+
+export interface CalendarEventItem {
+  id: string;
+  sourceId: string;
+  activityType: CalendarActivityType;
+  activityTypeLabelAr: string;
+  activityTypeLabelEn: string;
+  title: string;
+  subtitle?: string;
+  dateKey: string; // YYYY-MM-DD in active timezone
+  isTimed: boolean; // true for meetings & task_block, false for date-only task_due / opportunity dates
+  startIso?: string;
+  endIso?: string;
+  startMs?: number;
+  endMs?: number;
+  durationMinutes?: number;
+  hasKnownDuration: boolean;
+  clientId?: string;
+  clientName?: string;
+  statusLabelAr: string;
+  isCompletedOrClosed: boolean;
+  isCancelled: boolean;
+  isOverdue: boolean;
+  priority?: TaskPriority;
+  provenance?: ProvenanceType;
+  minutesLocked?: boolean;
+  // Original entity references (never duplicate data)
+  meetingRef?: Meeting;
+  taskRef?: ActionItem;
+  opportunityRef?: Opportunity;
+}
+
+export interface CalendarDayCell {
+  dateKey: string; // YYYY-MM-DD
+  year: number;
+  month: number; // 1-12
+  day: number; // 1-31
+  dayOfWeek: number; // 0-6 (Sun-Sat)
+  dayNameShortAr: string;
+  dayNameFullAr: string;
+  isCurrentMonth: boolean;
+  isToday: boolean;
+  events: CalendarEventItem[];
+  counts: {
+    meetings: number;
+    taskBlocks: number;
+    tasksDue: number;
+    followUps: number;
+    opportunities: number;
+    total: number;
+  };
+  hasConflict: boolean;
+}
+
+export interface CalendarConflictPair {
+  id: string;
+  dateKey: string;
+  firstEvent: CalendarEventItem;
+  secondEvent: CalendarEventItem;
+  overlapStartIso: string;
+  overlapEndIso: string;
+  overlapMinutes: number;
+  reasonAr: string;
+}
+
+export interface DayAvailableGap {
+  startIso: string;
+  endIso: string;
+  startHourLabel: string;
+  endHourLabel: string;
+  durationMinutes: number;
+}
+
+export interface WeeklyPlanSummary {
+  weekStartKey: string;
+  weekEndKey: string;
+  meetingsCount: number;
+  dueTasksCount: number;
+  timeBlockedTasksCount: number;
+  followUpsCount: number;
+  opportunityActionsCount: number;
+  overdueCommitmentsCount: number;
+  scheduledMeetingMinutes: number;
+  scheduledMeetingHours: number;
+  meetingsWithoutDurationCount: number;
+  plannedTaskWorkMinutes: number;
+  plannedTaskWorkHours: number;
+  conflictsCount: number;
+}
+
 
 

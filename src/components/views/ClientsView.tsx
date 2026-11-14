@@ -62,6 +62,7 @@ interface ClientsViewProps {
   onDeleteNote: (noteId: string) => void;
   onNewOpportunity?: (clientId: string) => void;
   onSelectOpportunity?: (opportunity: Opportunity) => void;
+  onOpenClientCalendar?: (clientId: string) => void;
   onSaveClient: (client: Client) => Promise<void> | void;
   onDeleteClient: (clientId: string) => Promise<void> | void;
   selectedClientId?: string | null;
@@ -99,6 +100,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
   onDeleteNote,
   onNewOpportunity,
   onSelectOpportunity,
+  onOpenClientCalendar,
   onSaveClient,
   onDeleteClient,
   selectedClientId,
@@ -347,6 +349,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
           onDeleteNote={onDeleteNote}
           onNewOpportunity={onNewOpportunity}
           onSelectOpportunity={onSelectOpportunity}
+          onOpenClientCalendar={onOpenClientCalendar}
           language={language}
         />
       ) : (

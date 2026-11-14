@@ -95,6 +95,8 @@ interface TodayViewProps {
   onUnsnoozeReminder: (reminder: ReminderItem) => void;
   onDismissReminder: (reminder: ReminderItem) => void;
   onOpenSettings: () => void;
+  onOpenTodayCalendar?: () => void;
+  onOpenWeeklyPlanner?: () => void;
 }
 
 const BUCKET_META: Array<{
@@ -153,6 +155,8 @@ export const TodayView: React.FC<TodayViewProps> = ({
   onUnsnoozeReminder,
   onDismissReminder,
   onOpenSettings,
+  onOpenTodayCalendar,
+  onOpenWeeklyPlanner,
 }) => {
   const [selectedBucket, setSelectedBucket] = useState<'all' | DailyTaskBucketKey>('all');
   const [priorityFilter, setPriorityFilter] = useState<'all' | 'urgent_high'>('all');
@@ -289,8 +293,30 @@ export const TodayView: React.FC<TodayViewProps> = ({
             </p>
           </div>
 
-          {/* Reuses existing creation pipelines */}
+          {/* Reuses existing creation pipelines + Calendar links */}
           <div className="flex items-center flex-wrap gap-2 shrink-0">
+            {onOpenTodayCalendar && (
+              <button
+                type="button"
+                data-testid="today-open-day-calendar-btn"
+                onClick={onOpenTodayCalendar}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold transition-colors"
+              >
+                <Calendar className="w-3.5 h-3.5 text-emerald-400" />
+                <span>فتح تقويم اليوم</span>
+              </button>
+            )}
+            {onOpenWeeklyPlanner && (
+              <button
+                type="button"
+                data-testid="today-open-weekly-planner-btn"
+                onClick={onOpenWeeklyPlanner}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-xs font-semibold transition-colors"
+              >
+                <Clock className="w-3.5 h-3.5 text-emerald-700" />
+                <span>خطتي لهذا الأسبوع</span>
+              </button>
+            )}
             <button
               type="button"
               data-testid="today-quick-new-task"
@@ -600,8 +626,21 @@ export const TodayView: React.FC<TodayViewProps> = ({
                                       <>
                                         <span aria-hidden="true">·</span>
                                         <span className="tabular-nums">
-                                          {getRelativeTimeArabic(task.dueDate, referenceDate)} (
+                                          الاستحقاق: {getRelativeTimeArabic(task.dueDate, referenceDate)} (
                                           {formatArabicDate(task.dueDate, false)})
+                                        </span>
+                                      </>
+                                    )}
+                                    {task.scheduledStartAt && task.scheduledEndAt && (
+                                      <>
+                                        <span aria-hidden="true">·</span>
+                                        <span className="px-1.5 py-0.5 rounded bg-sky-50 text-sky-900 border border-sky-200 font-semibold text-[10px] tabular-nums">
+                                          وقت العمل المخطط: {task.scheduledStartAt.slice(0, 10)} (
+                                          {new Date(task.scheduledStartAt).toLocaleTimeString('ar', {
+                                            hour: '2-digit',
+                                            minute: '2-digit',
+                                          })}
+                                          )
                                         </span>
                                       </>
                                     )}

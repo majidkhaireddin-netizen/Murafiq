@@ -38,6 +38,15 @@ import { OpportunitiesView } from './views/OpportunitiesView';
 import { MeetingsView, MeetingsFilterTrigger } from './views/MeetingsView';
 import { TasksView, TasksFilterTrigger } from './views/TasksView';
 import { ReportsView } from './views/ReportsView';
+import { CalendarView, CalendarNavigationTrigger } from './views/CalendarView';
+import {
+  buildCalendarEvents,
+  detectCalendarConflicts,
+  getLocalTimeZoneName,
+  loadUserCalendarSettings,
+  saveUserCalendarSettings,
+} from '../utils/calendarEngine';
+import type { CalendarSettings, CalendarViewMode } from '../types';
 import type { AnalyticsDrillDownTarget } from '../utils/analytics';
 import { OpportunityCloseModal } from './OpportunityCloseModal';
 import { MeetingMinutesPdfModal } from './MeetingMinutesPdfModal';
@@ -227,8 +236,21 @@ export function AuthenticatedSession({
   } | null>(null);
 
   const [meetingInitialTab, setMeetingInitialTab] = useState<'all' | 'attachments' | null>(null);
-  const [meetingCreateTrigger, setMeetingCreateTrigger] = useState<{ clientId?: string; opportunityId?: string; nonce: number } | null>(null);
-  const [taskCreateTrigger, setTaskCreateTrigger] = useState<{ clientId?: string; meetingId?: string; opportunityId?: string; nonce: number } | null>(null);
+  const [meetingCreateTrigger, setMeetingCreateTrigger] = useState<{
+    clientId?: string;
+    opportunityId?: string;
+    dateTimeIso?: string;
+    nonce: number;
+  } | null>(null);
+  const [taskCreateTrigger, setTaskCreateTrigger] = useState<{
+    clientId?: string;
+    meetingId?: string;
+    opportunityId?: string;
+    dueDate?: string;
+    scheduledStartAt?: string;
+    scheduledEndAt?: string;
+    nonce: number;
+  } | null>(null);
   const [taskOpenTrigger, setTaskOpenTrigger] = useState<{ taskId: string; nonce: number } | null>(null);
   const [reportsInitialSubTab, setReportsInitialSubTab] = useState<'stats' | 'notes'>('stats');
   const [noteCreateTrigger, setNoteCreateTrigger] = useState<{ clientId?: string; nonce: number } | null>(null);
@@ -237,6 +259,12 @@ export function AuthenticatedSession({
   const [clientsFilterTrigger, setClientsFilterTrigger] = useState<ClientsFilterTrigger | null>(null);
   const [meetingsFilterTrigger, setMeetingsFilterTrigger] = useState<MeetingsFilterTrigger | null>(null);
   const [tasksFilterTrigger, setTasksFilterTrigger] = useState<TasksFilterTrigger | null>(null);
+  const [calendarSettings, setCalendarSettings] = useState<CalendarSettings>(() =>
+    loadUserCalendarSettings(user.uid)
+  );
+  const [calendarNavTrigger, setCalendarNavTrigger] = useState<CalendarNavigationTrigger | null>(
+    null
+  );
 
   // Listen to browser online/offline transitions + live 60s / visibility clock refresh
   useEffect(() => {
@@ -712,6 +740,48 @@ export function AuthenticatedSession({
       }),
     [clients, meetings, tasks, opportunities, reminders, followUpPreferences, referenceDate]
   );
+
+  const calendarConflictsCount = useMemo(() => {
+    const events = buildCalendarEvents({
+      clients,
+      meetings,
+      tasks,
+      opportunities,
+      currentUserId: user.uid,
+      referenceDate,
+      timeZone: getLocalTimeZoneName(),
+      settings: {
+        ...calendarSettings,
+        showMeetings: true,
+        showTasks: true,
+      },
+      filterScope: 'all',
+    });
+    return detectCalendarConflicts(events).length;
+  }, [clients, meetings, tasks, opportunities, user.uid, referenceDate, calendarSettings]);
+
+  const handleUpdateCalendarSettings = (patch: Partial<CalendarSettings>) => {
+    setCalendarSettings((prev) => {
+      const next = saveUserCalendarSettings(user.uid, { ...prev, ...patch });
+      return next;
+    });
+  };
+
+  const handleNavigateToCalendar = (params?: {
+    mode?: CalendarViewMode;
+    dateKey?: string;
+    clientId?: string;
+    scheduleTaskId?: string;
+  }) => {
+    setCalendarNavTrigger((prev) => ({
+      mode: params?.mode,
+      dateKey: params?.dateKey,
+      clientId: params?.clientId,
+      scheduleTaskId: params?.scheduleTaskId,
+      nonce: (prev?.nonce || 0) + 1,
+    }));
+    setActiveTab('calendar');
+  };
 
   // Task Mutations (Non-blocking offline UI + operation-scoped recovery)
   const handleToggleTask = (taskId: string) => {
@@ -1665,22 +1735,36 @@ export function AuthenticatedSession({
   };
 
   // Navigation handlers
-  const handleOpenNewMeeting = (clientId?: string, opportunityId?: string) => {
+  const handleOpenNewMeeting = (
+    clientId?: string,
+    opportunityId?: string,
+    dateTimeIso?: string
+  ) => {
     if (clientId) setPreselectedClientIdForMeeting(clientId);
     setMeetingInitialTab('all');
     setMeetingCreateTrigger((prev) => ({
       clientId,
       opportunityId,
+      dateTimeIso,
       nonce: (prev?.nonce || 0) + 1,
     }));
     setActiveTab('meetings');
   };
 
-  const handleOpenNewTask = (clientId?: string, opportunityId?: string) => {
+  const handleOpenNewTask = (
+    clientId?: string,
+    opportunityId?: string,
+    dueDate?: string,
+    scheduledStartAt?: string,
+    scheduledEndAt?: string
+  ) => {
     if (clientId) setPreselectedClientIdForTask(clientId);
     setTaskCreateTrigger((prev) => ({
       clientId,
       opportunityId,
+      dueDate,
+      scheduledStartAt,
+      scheduledEndAt,
       nonce: (prev?.nonce || 0) + 1,
     }));
     setActiveTab('tasks');
@@ -2077,6 +2161,67 @@ export function AuthenticatedSession({
               onUnsnoozeReminder={handleUnsnoozeReminder}
               onDismissReminder={handleDismissReminder}
               onOpenSettings={() => setIsSettingsOpen(true)}
+              onOpenTodayCalendar={() => handleNavigateToCalendar({ mode: 'day', clientId: '' })}
+              onOpenWeeklyPlanner={() =>
+                handleNavigateToCalendar({ mode: 'planner', clientId: '' })
+              }
+            />
+          )}
+
+          {activeTab === 'calendar' && (
+            <CalendarView
+              clients={clients}
+              meetings={meetings}
+              tasks={tasks}
+              opportunities={opportunities}
+              currentUserId={user.uid}
+              referenceDate={referenceDate}
+              isOnline={isOnline}
+              collectionsLoaded={{
+                clients: collectionSync.clients.loaded,
+                meetings: collectionSync.meetings.loaded,
+                tasks: collectionSync.tasks.loaded,
+                opportunities: collectionSync.opportunities.loaded,
+              }}
+              hasPendingWrites={
+                collectionSync.clients.hasPendingWrites ||
+                collectionSync.meetings.hasPendingWrites ||
+                collectionSync.tasks.hasPendingWrites ||
+                collectionSync.opportunities.hasPendingWrites
+              }
+              calendarSettings={calendarSettings}
+              onUpdateCalendarSettings={handleUpdateCalendarSettings}
+              onSaveMeeting={handleSaveMeeting}
+              onSaveTask={handleSaveTask}
+              onToggleTask={handleToggleTask}
+              onOpenMeeting={(m: Meeting) => {
+                setSelectedMeetingId(m.id);
+                setMeetingInitialTab('all');
+                setActiveTab('meetings');
+              }}
+              onOpenTask={handleOpenExistingTask}
+              onOpenClient={(c: Client) => {
+                setSelectedClientId(c.id);
+                setActiveTab('clients');
+              }}
+              onOpenOpportunity={(opp: Opportunity) => {
+                setSelectedOpportunityId(opp.id);
+                setActiveTab('opportunities');
+              }}
+              onCreateNewMeeting={({ clientId, dateTimeIso }) =>
+                handleOpenNewMeeting(clientId, undefined, dateTimeIso)
+              }
+              onCreateNewTask={({ clientId, dueDate, scheduledStartAt, scheduledEndAt }) =>
+                handleOpenNewTask(
+                  clientId,
+                  undefined,
+                  dueDate,
+                  scheduledStartAt,
+                  scheduledEndAt
+                )
+              }
+              navigationTrigger={calendarNavTrigger}
+              language={language}
             />
           )}
 
@@ -2105,6 +2250,9 @@ export function AuthenticatedSession({
                 setSelectedOpportunityId(opp.id);
                 setActiveTab('opportunities');
               }}
+              onOpenClientCalendar={(clientId: string) =>
+                handleNavigateToCalendar({ mode: 'month', clientId })
+              }
               onSaveClient={handleSaveClient}
               onDeleteClient={handleDeleteClient}
               selectedClientId={selectedClientId}
@@ -2228,6 +2376,14 @@ export function AuthenticatedSession({
                 setSelectedOpportunityId(oppId);
                 setActiveTab('opportunities');
               }}
+              onScheduleInCalendar={(task: ActionItem) =>
+                handleNavigateToCalendar({
+                  mode: 'planner',
+                  dateKey: task.dueDate,
+                  scheduleTaskId: task.id,
+                  clientId: '',
+                })
+              }
               preselectedClientId={preselectedClientIdForTask}
               createTrigger={taskCreateTrigger}
               openTaskTrigger={taskOpenTrigger}
@@ -2261,6 +2417,7 @@ export function AuthenticatedSession({
             followUpPreferences.remindersEnabled ? evaluatedReminders.activeCount : 0
           }
           overdueOpportunitiesCount={dailySummary.overdueOpportunitiesCount || 0}
+          calendarConflictsCount={calendarConflictsCount}
           language={language}
         />
       </div>
