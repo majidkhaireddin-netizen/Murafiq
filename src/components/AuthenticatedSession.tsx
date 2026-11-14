@@ -19,10 +19,11 @@ import { Header } from './Header';
 import { BottomNav, NavTab } from './BottomNav';
 import { DashboardView } from './views/DashboardView';
 import { TodayView } from './views/TodayView';
-import { ClientsView } from './views/ClientsView';
-import { MeetingsView } from './views/MeetingsView';
-import { TasksView } from './views/TasksView';
+import { ClientsView, ClientsFilterTrigger } from './views/ClientsView';
+import { MeetingsView, MeetingsFilterTrigger } from './views/MeetingsView';
+import { TasksView, TasksFilterTrigger } from './views/TasksView';
 import { ReportsView } from './views/ReportsView';
+import type { AnalyticsDrillDownTarget } from '../utils/analytics';
 import { MeetingMinutesPdfModal } from './MeetingMinutesPdfModal';
 import { BiometricLockModal } from './BiometricLockModal';
 import { SearchModal } from './SearchModal';
@@ -192,6 +193,9 @@ export function AuthenticatedSession({
   const [noteCreateTrigger, setNoteCreateTrigger] = useState<{ clientId?: string; nonce: number } | null>(null);
   const [noteOpenTrigger, setNoteOpenTrigger] = useState<{ noteId: string; nonce: number } | null>(null);
   const [createClientTrigger, setCreateClientTrigger] = useState(0);
+  const [clientsFilterTrigger, setClientsFilterTrigger] = useState<ClientsFilterTrigger | null>(null);
+  const [meetingsFilterTrigger, setMeetingsFilterTrigger] = useState<MeetingsFilterTrigger | null>(null);
+  const [tasksFilterTrigger, setTasksFilterTrigger] = useState<TasksFilterTrigger | null>(null);
 
   // Listen to browser online/offline transitions + live 60s / visibility clock refresh
   useEffect(() => {
@@ -1331,6 +1335,50 @@ export function AuthenticatedSession({
     }
   };
 
+  const handleAnalyticsDrillDown = (target: AnalyticsDrillDownTarget) => {
+    if (target.tab === 'clients') {
+      if (target.clientId) {
+        setSelectedClientId(target.clientId);
+      } else {
+        setSelectedClientId(null);
+        setClientsFilterTrigger((prev) => ({
+          quickFilter: target.quickFilter || 'all',
+          createdFrom: target.createdFrom,
+          createdTo: target.createdTo,
+          nonce: (prev?.nonce || 0) + 1,
+        }));
+      }
+      setActiveTab('clients');
+      return;
+    }
+
+    if (target.tab === 'meetings') {
+      if (target.meetingId) {
+        setSelectedMeetingId(target.meetingId);
+        setMeetingInitialTab('all');
+      } else {
+        setSelectedMeetingId(null);
+        setMeetingsFilterTrigger((prev) => ({
+          status: target.status || 'all',
+          upcomingOnly: Boolean(target.upcomingOnly),
+          nonce: (prev?.nonce || 0) + 1,
+        }));
+      }
+      setActiveTab('meetings');
+      return;
+    }
+
+    if (target.tab === 'tasks') {
+      setTasksFilterTrigger((prev) => ({
+        scope: target.scope || 'all',
+        priority: target.priority || 'all',
+        clientId: target.clientId || 'all',
+        nonce: (prev?.nonce || 0) + 1,
+      }));
+      setActiveTab('tasks');
+    }
+  };
+
   const fullAppState: AppState = {
     clients,
     meetings,
@@ -1518,6 +1566,27 @@ export function AuthenticatedSession({
                 setActiveTab('clients');
               }}
               onGoToTab={(tab: NavTab) => setActiveTab(tab)}
+              onDrillDown={handleAnalyticsDrillDown}
+              collectionsLoaded={{
+                clients: collectionSync.clients.loaded,
+                meetings: collectionSync.meetings.loaded,
+                tasks: collectionSync.tasks.loaded,
+                notes: collectionSync.notes.loaded,
+              }}
+              hasSyncError={
+                collectionSync.clients.hasError ||
+                collectionSync.meetings.hasError ||
+                collectionSync.tasks.hasError ||
+                collectionSync.notes.hasError
+              }
+              hasPendingWrites={
+                collectionSync.clients.hasPendingWrites ||
+                collectionSync.meetings.hasPendingWrites ||
+                collectionSync.tasks.hasPendingWrites ||
+                collectionSync.notes.hasPendingWrites
+              }
+              isOnline={isOnline}
+              referenceDate={referenceDate}
               showHijri={showHijri}
               language={language}
             />
@@ -1606,6 +1675,7 @@ export function AuthenticatedSession({
               selectedClientId={selectedClientId}
               onSelectedClientChange={setSelectedClientId}
               createClientTrigger={createClientTrigger}
+              filterTrigger={clientsFilterTrigger}
               collectionsLoaded={{
                 clients: collectionSync.clients.loaded,
                 meetings: collectionSync.meetings.loaded,
@@ -1649,6 +1719,7 @@ export function AuthenticatedSession({
               preselectedClientId={preselectedClientIdForMeeting}
               initialWorkspaceTab={meetingInitialTab}
               createTrigger={meetingCreateTrigger}
+              filterTrigger={meetingsFilterTrigger}
               pendingMeetingIds={collectionSync.meetings.pendingDocIds}
               failedMeetingIds={rejectedWrites
                 .filter((r) => r.entityType === 'meeting')
@@ -1669,6 +1740,7 @@ export function AuthenticatedSession({
               preselectedClientId={preselectedClientIdForTask}
               createTrigger={taskCreateTrigger}
               openTaskTrigger={taskOpenTrigger}
+              filterTrigger={tasksFilterTrigger}
               language={language}
             />
           )}

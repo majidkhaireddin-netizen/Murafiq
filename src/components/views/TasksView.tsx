@@ -19,6 +19,15 @@ import {
   Edit2,
 } from 'lucide-react';
 
+import { categorizeDailyWorkTasks, resolveCalendarParts, formatCalendarDateKey, extractZonedCalendarParts } from '../../utils/followUpEngine';
+
+export interface TasksFilterTrigger {
+  scope?: 'all' | 'overdue' | 'open' | 'completed';
+  priority?: string;
+  clientId?: string;
+  nonce: number;
+}
+
 interface TasksViewProps {
   tasks: ActionItem[];
   clients: Client[];
@@ -30,6 +39,7 @@ interface TasksViewProps {
   preselectedMeetingId?: string | null;
   createTrigger?: { clientId?: string; meetingId?: string; nonce: number } | null;
   openTaskTrigger?: { taskId: string; nonce: number } | null;
+  filterTrigger?: TasksFilterTrigger | null;
   language: 'ar' | 'en';
 }
 
@@ -44,21 +54,42 @@ export const TasksView: React.FC<TasksViewProps> = ({
   preselectedMeetingId,
   createTrigger,
   openTaskTrigger,
+  filterTrigger,
   language,
 }) => {
+  const [filterScope, setFilterScope] = useState<'all' | 'overdue' | 'open' | 'completed'>('all');
   const [filterPriority, setFilterPriority] = useState<string>('all');
   const [filterClientId, setFilterClientId] = useState<string>('all');
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<Partial<ActionItem> | null>(null);
 
+  useEffect(() => {
+    if (filterTrigger && filterTrigger.nonce > 0) {
+      setFilterScope(filterTrigger.scope || 'all');
+      setFilterPriority(filterTrigger.priority || 'all');
+      setFilterClientId(filterTrigger.clientId || 'all');
+    }
+  }, [filterTrigger?.nonce]);
+
+  const todayKey = formatCalendarDateKey(extractZonedCalendarParts(new Date()));
+
   // Filter tasks
   const filteredTasks = tasks.filter((t) => {
     if (filterPriority !== 'all' && t.priority !== filterPriority) return false;
     if (filterClientId !== 'all' && t.clientId !== filterClientId) return false;
+    if (filterScope === 'open') {
+      if (t.status === 'completed' || t.status === 'cancelled') return false;
+    } else if (filterScope === 'completed') {
+      if (t.status !== 'completed') return false;
+    } else if (filterScope === 'overdue') {
+      if (t.status === 'completed' || t.status === 'cancelled') return false;
+      const dueParts = resolveCalendarParts(t.dueDate);
+      if (!dueParts || formatCalendarDateKey(dueParts) >= todayKey) return false;
+    }
     return true;
   });
 
-  const { overdue, today, thisWeek, later } = categorizeTasks(filteredTasks);
+  const { overdue, today, thisWeek, later } = categorizeDailyWorkTasks(filteredTasks);
   const completedTasks = filteredTasks.filter((t) => t.status === 'completed');
 
   const handleOpenCreate = (clientId?: string, meetingId?: string) => {
@@ -291,7 +322,21 @@ export const TasksView: React.FC<TasksViewProps> = ({
       </div>
 
       {/* Filter Row */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-1 text-xs">
+      <div className="flex items-center gap-2 overflow-x-auto pb-1 text-xs flex-wrap">
+        <select
+          aria-label="تصفية حسب حالة المهام"
+          value={filterScope}
+          onChange={(e) =>
+            setFilterScope(e.target.value as 'all' | 'overdue' | 'open' | 'completed')
+          }
+          className="bg-white border border-stone-200 rounded-lg py-1 px-2.5 text-xs text-stone-700 focus:outline-hidden focus:ring-1 focus:ring-emerald-600"
+        >
+          <option value="all">كل المهام</option>
+          <option value="overdue">المتأخرة فقط</option>
+          <option value="open">المفتوحة فقط</option>
+          <option value="completed">المنجزة فقط</option>
+        </select>
+
         <select
           value={filterPriority}
           onChange={(e) => setFilterPriority(e.target.value)}
@@ -316,6 +361,20 @@ export const TasksView: React.FC<TasksViewProps> = ({
             </option>
           ))}
         </select>
+
+        {(filterScope !== 'all' || filterPriority !== 'all' || filterClientId !== 'all') && (
+          <button
+            type="button"
+            onClick={() => {
+              setFilterScope('all');
+              setFilterPriority('all');
+              setFilterClientId('all');
+            }}
+            className="px-2 py-1 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 text-[11px] font-medium"
+          >
+            مسح التصفية
+          </button>
+        )}
       </div>
 
       {/* Categorized Lists */}

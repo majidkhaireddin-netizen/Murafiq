@@ -13,6 +13,7 @@ import {
   TaskPriority,
 } from '../../types';
 import { formatArabicDate } from '../../utils/logic';
+import { parseMeetingDateTimeMs } from '../../utils/followUpEngine';
 import { MeetingAttachmentsSection } from '../MeetingAttachmentsSection';
 import { MeetingAiAssistant } from '../MeetingAiAssistant';
 import type { requestMeetingAiSuggestions } from '../../services/meetingAi';
@@ -81,6 +82,12 @@ import {
   X,
 } from 'lucide-react';
 
+export interface MeetingsFilterTrigger {
+  status?: 'all' | MeetingStatus;
+  upcomingOnly?: boolean;
+  nonce: number;
+}
+
 interface MeetingsViewProps {
   meetings: Meeting[];
   clients: Client[];
@@ -99,6 +106,7 @@ interface MeetingsViewProps {
   preselectedClientId?: string | null;
   initialWorkspaceTab?: WorkspaceSectionTab | null;
   createTrigger?: { clientId?: string; nonce: number } | null;
+  filterTrigger?: MeetingsFilterTrigger | null;
   pendingMeetingIds?: string[];
   failedMeetingIds?: string[];
   language: 'ar' | 'en';
@@ -149,6 +157,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
   preselectedClientId,
   initialWorkspaceTab,
   createTrigger,
+  filterTrigger,
   pendingMeetingIds = [],
   failedMeetingIds = [],
   language,
@@ -158,6 +167,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
   const isArabic = language === 'ar';
 
   const [filterStatus, setFilterStatus] = useState<'all' | MeetingStatus>('all');
+  const [upcomingOnlyFilter, setUpcomingOnlyFilter] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [viewMode, setViewMode] = useState<'timeline' | 'calendar'>('timeline');
   const [activeMeeting, setActiveMeeting] = useState<Meeting | null>(
@@ -253,6 +263,14 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
     }
   }, [createTrigger?.nonce]);
 
+  useEffect(() => {
+    if (filterTrigger && filterTrigger.nonce > 0) {
+      setActiveMeeting(null);
+      setFilterStatus(filterTrigger.status || 'all');
+      setUpcomingOnlyFilter(Boolean(filterTrigger.upcomingOnly));
+    }
+  }, [filterTrigger?.nonce]);
+
   // Keep activeMeeting hydrated from snapshots ONLY when there is no unsaved local error
   useEffect(() => {
     if (!activeMeeting) return;
@@ -288,9 +306,16 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
 
   const filteredMeetings = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
+    const nowMs = Date.now();
     return meetings
       .filter((m) => {
         if (filterStatus !== 'all' && m.status !== filterStatus) return false;
+        if (upcomingOnlyFilter) {
+          if (m.status === 'completed' || m.status === 'cancelled') return false;
+          const startMs = parseMeetingDateTimeMs(m.dateTime);
+          const graceMs = Math.max(60, m.duration || 60) * 60000;
+          if (startMs === null || startMs < nowMs - graceMs) return false;
+        }
         if (!q) return true;
         const client = clients.find((c) => c.id === m.clientId);
         const matchesClient =
@@ -314,7 +339,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
         );
       })
       .sort((a, b) => new Date(b.dateTime).getTime() - new Date(a.dateTime).getTime());
-  }, [meetings, clients, filterStatus, searchQuery]);
+  }, [meetings, clients, filterStatus, upcomingOnlyFilter, searchQuery]);
 
   // Dynamic current 7-day calendar strip anchored on today
   const weekDays = useMemo(() => {
@@ -850,6 +875,20 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
           </div>
         </div>
       </div>
+
+      {upcomingOnlyFilter && (
+        <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900">
+          <span>{isArabic ? 'عرض اللقاءات القادمة النشطة فقط' : 'Showing active upcoming meetings only'}</span>
+          <button
+            type="button"
+            onClick={() => setUpcomingOnlyFilter(false)}
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-white border border-emerald-200 text-emerald-800 hover:bg-emerald-100 text-[11px] font-medium"
+          >
+            <X className="w-3 h-3" />
+            <span>{isArabic ? 'عرض الكل' : 'Clear'}</span>
+          </button>
+        </div>
+      )}
 
       {/* Real-date Week Calendar Strip */}
       {viewMode === 'calendar' && (

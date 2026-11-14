@@ -21,6 +21,7 @@ import {
   sanitizeClientForSave,
 } from '../../utils/client360';
 import { Client360Workspace } from '../Client360Workspace';
+import { formatCalendarDateKey, resolveCalendarParts } from '../../utils/followUpEngine';
 import {
   AlertCircle,
   AlertTriangle,
@@ -35,6 +36,13 @@ import {
   WifiOff,
   X,
 } from 'lucide-react';
+
+export interface ClientsFilterTrigger {
+  quickFilter?: 'all' | 'favorites' | 'needs_follow_up' | 'overdue_tasks';
+  createdFrom?: string;
+  createdTo?: string;
+  nonce: number;
+}
 
 interface ClientsViewProps {
   clients: Client[];
@@ -55,6 +63,7 @@ interface ClientsViewProps {
   selectedClientId?: string | null;
   onSelectedClientChange?: (clientId: string | null) => void;
   createClientTrigger?: number;
+  filterTrigger?: ClientsFilterTrigger | null;
   collectionsLoaded?: {
     clients: boolean;
     meetings: boolean;
@@ -88,6 +97,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
   selectedClientId,
   onSelectedClientChange,
   createClientTrigger = 0,
+  filterTrigger,
   collectionsLoaded = { clients: true, meetings: true, tasks: true, notes: true },
   hasSyncError = false,
   hasPendingWrites = false,
@@ -100,6 +110,10 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
   const [quickFilter, setQuickFilter] = useState<
     'all' | 'favorites' | 'needs_follow_up' | 'overdue_tasks'
   >('all');
+  const [createdRangeFilter, setCreatedRangeFilter] = useState<{
+    from: string;
+    to: string;
+  } | null>(null);
   const [statusFilter, setStatusFilter] = useState<ClientRelationshipStatus | 'all'>('all');
   const [importanceFilter, setImportanceFilter] = useState<ClientImportanceLevel | 'all'>('all');
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
@@ -123,6 +137,24 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
     }
   }, [createClientTrigger]);
 
+  useEffect(() => {
+    if (filterTrigger && filterTrigger.nonce > 0) {
+      setSearchQuery('');
+      setQuickFilter(filterTrigger.quickFilter || 'all');
+      setStatusFilter('all');
+      setImportanceFilter('all');
+      setCategoryFilter('all');
+      if (filterTrigger.createdFrom && filterTrigger.createdTo) {
+        setCreatedRangeFilter({
+          from: filterTrigger.createdFrom,
+          to: filterTrigger.createdTo,
+        });
+      } else {
+        setCreatedRangeFilter(null);
+      }
+    }
+  }, [filterTrigger?.nonce]);
+
   const selectClient = (clientId: string | null) => {
     setActiveClientId(clientId);
     if (onSelectedClientChange) {
@@ -136,31 +168,37 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
   );
 
   // Compute indexed & filtered list once
-  const clientSummaries = useMemo(
-    () =>
-      filterAndSortClients(clients, meetings, tasks, notes, {
-        searchQuery,
-        onlyFavorites: quickFilter === 'favorites',
-        onlyNeedsFollowUp: quickFilter === 'needs_follow_up',
-        onlyWithOverdueTasks: quickFilter === 'overdue_tasks',
-        relationshipStatus: statusFilter,
-        importance: importanceFilter,
-        category: categoryFilter,
-        sortBy,
-      }),
-    [
-      clients,
-      meetings,
-      tasks,
-      notes,
+  const clientSummaries = useMemo(() => {
+    const base = filterAndSortClients(clients, meetings, tasks, notes, {
       searchQuery,
-      quickFilter,
-      statusFilter,
-      importanceFilter,
-      categoryFilter,
+      onlyFavorites: quickFilter === 'favorites',
+      onlyNeedsFollowUp: quickFilter === 'needs_follow_up',
+      onlyWithOverdueTasks: quickFilter === 'overdue_tasks',
+      relationshipStatus: statusFilter,
+      importance: importanceFilter,
+      category: categoryFilter,
       sortBy,
-    ]
-  );
+    });
+    if (!createdRangeFilter) return base;
+    return base.filter(({ client }) => {
+      const parts = resolveCalendarParts(client.createdAt);
+      if (!parts) return false;
+      const key = formatCalendarDateKey(parts);
+      return key >= createdRangeFilter.from && key <= createdRangeFilter.to;
+    });
+  }, [
+    clients,
+    meetings,
+    tasks,
+    notes,
+    searchQuery,
+    quickFilter,
+    createdRangeFilter,
+    statusFilter,
+    importanceFilter,
+    categoryFilter,
+    sortBy,
+  ]);
 
   // Quick badge counts computed from unfiltered list
   const quickCounts = useMemo(() => {
@@ -461,6 +499,22 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
             </select>
           </div>
 
+          {createdRangeFilter && (
+            <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900">
+              <span className="tabular-nums">
+                عرض العملاء المضافين خلال الفترة: {createdRangeFilter.from} إلى {createdRangeFilter.to}
+              </span>
+              <button
+                type="button"
+                onClick={() => setCreatedRangeFilter(null)}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-white border border-emerald-200 text-emerald-800 hover:bg-emerald-100 text-[11px] font-medium"
+              >
+                <X className="w-3 h-3" />
+                <span>إلغاء</span>
+              </button>
+            </div>
+          )}
+
           {/* Clients Cards List */}
           <div className="space-y-2.5">
             {!collectionsLoaded.clients ? (
@@ -480,6 +534,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
                     onClick={() => {
                       setSearchQuery('');
                       setQuickFilter('all');
+                      setCreatedRangeFilter(null);
                       setStatusFilter('all');
                       setImportanceFilter('all');
                       setCategoryFilter('all');
