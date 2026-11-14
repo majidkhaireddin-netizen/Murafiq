@@ -56,12 +56,31 @@ export async function createMurafiqServerApp() {
     process.argv.includes('--production');
 
   if (!isProduction) {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
+    const disableHmr = process.env.DISABLE_HMR === 'true';
+    // Initialize Vite asynchronously so Express binds port 3000 and serves /api/health
+    // immediately without blocking on cold dependency pre-bundling.
+    const viteServerPromise = import('vite').then(({ createServer: createViteServer }) =>
+      createViteServer({
+        server: {
+          middlewareMode: true,
+          ...(disableHmr ? { hmr: false, watch: null } : {}),
+        },
+        appType: 'spa',
+      })
+    );
+
+    viteServerPromise.catch((err) => {
+      console.error('Failed to initialize Vite dev middleware:', err);
     });
-    app.use(vite.middlewares);
+
+    app.use(async (req, res, next) => {
+      try {
+        const vite = await viteServerPromise;
+        vite.middlewares(req, res, next);
+      } catch (err) {
+        next(err);
+      }
+    });
   } else {
     const distDir = path.resolve(process.cwd(), 'dist');
     const indexHtmlPath = path.join(distDir, 'index.html');
@@ -79,18 +98,62 @@ export async function createMurafiqServerApp() {
   return app;
 }
 
-const isMainEntry =
-  typeof process !== 'undefined' &&
-  Array.isArray(process.argv) &&
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === path.resolve(process.cwd(), 'server.ts');
+function resolveServerBindConfig(isProduction: boolean): { port: number; host: string } {
+  const argv = process.argv.slice(2);
+  let cliPort: string | undefined;
+  let cliHost: string | undefined;
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--port' && argv[i + 1]) {
+      cliPort = argv[++i];
+    } else if (arg.startsWith('--port=')) {
+      cliPort = arg.slice('--port='.length);
+    } else if (arg === '--host' && argv[i + 1]) {
+      cliHost = argv[++i];
+    } else if (arg.startsWith('--host=')) {
+      cliHost = arg.slice('--host='.length);
+    }
+  }
+
+  const envPort = process.env.PORT;
+  const safeEnvPort =
+    !isProduction && envPort && process.env.NGINX_PORT && envPort === process.env.NGINX_PORT
+      ? process.env.DEFAULT_APP_PORT || '3000'
+      : envPort;
+
+  const parsedPort = parseInt(cliPort || safeEnvPort || process.env.DEFAULT_APP_PORT || '3000', 10);
+  const port = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 3000;
+  const host = cliHost || process.env.HOST || '0.0.0.0';
+  return { port, host };
+}
+
+const isMainEntry = (() => {
+  if (typeof process === 'undefined' || !Array.isArray(process.argv) || !process.argv[1]) {
+    return false;
+  }
+  try {
+    return fs.realpathSync(process.argv[1]) === fs.realpathSync(path.resolve(process.cwd(), 'server.ts'));
+  } catch {
+    return path.resolve(process.argv[1]) === path.resolve(process.cwd(), 'server.ts');
+  }
+})();
 
 if (isMainEntry) {
-  const PORT = parseInt(process.env.PORT || '3000', 10);
+  const isProduction =
+    process.env.NODE_ENV === 'production' ||
+    process.env.npm_lifecycle_event === 'start' ||
+    process.argv.includes('--production');
+  const { port: PORT, host: HOST } = resolveServerBindConfig(isProduction);
+
   createMurafiqServerApp()
     .then((app) => {
-      app.listen(PORT, '0.0.0.0', () => {
-        console.log(`Murafiq full-stack server running on http://0.0.0.0:${PORT}`);
+      const httpServer = app.listen(PORT, HOST, () => {
+        console.log(`Murafiq full-stack server running on http://${HOST}:${PORT}`);
+      });
+      httpServer.on('error', (err) => {
+        console.error(`Failed to bind Murafiq server on ${HOST}:${PORT}:`, err);
+        process.exit(1);
       });
     })
     .catch((err) => {

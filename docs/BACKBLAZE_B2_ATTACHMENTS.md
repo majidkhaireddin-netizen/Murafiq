@@ -75,3 +75,7 @@
 
 4. **ضبط CORS Rules وLifecycle Rules على Bucket `Murafiq` في Backblaze B2**:
    - يُنصح بإضافة قاعدة CORS لنطاق التطبيق الفعلي (`s3_put`, `s3_get`, `s3_head`) للرفع المباشر وتقليل الاعتماد على الـ Relay، وضبط Lifecycle للنسخ المخفية حسب سياسة الاحتفاظ المطلوبة.
+
+5. **حماية حذف اللقاء والتنظيف المجدول (Task 004-A-Fix-03)**:
+   - يُحظر حذف اللقاء ما دامت له مرفقات معتمدة أو نوايا رفع قيد التنفيذ عبر `POST /api/meetings/delete` وحارس قواعد البيانات `_meetingGuard`، مع التحقق الذري من وجود اللقاء داخل معاملة `createUploadIntent()` لمنع أي سباق تزامن متعدد النسخ.
+   - مسار التنظيف الدوري المجدول `POST /api/attachments/sweep-expired-scheduled` معطّل افتراضياً؛ ولا يُفعّل إلا بعد موافقة مالك المنتج عبر ضبط `ENABLE_EXPIRED_INTENT_SWEEP_ENDPOINT=true` والسر `CLEANUP_SWEEP_SECRET` على الخادم فقط.

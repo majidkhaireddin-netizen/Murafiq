@@ -11,6 +11,7 @@ import {
 import { createMeetingsRouter } from '../src/server/meetingsRouter.ts';
 import type { B2StorageService } from '../src/server/b2Storage.ts';
 import {
+  createFirebaseAttachmentMetadataStore,
   getFirebaseAdminReadinessStatus,
   getFirebaseServerConfig,
   MEETING_GUARD_DOC_ID,
@@ -94,6 +95,8 @@ function createMockTestServer(options?: {
   let failVerifyOnce = options?.failVerifyOnce ?? false;
   let adminConfigured = options?.adminConfigured ?? true;
   let clockMs = options?.initialTimeMs ?? Date.now();
+  let beforeCreateIntentHook: (() => Promise<void>) | null = null;
+  let beforeDeleteMeetingHook: (() => Promise<void>) | null = null;
 
   const ensureAdminConfigured = () => {
     if (!adminConfigured) {
@@ -205,6 +208,16 @@ function createMockTestServer(options?: {
   const metadataStore: AttachmentMetadataStore = {
     createUploadIntent: async (intent) => {
       ensureAdminConfigured();
+      if (beforeCreateIntentHook) {
+        await beforeCreateIntentHook();
+      }
+      const meeting = meetingsOwned.get(intent.meetingId);
+      if (!meeting) {
+        return { outcome: 'meeting_not_found' };
+      }
+      if (meeting.uid !== intent.userId) {
+        return { outcome: 'forbidden' };
+      }
       uploadIntents.set(`${intent.userId}:${intent.meetingId}:${intent.attachmentId}`, { ...intent });
       updateGuard({
         uid: intent.userId,
@@ -212,6 +225,7 @@ function createMockTestServer(options?: {
         addPendingId: intent.attachmentId,
         nowIso: intent.updatedAt,
       });
+      return { outcome: 'created' };
     },
     getUploadIntent: async ({ uid, meetingId, attachmentId }) => {
       ensureAdminConfigured();
@@ -557,6 +571,9 @@ function createMockTestServer(options?: {
     },
     deleteMeetingIfNoAttachments: async ({ uid, meetingId }) => {
       ensureAdminConfigured();
+      if (beforeDeleteMeetingHook) {
+        await beforeDeleteMeetingHook();
+      }
       const prefix = `${uid}:${meetingId}:`;
       for (const k of attachmentsOwned.keys()) {
         if (k.startsWith(prefix)) return { outcome: 'blocked_attachments' };
@@ -687,6 +704,12 @@ function createMockTestServer(options?: {
       clockMs += delta;
     },
     getTimeMs: () => clockMs,
+    setBeforeCreateIntentHook: (fn: (() => Promise<void>) | null) => {
+      beforeCreateIntentHook = fn;
+    },
+    setBeforeDeleteMeetingHook: (fn: (() => Promise<void>) | null) => {
+      beforeDeleteMeetingHook = fn;
+    },
   };
 }
 
@@ -2252,5 +2275,427 @@ test('Task 004-A & Fix-01 Security, Integrity & Reliability Suite (Backblaze B2 
     assert.equal(saState.credentialSource, 'service_account_json');
     assert.equal(JSON.stringify(saState).includes('private_key'), false);
     assert.equal(JSON.stringify(saState).includes('x@y.iam'), false);
+  });
+
+  await t.test('20. Concurrent meeting deletion vs upload intent creation NEVER produces orphan UploadIntent', async () => {
+    // Minimal optimistic-concurrency Firestore simulator to exercise the REAL
+    // createFirebaseAttachmentMetadataStore().createUploadIntent & deleteMeetingIfNoAttachments transactions
+    function createFakeTransactionalFirestore(initialDocs: Record<string, any>) {
+      const store = new Map<string, any>();
+      const versions = new Map<string, number>();
+      for (const [k, v] of Object.entries(initialDocs)) {
+        store.set(k, structuredClone(v));
+        versions.set(k, 1);
+      }
+
+      const makeDocRef = (docPath: string) => ({
+        __type: 'doc' as const,
+        path: docPath,
+        id: docPath.split('/').pop()!,
+      });
+
+      const makeQuery = (colPath: string, limitN?: number) => ({
+        __type: 'col' as const,
+        colPath,
+        limitN,
+        limit: (n: number) => makeQuery(colPath, n),
+      });
+
+      let onTxAttemptReadDone: ((attemptLabel: string) => Promise<void>) | null = null;
+      let txCounter = 0;
+
+      const db = {
+        doc: (p: string) => makeDocRef(p),
+        collection: (p: string) => makeQuery(p),
+        setAfterReadHook: (fn: ((attemptLabel: string) => Promise<void>) | null) => {
+          onTxAttemptReadDone = fn;
+        },
+        docsMap: store,
+        runTransaction: async <T>(fn: (tx: any) => Promise<T>): Promise<T> => {
+          const id = `tx_${++txCounter}`;
+          for (let attempt = 0; attempt < 8; attempt++) {
+            const readDocVersions = new Map<string, number>();
+            const readPrefixVersions = new Map<string, Map<string, number>>();
+            const pendingWrites: Array<{ type: 'set' | 'delete'; path: string; data?: any }> = [];
+
+            const tx = {
+              get: async (target: any) => {
+                if (target.__type === 'doc') {
+                  const v = versions.get(target.path) || 0;
+                  if (!readDocVersions.has(target.path)) {
+                    readDocVersions.set(target.path, v);
+                  }
+                  const data = store.get(target.path);
+                  return {
+                    exists: data !== undefined,
+                    data: () => (data !== undefined ? structuredClone(data) : undefined),
+                  };
+                }
+                const prefix = `${target.colPath}/`;
+                const snapMap = new Map<string, number>();
+                const docs: any[] = [];
+                for (const [k, val] of store.entries()) {
+                  if (k.startsWith(prefix) && !k.slice(prefix.length).includes('/')) {
+                    snapMap.set(k, versions.get(k) || 0);
+                    if (!target.limitN || docs.length < target.limitN) {
+                      docs.push({ id: k.slice(prefix.length), data: () => structuredClone(val) });
+                    }
+                  }
+                }
+                readPrefixVersions.set(prefix, snapMap);
+                return {
+                  empty: docs.length === 0,
+                  size: docs.length,
+                  forEach: (cb: (d: any) => void) => docs.forEach(cb),
+                };
+              },
+              set: (ref: any, data: any) => {
+                pendingWrites.push({ type: 'set', path: ref.path, data: structuredClone(data) });
+              },
+              update: (ref: any, patch: any) => {
+                const cur = store.get(ref.path) || {};
+                pendingWrites.push({
+                  type: 'set',
+                  path: ref.path,
+                  data: { ...structuredClone(cur), ...structuredClone(patch) },
+                });
+              },
+              delete: (ref: any) => {
+                pendingWrites.push({ type: 'delete', path: ref.path });
+              },
+            };
+
+            const result = await fn(tx);
+            if (onTxAttemptReadDone && attempt === 0) {
+              await onTxAttemptReadDone(id);
+            }
+
+            // Optimistic concurrency conflict check (matches Firestore serializability)
+            let conflict = false;
+            for (const [p, expectedV] of readDocVersions.entries()) {
+              if ((versions.get(p) || 0) !== expectedV) {
+                conflict = true;
+                break;
+              }
+            }
+            if (!conflict) {
+              for (const [prefix, snapMap] of readPrefixVersions.entries()) {
+                for (const [k, v] of versions.entries()) {
+                  if (k.startsWith(prefix) && !k.slice(prefix.length).includes('/')) {
+                    if (snapMap.get(k) !== v) {
+                      conflict = true;
+                      break;
+                    }
+                  }
+                }
+                if (conflict) break;
+                for (const [k, oldV] of snapMap.entries()) {
+                  if ((versions.get(k) || 0) !== oldV) {
+                    conflict = true;
+                    break;
+                  }
+                }
+                if (conflict) break;
+              }
+            }
+
+            if (conflict) {
+              continue; // Firestore transaction retries on contention
+            }
+
+            for (const w of pendingWrites) {
+              const nextV = (versions.get(w.path) || 0) + 1;
+              versions.set(w.path, nextV);
+              if (w.type === 'delete') {
+                store.delete(w.path);
+              } else {
+                store.set(w.path, w.data);
+              }
+            }
+            return result;
+          }
+          throw new Error('Transaction contention limit exceeded');
+        },
+      };
+      return db;
+    }
+
+    const meetingPath = `users/${USER_A}/meetings/${MEETING_A}`;
+    const intentPath = `users/${USER_A}/meetings/${MEETING_A}/uploadIntents/att_race_1`;
+    const guardPath = `users/${USER_A}/meetings/${MEETING_A}/uploadIntents/${MEETING_GUARD_DOC_ID}`;
+
+    const sampleIntent = (attachmentId: string, meetingId = MEETING_A): UploadIntentRecord => ({
+      attachmentId,
+      userId: USER_A,
+      meetingId,
+      fileName: 'race.pdf',
+      contentType: 'application/pdf',
+      sizeBytes: PDF_HEADER.byteLength,
+      storageKey: buildAttachmentStorageKey({ uid: USER_A, meetingId, attachmentId }),
+      bucket: 'Murafiq',
+      status: 'pending',
+      expiresAt: new Date(Date.now() + UPLOAD_INTENT_GRACE_MS).toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    // 20a. Production store: delete meeting first, then createUploadIntent -> rejected & zero orphan
+    {
+      const fakeDb = createFakeTransactionalFirestore({
+        [meetingPath]: { id: MEETING_A, userId: USER_A, title: 'Clean Meeting' },
+      });
+      const realStore = createFirebaseAttachmentMetadataStore({ getDb: () => fakeDb as any });
+
+      const delRes = await realStore.deleteMeetingIfNoAttachments({ uid: USER_A, meetingId: MEETING_A });
+      assert.equal(delRes.outcome, 'deleted');
+      assert.equal(fakeDb.docsMap.has(meetingPath), false);
+
+      const createRes = await realStore.createUploadIntent(sampleIntent('att_race_1'));
+      assert.equal(createRes.outcome, 'meeting_not_found');
+      assert.equal(fakeDb.docsMap.has(intentPath), false, 'Must NOT create orphan UploadIntent');
+      assert.equal(fakeDb.docsMap.has(guardPath), false, 'Must NOT recreate _meetingGuard on deleted meeting');
+    }
+
+    // 20b. Production store: createUploadIntent first, then deleteMeetingIfNoAttachments -> rejected
+    {
+      const fakeDb = createFakeTransactionalFirestore({
+        [meetingPath]: { id: MEETING_A, userId: USER_A, title: 'Upload First Meeting' },
+      });
+      const realStore = createFirebaseAttachmentMetadataStore({ getDb: () => fakeDb as any });
+
+      const createRes = await realStore.createUploadIntent(sampleIntent('att_race_1'));
+      assert.equal(createRes.outcome, 'created');
+      assert.equal(fakeDb.docsMap.get(guardPath)?.locked, true);
+
+      const delRes = await realStore.deleteMeetingIfNoAttachments({ uid: USER_A, meetingId: MEETING_A });
+      assert.equal(delRes.outcome, 'blocked_pending_intents');
+      assert.equal(fakeDb.docsMap.has(meetingPath), true);
+    }
+
+    // 20c. Production store multi-instance contention: overlapping tx retries (delete wins -> create aborts cleanly; upload wins -> delete aborts cleanly)
+    {
+      // Ordering 1: createUploadIntent (tx_1) reads meeting & pauses, deleteMeeting (tx_2) commits delete, create retries & aborts
+      const fakeDb1 = createFakeTransactionalFirestore({
+        [meetingPath]: { id: MEETING_A, userId: USER_A, title: 'Contended Meeting 1' },
+      });
+      const realStore1 = createFirebaseAttachmentMetadataStore({ getDb: () => fakeDb1 as any });
+      let releaseTx1!: () => void;
+      const tx1Waiting = new Promise<void>((r) => {
+        releaseTx1 = r;
+      });
+      let tx1Entered!: () => void;
+      const tx1EnteredPromise = new Promise<void>((r) => {
+        tx1Entered = r;
+      });
+      fakeDb1.setAfterReadHook(async (id) => {
+        if (id === 'tx_1') {
+          tx1Entered();
+          await tx1Waiting;
+        }
+      });
+
+      const createP = realStore1.createUploadIntent(sampleIntent('att_race_1'));
+      await tx1EnteredPromise;
+      const deleteP = realStore1.deleteMeetingIfNoAttachments({ uid: USER_A, meetingId: MEETING_A });
+      const delOutcome = await deleteP;
+      releaseTx1();
+      const createOutcome = await createP;
+
+      assert.equal(delOutcome.outcome, 'deleted');
+      assert.equal(createOutcome.outcome, 'meeting_not_found');
+      assert.equal(fakeDb1.docsMap.size, 0, 'Zero orphan UploadIntent or guard documents may remain');
+    }
+
+    {
+      // Ordering 2: deleteMeeting (tx_1) reads empty state & pauses, createUploadIntent (tx_2) commits intent+guard, delete retries & is blocked
+      const fakeDb2 = createFakeTransactionalFirestore({
+        [meetingPath]: { id: MEETING_A, userId: USER_A, title: 'Contended Meeting 2' },
+      });
+      const realStore2 = createFirebaseAttachmentMetadataStore({ getDb: () => fakeDb2 as any });
+      let releaseTx1!: () => void;
+      const tx1Waiting = new Promise<void>((r) => {
+        releaseTx1 = r;
+      });
+      let tx1Entered!: () => void;
+      const tx1EnteredPromise = new Promise<void>((r) => {
+        tx1Entered = r;
+      });
+      fakeDb2.setAfterReadHook(async (id) => {
+        if (id === 'tx_1') {
+          tx1Entered();
+          await tx1Waiting;
+        }
+      });
+
+      const deleteP = realStore2.deleteMeetingIfNoAttachments({ uid: USER_A, meetingId: MEETING_A });
+      await tx1EnteredPromise;
+      const createP = realStore2.createUploadIntent(sampleIntent('att_race_1'));
+      const createOutcome = await createP;
+      releaseTx1();
+      const delOutcome = await deleteP;
+
+      assert.equal(createOutcome.outcome, 'created');
+      assert.equal(delOutcome.outcome, 'blocked_pending_intents');
+      assert.equal(fakeDb2.docsMap.has(meetingPath), true);
+      assert.equal(fakeDb2.docsMap.has(intentPath), true);
+      assert.equal(fakeDb2.docsMap.get(guardPath)?.locked, true);
+    }
+
+    // 20d & 20e & 20f. End-to-end HTTP multi-instance tests across presign-upload, complete-upload, cleanup, and /api/meetings/delete
+    const ctx = createMockTestServer();
+    ctx.meetingsOwned.set('meet_del_first', { uid: USER_A, title: 'حذف أولاً' });
+    ctx.meetingsOwned.set('meet_http_race_del_wins', { uid: USER_A, title: 'سباق تزامن 1' });
+    ctx.meetingsOwned.set('meet_http_race_upload_wins', { uid: USER_A, title: 'سباق تزامن 2' });
+
+    await withServer(ctx.app, async (baseUrl) => {
+      // Delete attachment-free meeting first, then attempt upload -> rejected with Arabic error, no orphan
+      const delEmptyRes = await fetch(`${baseUrl}/api/meetings/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({ meetingId: 'meet_del_first' }),
+      });
+      assert.equal(delEmptyRes.status, 200);
+      assert.equal(ctx.meetingsOwned.has('meet_del_first'), false);
+
+      const uploadAfterDelRes = await fetch(`${baseUrl}/api/attachments/presign-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({
+          meetingId: 'meet_del_first',
+          fileName: 'late.pdf',
+          contentType: 'application/pdf',
+          sizeBytes: PDF_HEADER.byteLength,
+        }),
+      });
+      assert.equal(uploadAfterDelRes.status >= 400, true);
+      const uploadAfterDelBody = (await uploadAfterDelRes.json()) as any;
+      assert.match(uploadAfterDelBody.messageArabic, /اللقاء غير موجود|تم حذفه/);
+      assert.equal(ctx.guards.has(`${USER_A}:meet_del_first`), false);
+
+      // HTTP Race 1: Instance 1 passes verifyMeetingOwner, pauses before createUploadIntent; Instance 2 deletes meeting first -> 404 MEETING_NOT_FOUND
+      let allowCreateTx!: () => void;
+      const waitCreateTx = new Promise<void>((r) => {
+        allowCreateTx = r;
+      });
+      let createPaused!: () => void;
+      const waitCreatePaused = new Promise<void>((r) => {
+        createPaused = r;
+      });
+      ctx.setBeforeCreateIntentHook(async () => {
+        createPaused();
+        await waitCreateTx;
+      });
+
+      const presignRacePromise = fetch(`${baseUrl}/api/attachments/presign-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({
+          meetingId: 'meet_http_race_del_wins',
+          fileName: 'race1.pdf',
+          contentType: 'application/pdf',
+          sizeBytes: PDF_HEADER.byteLength,
+        }),
+      });
+      await waitCreatePaused;
+      ctx.setBeforeCreateIntentHook(null);
+
+      const concurrentDelRes = await fetch(`${baseUrl}/api/meetings/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({ meetingId: 'meet_http_race_del_wins' }),
+      });
+      assert.equal(concurrentDelRes.status, 200);
+      allowCreateTx();
+
+      const presignRaceRes = await presignRacePromise;
+      assert.equal(presignRaceRes.status, 404);
+      const presignRaceBody = (await presignRaceRes.json()) as any;
+      assert.equal(presignRaceBody.error, 'MEETING_NOT_FOUND');
+      assert.match(presignRaceBody.messageArabic, /اللقاء غير موجود أو تم حذفه/);
+      assert.equal(ctx.guards.has(`${USER_A}:meet_http_race_del_wins`), false);
+      for (const k of ctx.uploadIntents.keys()) {
+        assert.equal(k.includes('meet_http_race_del_wins'), false, 'Zero orphan UploadIntents');
+      }
+
+      // HTTP Race 2: Instance 1 pauses right before deleteMeetingIfNoAttachments; Instance 2 creates UploadIntent -> Instance 1 blocked (409)
+      let allowDeleteTx!: () => void;
+      const waitDeleteTx = new Promise<void>((r) => {
+        allowDeleteTx = r;
+      });
+      let deletePaused!: () => void;
+      const waitDeletePaused = new Promise<void>((r) => {
+        deletePaused = r;
+      });
+      ctx.setBeforeDeleteMeetingHook(async () => {
+        deletePaused();
+        await waitDeleteTx;
+      });
+
+      const delRacePromise = fetch(`${baseUrl}/api/meetings/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({ meetingId: 'meet_http_race_upload_wins' }),
+      });
+      await waitDeletePaused;
+      ctx.setBeforeDeleteMeetingHook(null);
+
+      const presignWinRes = await fetch(`${baseUrl}/api/instance2/attachments/presign-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({
+          meetingId: 'meet_http_race_upload_wins',
+          fileName: 'race2.pdf',
+          contentType: 'application/pdf',
+          sizeBytes: PDF_HEADER.byteLength,
+        }),
+      });
+      assert.equal(presignWinRes.status, 200);
+      const presignWinBody = (await presignWinRes.json()) as any;
+
+      allowDeleteTx();
+      const delRaceRes = await delRacePromise;
+      assert.equal(delRaceRes.status, 409);
+      const delRaceBody = (await delRaceRes.json()) as any;
+      assert.equal(delRaceBody.error, 'MEETING_HAS_PENDING_ATTACHMENTS');
+      assert.equal(ctx.meetingsOwned.has('meet_http_race_upload_wins'), true);
+
+      // Complete upload, delete attachment, then delete meeting cleanly (verifies complete lifecycle)
+      ctx.b2Objects.set(presignWinBody.storageKey, {
+        sizeBytes: PDF_HEADER.byteLength,
+        contentType: 'application/pdf',
+        headerBytes: PDF_HEADER,
+        etag: 'e-race2',
+      });
+      const completeWinRes = await fetch(`${baseUrl}/api/attachments/complete-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({
+          meetingId: 'meet_http_race_upload_wins',
+          attachmentId: presignWinBody.attachmentId,
+          fileName: 'race2.pdf',
+          contentType: 'application/pdf',
+          sizeBytes: PDF_HEADER.byteLength,
+        }),
+      });
+      assert.equal(completeWinRes.status, 200);
+
+      const delAttWinRes = await fetch(`${baseUrl}/api/attachments/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({
+          meetingId: 'meet_http_race_upload_wins',
+          attachmentId: presignWinBody.attachmentId,
+        }),
+      });
+      assert.equal(delAttWinRes.status, 200);
+
+      const delMeetingAfterCleanupRes = await fetch(`${baseUrl}/api/meetings/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer token-alice' },
+        body: JSON.stringify({ meetingId: 'meet_http_race_upload_wins' }),
+      });
+      assert.equal(delMeetingAfterCleanupRes.status, 200);
+      assert.equal(ctx.meetingsOwned.has('meet_http_race_upload_wins'), false);
+    });
   });
 });

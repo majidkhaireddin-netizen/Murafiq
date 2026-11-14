@@ -494,7 +494,21 @@ export function createAttachmentsRouter(customDeps: AttachmentsRouterDeps = {}) 
         updatedAt: nowIso,
       };
 
-      await metadataStore.createUploadIntent(intent);
+      const createIntentResult = await metadataStore.createUploadIntent(intent);
+      if (createIntentResult.outcome === 'meeting_not_found') {
+        res.status(404).json({
+          error: 'MEETING_NOT_FOUND',
+          messageArabic: 'تعذر بدء رفع المرفق لأن اللقاء غير موجود أو تم حذفه.',
+        });
+        return;
+      }
+      if (createIntentResult.outcome === 'forbidden') {
+        res.status(403).json({
+          error: 'MEETING_ACCESS_DENIED',
+          messageArabic: 'مرفوض: لا تملك صلاحية إضافة مرفقات إلى هذا اللقاء.',
+        });
+        return;
+      }
 
       const presigned = await storage.createPresignedUploadUrl({
         key: storageKey,

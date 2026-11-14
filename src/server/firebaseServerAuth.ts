@@ -464,12 +464,16 @@ export interface DeleteMeetingOutcome {
   outcome: 'deleted' | 'not_found' | 'blocked_attachments' | 'blocked_pending_intents';
 }
 
+export interface CreateUploadIntentResult {
+  outcome: 'created' | 'meeting_not_found' | 'forbidden';
+}
+
 /**
  * Trusted Server-Side Attachment Metadata & Upload Intent Store.
  * Backed by Firebase Admin SDK targeting ONLY the named Firestore database.
  */
 export interface AttachmentMetadataStore {
-  createUploadIntent(intent: UploadIntentRecord): Promise<void>;
+  createUploadIntent(intent: UploadIntentRecord): Promise<CreateUploadIntentResult>;
   getUploadIntent(params: {
     uid: string;
     meetingId: string;
@@ -624,16 +628,37 @@ function buildUpdatedGuardRecord(params: {
   };
 }
 
-export function createFirebaseAttachmentMetadataStore(): AttachmentMetadataStore {
+export interface FirebaseAttachmentMetadataStoreDeps {
+  getDb?: () => ReturnType<typeof getNamedAdminFirestore>;
+}
+
+export function createFirebaseAttachmentMetadataStore(
+  deps: FirebaseAttachmentMetadataStoreDeps = {}
+): AttachmentMetadataStore {
+  const resolveDb = deps.getDb ?? getNamedAdminFirestore;
   return {
-    async createUploadIntent(intent: UploadIntentRecord): Promise<void> {
+    async createUploadIntent(intent: UploadIntentRecord): Promise<CreateUploadIntentResult> {
       try {
-        const db = getNamedAdminFirestore();
+        const db = resolveDb();
+        const meetingRef = db.doc(meetingDocPath(intent.userId, intent.meetingId));
         const intentRef = db.doc(intentDocPath(intent.userId, intent.meetingId, intent.attachmentId));
         const guardRef = db.doc(guardDocPath(intent.userId, intent.meetingId));
 
-        await db.runTransaction(async (tx) => {
-          const guardSnap = await tx.get(guardRef);
+        return await db.runTransaction(async (tx) => {
+          const [meetingSnap, guardSnap] = await Promise.all([
+            tx.get(meetingRef),
+            tx.get(guardRef),
+          ]);
+
+          if (!meetingSnap.exists) {
+            return { outcome: 'meeting_not_found' as const };
+          }
+
+          const meetingData = meetingSnap.data() as { userId?: string } | undefined;
+          if (meetingData?.userId && meetingData.userId !== intent.userId) {
+            return { outcome: 'forbidden' as const };
+          }
+
           const nextGuard = buildUpdatedGuardRecord({
             existing: guardSnap.exists ? (guardSnap.data() as MeetingAttachmentGuardRecord) : undefined,
             uid: intent.userId,
@@ -643,6 +668,8 @@ export function createFirebaseAttachmentMetadataStore(): AttachmentMetadataStore
           });
           tx.set(intentRef, stripUndefinedFields(intent));
           tx.set(guardRef, nextGuard);
+
+          return { outcome: 'created' as const };
         });
       } catch (err) {
         rethrowIfAdminUnavailable(err);
@@ -1256,7 +1283,7 @@ export function createFirebaseAttachmentMetadataStore(): AttachmentMetadataStore
 
     async deleteMeetingIfNoAttachments({ uid, meetingId }): Promise<DeleteMeetingOutcome> {
       try {
-        const db = getNamedAdminFirestore();
+        const db = resolveDb();
         const meetingRef = db.doc(meetingDocPath(uid, meetingId));
         const guardRef = db.doc(guardDocPath(uid, meetingId));
         const attCol = db.collection(`users/${uid}/meetings/${meetingId}/attachments`);
