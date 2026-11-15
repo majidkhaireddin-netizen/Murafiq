@@ -45,6 +45,7 @@ import {
   Opportunity,
   OpportunityStageEvent,
   CommunicationInteraction,
+  ConflictItem,
   PlaybookTemplate,
   PlaybookRun,
 } from '../types';
@@ -77,9 +78,11 @@ import {
 } from '../utils/calendarEngine';
 import {
   applyAtomicStepToTaskInTransactionState,
+  applyPlaybookRunCasSaveInTransactionState,
   AtomicStepTaskCreationInput,
   AtomicStepTaskCreationOutcome,
   PlaybookAtomicPersistencePort,
+  PlaybookRunCasSaveOutcome,
   sanitizePlaybookRunForSave,
   sanitizePlaybookTemplateForSave,
 } from '../utils/playbookEngine';
@@ -1419,7 +1422,89 @@ export function subscribePlaybookRuns(
   );
 }
 
-export function savePlaybookRun(run: PlaybookRun): QueuedWriteHandle {
+export class PlaybookRevisionConflictError extends Error {
+  readonly code = 'failed-precondition';
+  readonly casCode: 'CONFLICT' | 'MISSING_ON_SERVER';
+  readonly serverRun?: PlaybookRun;
+  readonly localDraft: PlaybookRun;
+  readonly conflict?: ConflictItem;
+
+  constructor(outcome: PlaybookRunCasSaveOutcome) {
+    super(
+      outcome.errorAr ||
+        'تم تعديل خطة المتابعة من جهاز آخر بإصدار أحدث. تم الاحتفاظ بمسودتك للمراجعة اليدوية.'
+    );
+    this.name = 'PlaybookRevisionConflictError';
+    this.casCode = outcome.code === 'MISSING_ON_SERVER' ? 'MISSING_ON_SERVER' : 'CONFLICT';
+    this.serverRun = outcome.serverRun;
+    this.localDraft = outcome.localDraft!;
+    this.conflict = outcome.conflict;
+  }
+}
+
+const playbookCasChainByRunKey = new Map<string, Promise<unknown>>();
+
+/**
+ * Atomically saves a PlaybookRun using Optimistic Concurrency Control (Compare-and-Swap)
+ * via Firestore `runTransaction`.
+ * - Verifies current server `revision` matches `expectedBaseRevision` before committing `serverRev + 1`.
+ * - On divergence, aborts the write cleanly without overwriting newer server edits and returns
+ *   `{ ok: false, code: 'CONFLICT', serverRun, localDraft, conflict }`.
+ * - Serializes overlapping local saves per `(uid, runId)` to avoid self-races on rapid clicks.
+ */
+export async function savePlaybookRunAtomic(
+  run: PlaybookRun,
+  options?: {
+    expectedBaseRevision?: number;
+    dbOverride?: Firestore;
+    userIdOverride?: string;
+  }
+): Promise<PlaybookRunCasSaveOutcome> {
+  const uid = options?.userIdOverride || getAuthenticatedUid();
+  const targetDb = options?.dbOverride || db;
+  const chainKey = `${options?.dbOverride ? 'custom' : 'default'}:${uid}:${run.id}`;
+
+  const execute = async (): Promise<PlaybookRunCasSaveOutcome> => {
+    const nowIso = new Date().toISOString();
+    const runRef = doc(targetDb, 'users', uid, 'playbookRuns', run.id);
+
+    return runTransaction(targetDb, async (tx) => {
+      const serverSnap = await tx.get(runRef);
+      const serverRun = serverSnap.exists() ? (serverSnap.data() as PlaybookRun) : undefined;
+
+      const outcome = applyPlaybookRunCasSaveInTransactionState({
+        input: {
+          userId: uid,
+          nextRun: run,
+          expectedBaseRevision: options?.expectedBaseRevision,
+          nowIso,
+        },
+        serverRun,
+      });
+
+      if (!outcome.ok || !outcome.nextRunToWrite) {
+        return outcome;
+      }
+
+      const cleanPayload = sanitizeFirestorePayload(
+        sanitizePlaybookRunForSave(outcome.nextRunToWrite, uid)
+      );
+      tx.set(runRef, cleanPayload);
+
+      return outcome;
+    });
+  };
+
+  const previous = playbookCasChainByRunKey.get(chainKey) ?? Promise.resolve();
+  const currentPromise = previous.then(execute, execute);
+  playbookCasChainByRunKey.set(chainKey, currentPromise.catch(() => undefined));
+  return currentPromise;
+}
+
+export function savePlaybookRun(
+  run: PlaybookRun,
+  options?: { expectedBaseRevision?: number }
+): QueuedWriteHandle {
   const uid = getAuthenticatedUid();
   const now = new Date().toISOString();
   const rawPayload = sanitizePlaybookRunForSave(
@@ -1432,10 +1517,22 @@ export function savePlaybookRun(run: PlaybookRun): QueuedWriteHandle {
     uid
   );
   const path = `users/${uid}/playbookRuns/${rawPayload.id}`;
-  const payload = sanitizeFirestorePayload(rawPayload);
   const serverPromise = trackInFlightWrite(
-    setDoc(doc(db, 'users', uid, 'playbookRuns', rawPayload.id), payload).catch((error) =>
-      handleFirestoreError(error, OperationType.WRITE, path)
+    savePlaybookRunAtomic(rawPayload, { expectedBaseRevision: options?.expectedBaseRevision }).then(
+      (outcome) => {
+        if (!outcome.ok) {
+          if (outcome.code === 'CONFLICT' || outcome.code === 'MISSING_ON_SERVER') {
+            throw new PlaybookRevisionConflictError(outcome);
+          }
+          throw new Error(outcome.errorAr || 'تعذر حفظ خطة المتابعة.');
+        }
+      },
+      (error) => {
+        if (error instanceof PlaybookRevisionConflictError) {
+          throw error;
+        }
+        handleFirestoreError(error, OperationType.WRITE, path);
+      }
     )
   );
   return { localAccepted: true, path, serverPromise };
@@ -1457,9 +1554,13 @@ export function deletePlaybookRun(runId: string): QueuedWriteHandle {
  * Guarantees idempotency on retry and concurrent calls without overwriting user edits.
  */
 export async function createTaskFromPlaybookStepAtomic(
-  input: AtomicStepTaskCreationInput
+  input: AtomicStepTaskCreationInput,
+  options?: {
+    dbOverride?: Firestore;
+    userIdOverride?: string;
+  }
 ): Promise<AtomicStepTaskCreationOutcome> {
-  const uid = getAuthenticatedUid();
+  const uid = options?.userIdOverride || getAuthenticatedUid();
   if (input.userId !== uid) {
     return {
       ok: false,
@@ -1468,79 +1569,90 @@ export async function createTaskFromPlaybookStepAtomic(
     };
   }
 
-  const runRef = doc(db, 'users', uid, 'playbookRuns', input.runId);
-  const detTaskRef = doc(db, 'users', uid, 'tasks', input.deterministicTaskId);
+  const targetDb = options?.dbOverride || db;
+  const runRef = doc(targetDb, 'users', uid, 'playbookRuns', input.runId);
+  const detTaskRef = doc(targetDb, 'users', uid, 'tasks', input.deterministicTaskId);
+  const chainKey = `${options?.dbOverride ? 'custom' : 'default'}:${uid}:${input.runId}`;
 
-  try {
-    return await runTransaction(db, async (tx) => {
-      const [runSnap, detTaskSnap] = await Promise.all([tx.get(runRef), tx.get(detTaskRef)]);
-      const serverRun = runSnap.exists() ? (runSnap.data() as PlaybookRun) : undefined;
-      const serverTaskByDeterministicId = detTaskSnap.exists()
-        ? decodeTaskTimeBlockFromFirestore(detTaskSnap.data() as Record<string, any>)
-        : undefined;
-
-      let serverLinkedTask: ActionItem | undefined = serverTaskByDeterministicId;
-      const serverStep = serverRun?.steps?.find((s) => s.id === input.stepId);
-      if (
-        serverStep?.linkedTaskId &&
-        serverStep.linkedTaskId !== input.deterministicTaskId
-      ) {
-        const linkedTaskSnap = await tx.get(
-          doc(db, 'users', uid, 'tasks', serverStep.linkedTaskId)
-        );
-        serverLinkedTask = linkedTaskSnap.exists()
-          ? decodeTaskTimeBlockFromFirestore(linkedTaskSnap.data() as Record<string, any>)
+  const execute = async (): Promise<AtomicStepTaskCreationOutcome> => {
+    try {
+      return await runTransaction(targetDb, async (tx) => {
+        const [runSnap, detTaskSnap] = await Promise.all([tx.get(runRef), tx.get(detTaskRef)]);
+        const serverRun = runSnap.exists() ? (runSnap.data() as PlaybookRun) : undefined;
+        const serverTaskByDeterministicId = detTaskSnap.exists()
+          ? decodeTaskTimeBlockFromFirestore(detTaskSnap.data() as Record<string, any>)
           : undefined;
-      }
 
-      const outcome = applyAtomicStepToTaskInTransactionState({
-        input,
-        serverRun,
-        serverTaskByDeterministicId,
-        serverLinkedTask,
+        let serverLinkedTask: ActionItem | undefined = serverTaskByDeterministicId;
+        const serverStep = serverRun?.steps?.find((s) => s.id === input.stepId);
+        if (
+          serverStep?.linkedTaskId &&
+          serverStep.linkedTaskId !== input.deterministicTaskId
+        ) {
+          const linkedTaskSnap = await tx.get(
+            doc(targetDb, 'users', uid, 'tasks', serverStep.linkedTaskId)
+          );
+          serverLinkedTask = linkedTaskSnap.exists()
+            ? decodeTaskTimeBlockFromFirestore(linkedTaskSnap.data() as Record<string, any>)
+            : undefined;
+        }
+
+        const outcome = applyAtomicStepToTaskInTransactionState({
+          input,
+          serverRun,
+          serverTaskByDeterministicId,
+          serverLinkedTask,
+        });
+
+        if (!outcome.ok) {
+          return outcome;
+        }
+
+        if (outcome.nextTaskToCreate) {
+          const cleanTask = sanitizeFirestorePayload(
+            sanitizeTaskForFirestoreSave({
+              ...outcome.nextTaskToCreate,
+              userId: uid,
+            })
+          );
+          tx.set(detTaskRef, cleanTask);
+        }
+
+        if (outcome.nextRunToSave) {
+          const cleanRun = sanitizeFirestorePayload(
+            sanitizePlaybookRunForSave(outcome.nextRunToSave, uid)
+          );
+          tx.set(runRef, cleanRun);
+        }
+
+        return {
+          ok: true,
+          alreadyExisted: outcome.alreadyExisted,
+          task: outcome.task,
+          run: outcome.run,
+        };
       });
-
-      if (!outcome.ok) {
-        return outcome;
+    } catch (error) {
+      if (!options?.dbOverride) {
+        logFirestoreError(error, OperationType.WRITE, `users/${uid}/playbookRuns/${input.runId}`);
       }
-
-      if (outcome.nextTaskToCreate) {
-        const cleanTask = sanitizeFirestorePayload(
-          sanitizeTaskForFirestoreSave({
-            ...outcome.nextTaskToCreate,
-            userId: uid,
-          })
-        );
-        tx.set(detTaskRef, cleanTask);
-      }
-
-      if (outcome.nextRunToSave) {
-        const cleanRun = sanitizeFirestorePayload(
-          sanitizePlaybookRunForSave(outcome.nextRunToSave, uid)
-        );
-        tx.set(runRef, cleanRun);
-      }
-
       return {
-        ok: true,
-        alreadyExisted: outcome.alreadyExisted,
-        task: outcome.task,
-        run: outcome.run,
+        ok: false,
+        code: 'TRANSACTION_FAILED',
+        errorAr:
+          'تعذر إتمام التحويل الذري للمهمة عبر الخادم حاليًا. لم تُنشأ أي نسخة مكررة، يرجى التحقق من الاتصال والمحاولة مرة أخرى.',
       };
-    });
-  } catch (error) {
-    logFirestoreError(error, OperationType.WRITE, `users/${uid}/playbookRuns/${input.runId}`);
-    return {
-      ok: false,
-      code: 'TRANSACTION_FAILED',
-      errorAr:
-        'تعذر إتمام التحويل الذري للمهمة عبر الخادم حاليًا. لم تُنشأ أي نسخة مكررة، يرجى التحقق من الاتصال والمحاولة مرة أخرى.',
-    };
-  }
+    }
+  };
+
+  const previous = playbookCasChainByRunKey.get(chainKey) ?? Promise.resolve();
+  const currentPromise = previous.then(execute, execute);
+  playbookCasChainByRunKey.set(chainKey, currentPromise.catch(() => undefined));
+  return currentPromise;
 }
 
 export const firestorePlaybookAtomicAdapter: PlaybookAtomicPersistencePort = {
-  runAtomicStepToTask: createTaskFromPlaybookStepAtomic,
+  runAtomicStepToTask: (input) => createTaskFromPlaybookStepAtomic(input),
 };
 
 

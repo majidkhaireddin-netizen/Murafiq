@@ -12,6 +12,9 @@ import {
   BUILTIN_PLAYBOOK_TEMPLATES,
   MAX_PLAYBOOK_STEPS,
   STEP_DEPENDENCY_PLACEHOLDER_AR,
+  PlaybookOfflineSyncQueue,
+  applyAtomicStepToTaskInTransactionState,
+  applyPlaybookRunCasSaveInTransactionState,
   buildPlaybookStepTaskId,
   cancelPlaybookRun,
   checkPlaybookRunRevisionConflict,
@@ -22,6 +25,7 @@ import {
   computeStepDueDateForRun,
   createCustomPlaybookTemplate,
   createInMemoryPlaybookAtomicAdapter,
+  createInMemoryPlaybookCasAndAtomicBackend,
   executeAtomicStepTaskConversion,
   findPlaybookTemplateById,
   getAllAvailablePlaybookTemplates,
@@ -39,6 +43,8 @@ import {
   updateCustomPlaybookTemplate,
   updatePlaybookStepDueDate,
 } from '../src/utils/playbookEngine.ts';
+import { resolveConflictRecord } from '../src/utils/conflictLogic.ts';
+import { computeDetailedSyncSummary, CollectionKey, CollectionSyncStatus } from '../src/utils/syncLogic.ts';
 import {
   DEFAULT_CALENDAR_SETTINGS,
   buildCalendarEvents,
@@ -1239,4 +1245,567 @@ test('35–37. Data portability exports custom templates & owned runs cleanly, b
   assert.deepEqual(savedTemplates, ['pb_tpl_imported_ok']);
   assert.deepEqual(savedRuns, ['run_imp_unlinked_opp']);
 });
+
+// =========================================================================
+// Task 013-Fix-01: Cross-Device Playbook Revision Integrity & Atomic Task Safety
+// =========================================================================
+
+function buildAllLoadedSyncStatuses(
+  overrides: Partial<Record<CollectionKey, Partial<CollectionSyncStatus>>> = {}
+): Record<CollectionKey, CollectionSyncStatus> {
+  const base: CollectionSyncStatus = {
+    loaded: true,
+    hasPendingWrites: false,
+    fromCache: false,
+    hasError: false,
+    pendingDocIds: [],
+    pendingDeletesCount: 0,
+  };
+  const keys: CollectionKey[] = [
+    'clients',
+    'meetings',
+    'tasks',
+    'notes',
+    'opportunities',
+    'opportunityStageEvents',
+    'interactions',
+    'reminders',
+    'preferences',
+    'playbookTemplates',
+    'playbookRuns',
+  ];
+  const map = {} as Record<CollectionKey, CollectionSyncStatus>;
+  for (const k of keys) {
+    map[k] = { ...base, ...(overrides[k] || {}) };
+  }
+  return map;
+}
+
+// 40 (F.1). تعديلان متزامنان من جهازين على خطوتين مختلفتين لنفس الخطة من نفس revision=1
+test('40. Task 013-Fix-01 (F.1): Rejects stale CAS save when two devices edit different steps from revision=1, prevents Lost Update, and merges both steps cleanly', async () => {
+  const client = makeClient();
+  const initialRun = startPlaybookRun({
+    id: 'run_cas_diff_steps',
+    userId: USER_A,
+    template: BUILTIN_PLAYBOOK_TEMPLATES[0],
+    client,
+    startDateKey: '2026-10-01',
+    nowIso: '2026-10-01T08:00:00.000Z',
+  }).run!;
+  assert.equal(initialRun.revision, 1);
+
+  const backend = createInMemoryPlaybookCasAndAtomicBackend({ runs: [initialRun] });
+
+  // Device A & Device B both start from revision=1
+  const deviceARead = { ...initialRun, steps: initialRun.steps.map((s) => ({ ...s })) };
+  const deviceBRead = { ...initialRun, steps: initialRun.steps.map((s) => ({ ...s })) };
+
+  // Device A completes Step 1 and saves against baseRevision=1 -> succeeds as revision=2
+  const devAMut = completePlaybookStep({
+    run: deviceARead,
+    stepId: deviceARead.steps[0].id,
+    completedAtIso: '2026-10-01T09:00:00.000Z',
+  }).run!;
+  const saveA = await backend.savePlaybookRunCas({
+    userId: USER_A,
+    nextRun: devAMut,
+    expectedBaseRevision: 1,
+    nowIso: '2026-10-01T09:00:00.000Z',
+  });
+  assert.equal(saveA.ok, true);
+  assert.equal(saveA.code, 'UPDATED');
+  assert.equal(saveA.savedRun!.revision, 2);
+
+  // Device B completes Step 2 based on revision=1 -> MUST fail with CONFLICT (never overwrite Step 1!)
+  const devBMut = completePlaybookStep({
+    run: deviceBRead,
+    stepId: deviceBRead.steps[1].id,
+    completedAtIso: '2026-10-01T09:05:00.000Z',
+  }).run!;
+  const saveB = await backend.savePlaybookRunCas({
+    userId: USER_A,
+    nextRun: devBMut,
+    expectedBaseRevision: 1,
+    nowIso: '2026-10-01T09:05:00.000Z',
+  });
+
+  assert.equal(saveB.ok, false);
+  assert.equal(saveB.code, 'CONFLICT');
+  assert.ok(saveB.serverRun);
+  assert.ok(saveB.localDraft);
+  assert.ok(saveB.conflict);
+  assert.equal(saveB.conflict!.detectionSource, 'revision_cas');
+
+  // Server still holds Device A's revision=2 untouched
+  const serverAfterReject = backend.getRuns().find((r) => r.id === initialRun.id)!;
+  assert.equal(serverAfterReject.revision, 2);
+  assert.equal(serverAfterReject.steps[0].status, 'completed');
+  assert.equal(serverAfterReject.steps[1].status, 'pending');
+
+  // Device B's draft was NOT marked synced
+  const conflictSyncSummary = computeDetailedSyncSummary({
+    statuses: buildAllLoadedSyncStatuses({
+      playbookRuns: { hasPendingWrites: true, pendingDocIds: [initialRun.id] },
+    }),
+    hasActiveConflict: true,
+    conflictCount: 1,
+    isOnline: true,
+  });
+  assert.equal(conflictSyncSummary.syncState, 'conflict');
+
+  // Smart merge preserves BOTH Step 1 (Device A) and Step 2 (Device B) and advances cleanly to revision=3
+  const merged = resolveConflictRecord<PlaybookRun>(saveB.conflict!, 'merge');
+  assert.equal(merged.steps[0].status, 'completed');
+  assert.equal(merged.steps[1].status, 'completed');
+  assert.equal(merged.revision, 3);
+
+  const commitMerged = await backend.savePlaybookRunCas({
+    userId: USER_A,
+    nextRun: merged,
+    expectedBaseRevision: saveB.serverRun!.revision,
+    nowIso: '2026-10-01T09:10:00.000Z',
+  });
+  assert.equal(commitMerged.ok, true);
+  assert.equal(commitMerged.savedRun!.revision, 3);
+  assert.equal(commitMerged.savedRun!.steps[0].status, 'completed');
+  assert.equal(commitMerged.savedRun!.steps[1].status, 'completed');
+});
+
+// 41 (F.2). تعديلان متزامنان من جهازين على نفس الخطوة
+test('41. Task 013-Fix-01 (F.2): Concurrent edits to the same step preserve both versions in conflict modal & resolve cleanly with keep_local / keep_remote / merge', async () => {
+  const client = makeClient();
+  const initialRun = startPlaybookRun({
+    id: 'run_cas_same_step',
+    userId: USER_A,
+    template: BUILTIN_PLAYBOOK_TEMPLATES[0],
+    client,
+    startDateKey: '2026-10-02',
+  }).run!;
+  const backend = createInMemoryPlaybookCasAndAtomicBackend({ runs: [initialRun] });
+  const targetStepId = initialRun.steps[0].id;
+
+  const devA = completePlaybookStep({
+    run: initialRun,
+    stepId: targetStepId,
+    note: 'ملاحظة الجهاز أ: العميل وافق مبدئيًا',
+    completedAtIso: '2026-10-02T10:00:00.000Z',
+  }).run!;
+  await backend.savePlaybookRunCas({
+    userId: USER_A,
+    nextRun: devA,
+    expectedBaseRevision: 1,
+    nowIso: '2026-10-02T10:00:00.000Z',
+  });
+
+  const devB = completePlaybookStep({
+    run: initialRun,
+    stepId: targetStepId,
+    note: 'ملاحظة الجهاز ب: طلب إرسال الفاتورة',
+    completedAtIso: '2026-10-02T10:05:00.000Z',
+  }).run!;
+  const saveB = await backend.savePlaybookRunCas({
+    userId: USER_A,
+    nextRun: devB,
+    expectedBaseRevision: 1,
+    nowIso: '2026-10-02T10:05:00.000Z',
+  });
+
+  assert.equal(saveB.ok, false);
+  assert.equal(saveB.code, 'CONFLICT');
+  assert.equal(saveB.localDraft!.steps[0].note, 'ملاحظة الجهاز ب: طلب إرسال الفاتورة');
+  assert.equal(saveB.serverRun!.steps[0].note, 'ملاحظة الجهاز أ: العميل وافق مبدئيًا');
+
+  const mergedSameStep = resolveConflictRecord<PlaybookRun>(saveB.conflict!, 'merge');
+  assert.ok(mergedSameStep.steps[0].note!.includes('الجهاز أ'));
+  assert.ok(mergedSameStep.steps[0].note!.includes('الجهاز ب'));
+  assert.equal(mergedSameStep.revision, 3);
+
+  const keepRemote = resolveConflictRecord<PlaybookRun>(saveB.conflict!, 'keep_remote');
+  assert.equal(keepRemote.steps[0].note, 'ملاحظة الجهاز أ: العميل وافق مبدئيًا');
+  assert.equal(keepRemote.revision, 2);
+
+  const keepLocal = resolveConflictRecord<PlaybookRun>(saveB.conflict!, 'keep_local');
+  assert.equal(keepLocal.steps[0].note, 'ملاحظة الجهاز ب: طلب إرسال الفاتورة');
+  assert.equal(keepLocal.revision, 3);
+});
+
+// 42–45 (F.3, F.4, F.5, F.6). تعديل Offline + تقدم الخادم + مزامنة عند عودة الاتصال + حفظ المسودة + حل التضارب
+test('42–45. Task 013-Fix-01 (F.3–F.6): Offline queue preserves initial baseRevision across multiple offline edits, exposes pending/local state, rejects stale flush safely upon reconnect, preserves draft, and commits approved resolution', async () => {
+  const client = makeClient();
+  const baseRun = startPlaybookRun({
+    id: 'run_offline_cas',
+    userId: USER_A,
+    template: BUILTIN_PLAYBOOK_TEMPLATES[0],
+    client,
+    startDateKey: '2026-10-05',
+  }).run!;
+
+  const backend = createInMemoryPlaybookCasAndAtomicBackend({ runs: [baseRun] });
+
+  // Device A online advances server revision from 1 -> 2
+  const onlineEdit = pausePlaybookRun({
+    run: baseRun,
+    nowIso: '2026-10-05T11:00:00.000Z',
+  }).run!;
+  const commitA = await backend.savePlaybookRunCas({
+    userId: USER_A,
+    nextRun: onlineEdit,
+    expectedBaseRevision: 1,
+    nowIso: '2026-10-05T11:00:00.000Z',
+  });
+  assert.equal(commitA.ok, true);
+  assert.equal(commitA.savedRun!.revision, 2);
+
+  // Device B is offline with revision=1 and edits multiple steps consecutively offline
+  const queueB = new PlaybookOfflineSyncQueue();
+  const offEdit1 = startPlaybookStep({
+    run: baseRun,
+    stepId: baseRun.steps[0].id,
+    nowIso: '2026-10-05T11:02:00.000Z',
+  }).run!;
+  queueB.enqueueDraft({ run: offEdit1, baseRevision: 1, nowIso: '2026-10-05T11:02:00.000Z' });
+
+  const offEdit2 = completePlaybookStep({
+    run: offEdit1,
+    stepId: baseRun.steps[0].id,
+    note: 'تم الإنجاز أوفلاين من الجوال',
+    completedAtIso: '2026-10-05T11:05:00.000Z',
+  }).run!;
+  // Note: offEdit2.revision locally reached 3, so passing baseRevision=2 would happen if naive — queue MUST preserve original baseRevision=1!
+  queueB.enqueueDraft({ run: offEdit2, baseRevision: 2, nowIso: '2026-10-05T11:05:00.000Z' });
+
+  assert.equal(queueB.hasPending(baseRun.id), true);
+  assert.equal(queueB.getEntry(baseRun.id)?.baseRevision, 1);
+
+  // Offline sync indicator MUST report pending / offline (NEVER 'synced')
+  const offlineSyncSummary = computeDetailedSyncSummary({
+    statuses: buildAllLoadedSyncStatuses({
+      playbookRuns: { hasPendingWrites: true, fromCache: true, pendingDocIds: queueB.getPendingRunIds() },
+    }),
+    hasActiveConflict: false,
+    conflictCount: 0,
+    isOnline: false,
+  });
+  assert.notEqual(offlineSyncSummary.syncState, 'synced');
+  assert.ok(offlineSyncSummary.pendingOperationsCount >= 1);
+
+  // Overlaying cached snapshot preserves offline draft visibly
+  const overlaid = queueB.overlayPendingDrafts([onlineEdit]);
+  assert.equal(overlaid[0].steps[0].status, 'completed');
+  assert.equal(overlaid[0].steps[0].note, 'تم الإنجاز أوفلاين من الجوال');
+
+  // Reconnect triggers flushPending -> CAS detects baseRevision=1 vs server revision=2 -> CONFLICT!
+  const flushResults = await queueB.flushPending((input) =>
+    backend.savePlaybookRunCas({
+      userId: USER_A,
+      nextRun: input.nextRun,
+      expectedBaseRevision: input.expectedBaseRevision,
+      nowIso: input.nowIso,
+    })
+  );
+
+  assert.equal(flushResults.length, 1);
+  assert.equal(flushResults[0].outcome.ok, false);
+  assert.equal(flushResults[0].outcome.code, 'CONFLICT');
+
+  const conflict = flushResults[0].outcome.conflict!;
+  assert.ok(conflict);
+  // Draft preserved cleanly inside conflict item for manual decision
+  assert.equal((conflict.localVersion as PlaybookRun).steps[0].note, 'تم الإنجاز أوفلاين من الجوال');
+  assert.equal((conflict.remoteVersion as PlaybookRun).status, 'paused');
+  // Server was NOT overwritten silently
+  assert.equal(backend.getRuns()[0].status, 'paused');
+  assert.equal(backend.getRuns()[0].revision, 2);
+
+  // User approves 'keep_local' -> saves cleanly with expectedBaseRevision=2 -> server commits revision=3
+  const userApproved = resolveConflictRecord<PlaybookRun>(conflict, 'keep_local');
+  const finalSave = await backend.savePlaybookRunCas({
+    userId: USER_A,
+    nextRun: userApproved,
+    expectedBaseRevision: (conflict.remoteVersion as PlaybookRun).revision,
+    nowIso: '2026-10-05T11:20:00.000Z',
+  });
+  assert.equal(finalSave.ok, true);
+  assert.equal(finalSave.savedRun!.revision, 3);
+  assert.equal(finalSave.savedRun!.steps[0].note, 'تم الإنجاز أوفلاين من الجوال');
+});
+
+// 46 (F.7). تزامن تعديل الخطة مع تحويل خطوة إلى مهمة ذرية (Racing CAS edit + Atomic Task Creation)
+test('46. Task 013-Fix-01 (F.7): Races between plan revision edits and atomic step-to-task conversion are serialized cleanly without duplicates or lost edits', async () => {
+  const client = makeClient();
+  const initialRun = startPlaybookRun({
+    id: 'run_race_atomic',
+    userId: USER_A,
+    template: BUILTIN_PLAYBOOK_TEMPLATES[0],
+    client,
+    startDateKey: '2026-10-06',
+  }).run!;
+
+  const backend = createInMemoryPlaybookCasAndAtomicBackend({ runs: [initialRun] });
+
+  // Concurrent call 1 advances run revision 1 -> 2 (updating step 1)
+  const runRevisionUpdate = startPlaybookStep({
+    run: initialRun,
+    stepId: initialRun.steps[0].id,
+    nowIso: '2026-10-06T09:00:00.000Z',
+  }).run!;
+
+  const [casRes, atomicRes] = await Promise.all([
+    backend.savePlaybookRunCas({
+      userId: USER_A,
+      nextRun: runRevisionUpdate,
+      expectedBaseRevision: 1,
+      nowIso: '2026-10-06T09:00:00.000Z',
+    }),
+    executeAtomicStepTaskConversion(
+      {
+        userId: USER_A,
+        run: initialRun, // stale expectedRunRevision=1!
+        stepId: initialRun.steps[1].id,
+        isOnline: true,
+        nowIso: '2026-10-06T09:00:01.000Z',
+      },
+      backend
+    ),
+  ]);
+
+  assert.equal(casRes.ok, true);
+  assert.equal(casRes.savedRun!.revision, 2);
+  // Stale atomic conversion sees server revision=2 > expectedRunRevision=1 -> rejects safely without duplicate task or overwriting Step 1!
+  assert.equal(atomicRes.ok, false);
+  assert.equal(atomicRes.code, 'REVISION_CONFLICT');
+  assert.equal(backend.getTasks().length, 0);
+  assert.equal(backend.getRuns()[0].steps[0].status, 'in_progress');
+});
+
+// 47 (F.8). إعادة المحاولة بعد فقدان الاستجابة تحافظ على تعديلات المستخدم في المهمة الموجودة
+test('47. Task 013-Fix-01 (F.8): Retry after lost server response recovers existing task without overwriting user edits and repairs step link if needed', async () => {
+  const client = makeClient();
+  const run = startPlaybookRun({
+    id: 'run_retry_atomic',
+    userId: USER_A,
+    template: BUILTIN_PLAYBOOK_TEMPLATES[0],
+    client,
+    startDateKey: '2026-10-07',
+  }).run!;
+
+  const stepId = run.steps[0].id;
+  const detTaskId = buildPlaybookStepTaskId(run.id, stepId);
+
+  // Task was created on server and user already edited its title & priority, while step link needs repair or retry
+  const userEditedTask: ActionItem = {
+    id: detTaskId,
+    userId: USER_A,
+    clientId: client.id,
+    playbookRunId: run.id,
+    playbookStepId: stepId,
+    title: 'عنوان معدّل من المستخدم - لا تستبدله',
+    priority: 'urgent',
+    dueDate: '2026-10-12',
+    status: 'in_progress',
+    createdAt: '2026-10-07T08:00:00.000Z',
+  };
+
+  const backend = createInMemoryPlaybookCasAndAtomicBackend({
+    runs: [run],
+    tasks: [userEditedTask],
+  });
+
+  const retryRes = await executeAtomicStepTaskConversion(
+    {
+      userId: USER_A,
+      run,
+      stepId,
+      isOnline: true,
+      titleOverride: 'عنوان افتراضي قديم',
+      priorityOverride: 'low',
+    },
+    backend
+  );
+
+  assert.equal(retryRes.ok, true);
+  assert.equal(retryRes.alreadyExisted, true);
+  assert.equal(retryRes.task!.id, detTaskId);
+  assert.equal(retryRes.task!.title, 'عنوان معدّل من المستخدم - لا تستبدله');
+  assert.equal(retryRes.task!.priority, 'urgent');
+  assert.equal(backend.getTasks().length, 1);
+  assert.equal(backend.getRuns()[0].steps[0].linkedTaskId, detTaskId);
+});
+
+// 48 (F.9). منع إنشاء مهمة جديدة لخطوة completed أو skipped (مع بقاء استرداد المهمة المرتبطة مسبقًا متاحًا)
+test('48. Task 013-Fix-01 (F.9): Blocks creating new task for completed or skipped steps (STEP_CLOSED) while permitting safe recovery of an already-linked task', async () => {
+  const client = makeClient();
+  let run = startPlaybookRun({
+    id: 'run_closed_step_guard',
+    userId: USER_A,
+    template: BUILTIN_PLAYBOOK_TEMPLATES[0],
+    client,
+    startDateKey: '2026-10-08',
+  }).run!;
+
+  run = completePlaybookStep({
+    run,
+    stepId: run.steps[0].id,
+    completedAtIso: '2026-10-08T10:00:00.000Z',
+  }).run!;
+  run = skipPlaybookStep({
+    run,
+    stepId: run.steps[1].id,
+    nowIso: '2026-10-08T10:05:00.000Z',
+  }).run!;
+
+  const backend = createInMemoryPlaybookCasAndAtomicBackend({ runs: [run] });
+
+  // Client validation guard blocks completed step
+  const completedRes = await executeAtomicStepTaskConversion(
+    { userId: USER_A, run, stepId: run.steps[0].id, isOnline: true },
+    backend
+  );
+  assert.equal(completedRes.ok, false);
+  assert.equal(completedRes.code, 'STEP_CLOSED');
+
+  // Client validation guard blocks skipped step
+  const skippedRes = await executeAtomicStepTaskConversion(
+    { userId: USER_A, run, stepId: run.steps[1].id, isOnline: true },
+    backend
+  );
+  assert.equal(skippedRes.ok, false);
+  assert.equal(skippedRes.code, 'STEP_CLOSED');
+  assert.equal(backend.getTasks().length, 0);
+
+  // Server transaction state ALSO blocks even if client sends stale unclosed run snapshot
+  const txCompleted = applyAtomicStepToTaskInTransactionState({
+    input: {
+      userId: USER_A,
+      runId: run.id,
+      stepId: run.steps[0].id,
+      deterministicTaskId: buildPlaybookStepTaskId(run.id, run.steps[0].id),
+      title: 'مهمة ممنوعة لخطوة مكتملة',
+      priority: 'medium',
+      nowIso: '2026-10-08T10:10:00.000Z',
+    },
+    serverRun: run,
+    serverTaskByDeterministicId: undefined,
+    serverLinkedTask: undefined,
+  });
+  assert.equal(txCompleted.ok, false);
+  assert.equal(txCompleted.code, 'STEP_CLOSED');
+
+  // However, if a step ALREADY has linkedTaskId before being completed, idempotent recovery still succeeds safely
+  const linkedTaskId = buildPlaybookStepTaskId(run.id, run.steps[2].id);
+  const existingTask: ActionItem = {
+    id: linkedTaskId,
+    userId: USER_A,
+    clientId: client.id,
+    playbookRunId: run.id,
+    playbookStepId: run.steps[2].id,
+    title: 'مهمة منشأة مسبقًا قبل إكمال الخطوة',
+    priority: 'medium',
+    status: 'completed',
+    createdAt: '2026-10-08T09:00:00.000Z',
+  };
+  const completedLinkedRun: PlaybookRun = {
+    ...run,
+    steps: run.steps.map((s, i) =>
+      i === 2 ? { ...s, status: 'completed', linkedTaskId, completedAt: '2026-10-08T10:30:00.000Z' } : s
+    ),
+  };
+  const recoverTx = applyAtomicStepToTaskInTransactionState({
+    input: {
+      userId: USER_A,
+      runId: completedLinkedRun.id,
+      stepId: completedLinkedRun.steps[2].id,
+      deterministicTaskId: linkedTaskId,
+      title: 'استرداد',
+      priority: 'medium',
+      nowIso: '2026-10-08T10:35:00.000Z',
+    },
+    serverRun: completedLinkedRun,
+    serverTaskByDeterministicId: existingTask,
+    serverLinkedTask: existingTask,
+  });
+  assert.equal(recoverTx.ok, true);
+  assert.equal(recoverTx.alreadyExisted, true);
+  assert.equal(recoverTx.task!.id, linkedTaskId);
+});
+
+// 49 (F.10). رفض ربط مهمة موجودة بنفس المعرف الحتمي إذا اختلفت clientId أو playbookRunId أو playbookStepId
+test('49. Task 013-Fix-01 (F.10): Rejects linking an existing task with matching deterministic ID when clientId, playbookRunId, or playbookStepId mismatches (INCOMPATIBLE_EXISTING_TASK)', async () => {
+  const client = makeClient();
+  const run = startPlaybookRun({
+    id: 'run_compat_check',
+    userId: USER_A,
+    template: BUILTIN_PLAYBOOK_TEMPLATES[0],
+    client,
+    startDateKey: '2026-10-09',
+  }).run!;
+  const stepId = run.steps[0].id;
+  const detTaskId = buildPlaybookStepTaskId(run.id, stepId);
+
+  const wrongClientTask: ActionItem = {
+    id: detTaskId,
+    userId: USER_A,
+    clientId: 'cli_different',
+    playbookRunId: run.id,
+    playbookStepId: stepId,
+    title: 'مهمة تخص عميلًا آخر',
+    priority: 'medium',
+    status: 'pending',
+    createdAt: '2026-10-09T08:00:00.000Z',
+  };
+
+  const wrongRunTask: ActionItem = {
+    id: detTaskId,
+    userId: USER_A,
+    clientId: client.id,
+    playbookRunId: 'other_run_id',
+    playbookStepId: stepId,
+    title: 'مهمة تخص خطة أخرى',
+    priority: 'medium',
+    status: 'pending',
+    createdAt: '2026-10-09T08:00:00.000Z',
+  };
+
+  const wrongStepTask: ActionItem = {
+    id: detTaskId,
+    userId: USER_A,
+    clientId: client.id,
+    playbookRunId: run.id,
+    playbookStepId: 'other_step_id',
+    title: 'مهمة تخص خطوة أخرى',
+    priority: 'medium',
+    status: 'pending',
+    createdAt: '2026-10-09T08:00:00.000Z',
+  };
+
+  for (const incompatibleTask of [wrongClientTask, wrongRunTask, wrongStepTask]) {
+    const backend = createInMemoryPlaybookCasAndAtomicBackend({
+      runs: [run],
+      tasks: [incompatibleTask],
+    });
+    const res = await executeAtomicStepTaskConversion(
+      { userId: USER_A, run, stepId, isOnline: true },
+      backend
+    );
+    assert.equal(res.ok, false);
+    assert.equal(res.code, 'INCOMPATIBLE_EXISTING_TASK');
+    // Unrelated task untouched & step not linked to incompatible task
+    assert.equal(backend.getTasks()[0].title, incompatibleTask.title);
+    assert.equal(backend.getRuns()[0].steps[0].linkedTaskId, undefined);
+  }
+
+  // Also test CAS protection against stale creation if doc already exists on server
+  const dupCreateCheck = applyPlaybookRunCasSaveInTransactionState({
+    input: {
+      userId: USER_A,
+      nextRun: run,
+      expectedBaseRevision: 0,
+      nowIso: '2026-10-09T09:00:00.000Z',
+    },
+    serverRun: { ...run, revision: 2 },
+  });
+  assert.equal(dupCreateCheck.ok, false);
+  assert.equal(dupCreateCheck.code, 'CONFLICT');
+});
+
 

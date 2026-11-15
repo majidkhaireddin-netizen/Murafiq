@@ -66,6 +66,7 @@ import { PlaybookStartModal } from './PlaybookStartModal';
 import { PlaybookTemplateEditorModal } from './PlaybookTemplateEditorModal';
 import {
   AtomicStepTaskCreationOutcome,
+  PlaybookOfflineSyncQueue,
   checkPlaybookRunRevisionConflict,
   executeAtomicStepTaskConversion,
   linkCommunicationToPlaybookStep,
@@ -129,6 +130,8 @@ import {
   savePlaybookTemplate as fbSavePlaybookTemplate,
   deletePlaybookTemplate as fbDeletePlaybookTemplate,
   savePlaybookRun as fbSavePlaybookRun,
+  savePlaybookRunAtomic,
+  PlaybookRevisionConflictError,
   deletePlaybookRun as fbDeletePlaybookRun,
   firestorePlaybookAtomicAdapter,
 } from '../services/firebase';
@@ -189,6 +192,9 @@ export function AuthenticatedSession({
   const playbookTemplatesRef = useRef<PlaybookTemplate[]>(playbookTemplates);
   const playbookRunsRef = useRef<PlaybookRun[]>(playbookRuns);
   const knownPlaybookRunRevisionRef = useRef<Map<string, number>>(new Map());
+  const firestorePendingPlaybookIdsRef = useRef<string[]>([]);
+  const playbookOfflineQueueRef = useRef<PlaybookOfflineSyncQueue>(new PlaybookOfflineSyncQueue());
+  const isFlushingPlaybookQueueRef = useRef<boolean>(false);
   clientsRef.current = clients;
   meetingsRef.current = meetings;
   tasksRef.current = tasks;
@@ -694,19 +700,25 @@ export function AuthenticatedSession({
           const detectedConflicts: ConflictItem[] = [];
           for (const remoteRun of data) {
             const localRun = playbookRunsRef.current.find((r) => r.id === remoteRun.id);
-            const expectedBase = knownPlaybookRunRevisionRef.current.get(remoteRun.id);
+            const queuedEntry = playbookOfflineQueueRef.current.getEntry(remoteRun.id);
+            const expectedBase = queuedEntry
+              ? queuedEntry.baseRevision
+              : knownPlaybookRunRevisionRef.current.get(remoteRun.id);
+
             if (
               localRun &&
-              pendingSet.has(remoteRun.id) &&
+              (pendingSet.has(remoteRun.id) || Boolean(queuedEntry)) &&
               typeof expectedBase === 'number'
             ) {
               const conflict = checkPlaybookRunRevisionConflict({
-                localRun,
+                localRun: queuedEntry ? queuedEntry.draftRun : localRun,
                 remoteRun,
                 expectedBaseRevision: expectedBase,
               });
-              if (conflict) detectedConflicts.push(conflict);
-            } else if (!pendingSet.has(remoteRun.id)) {
+              if (conflict) {
+                detectedConflicts.push(conflict);
+              }
+            } else if (!pendingSet.has(remoteRun.id) && !queuedEntry) {
               knownPlaybookRunRevisionRef.current.set(
                 remoteRun.id,
                 remoteRun.revision ?? 1
@@ -715,25 +727,34 @@ export function AuthenticatedSession({
           }
           if (detectedConflicts.length > 0) {
             setConflicts((prev) => {
-              const existingIds = new Set(prev.map((c) => c.id));
               const merged = [...prev];
               for (const c of detectedConflicts) {
-                if (!existingIds.has(c.id)) merged.push(c);
+                const runId = (c.localVersion as PlaybookRun).id;
+                const exists = merged.some(
+                  (m) =>
+                    m.id === c.id ||
+                    (m.entityType === 'playbookRun' && (m.localVersion as PlaybookRun).id === runId)
+                );
+                if (!exists) merged.push(c);
               }
               return merged;
             });
           }
         }
-        playbookRunsRef.current = data;
-        setPlaybookRuns(data);
+        const mergedRuns = playbookOfflineQueueRef.current.overlayPendingDrafts(data);
+        firestorePendingPlaybookIdsRef.current = meta.pendingDocIds;
+        const queuedPendingIds = playbookOfflineQueueRef.current.getPendingRunIds();
+        const combinedPendingIds = Array.from(new Set([...meta.pendingDocIds, ...queuedPendingIds]));
+        playbookRunsRef.current = mergedRuns;
+        setPlaybookRuns(mergedRuns);
         setCollectionSync((prev) => ({
           ...prev,
           playbookRuns: {
             loaded: true,
-            hasPendingWrites: meta.hasPendingWrites,
+            hasPendingWrites: meta.hasPendingWrites || queuedPendingIds.length > 0,
             fromCache: meta.fromCache,
             hasError: false,
-            pendingDocIds: meta.pendingDocIds,
+            pendingDocIds: combinedPendingIds,
             pendingDeletesCount: pendingDeleteIdsRef.current.playbookRuns.size,
           },
         }));
@@ -751,6 +772,9 @@ export function AuthenticatedSession({
     return () => {
       isSubscribed = false;
       clearAttachmentDownloadCache();
+      knownPlaybookRunRevisionRef.current.clear();
+      firestorePendingPlaybookIdsRef.current = [];
+      playbookOfflineQueueRef.current.clear();
       unsubClients();
       unsubMeetings();
       unsubTasks();
@@ -2090,9 +2114,52 @@ export function AuthenticatedSession({
     });
   };
 
-  const handleSavePlaybookRun = (run: PlaybookRun): void => {
+  const syncPlaybookQueueMetadata = () => {
+    const queuedPendingIds = playbookOfflineQueueRef.current.getPendingRunIds();
+    const combinedPendingIds = Array.from(
+      new Set([...firestorePendingPlaybookIdsRef.current, ...queuedPendingIds])
+    );
+    setCollectionSync((prev) => ({
+      ...prev,
+      playbookRuns: {
+        ...prev.playbookRuns,
+        hasPendingWrites: combinedPendingIds.length > 0,
+        pendingDocIds: combinedPendingIds,
+      },
+    }));
+  };
+
+  const openPlaybookConflict = (conflict: ConflictItem) => {
+    const runId = (conflict.localVersion as PlaybookRun).id;
+    setConflicts((prev) => {
+      const filtered = prev.filter(
+        (c) => !(c.entityType === 'playbookRun' && (c.localVersion as PlaybookRun).id === runId)
+      );
+      return [conflict, ...filtered];
+    });
+    setActiveConflict(conflict);
+  };
+
+  const handleSavePlaybookRun = (
+    run: PlaybookRun,
+    options?: { expectedBaseRevision?: number }
+  ): void => {
     const clean = sanitizePlaybookRunForSave({ ...run, userId: user.uid }, user.uid);
     const prevEntity = playbookRunsRef.current.find((r) => r.id === clean.id);
+    const queuedEntry = playbookOfflineQueueRef.current.getEntry(clean.id);
+    const knownRev = knownPlaybookRunRevisionRef.current.get(clean.id);
+
+    const baseRev =
+      typeof options?.expectedBaseRevision === 'number'
+        ? options.expectedBaseRevision
+        : queuedEntry
+        ? queuedEntry.baseRevision
+        : typeof knownRev === 'number'
+        ? knownRev
+        : prevEntity
+        ? prevEntity.revision ?? 0
+        : 0;
+
     const applyUpsert = (prev: PlaybookRun[]) => {
       const idx = prev.findIndex((r) => r.id === clean.id);
       if (idx >= 0) {
@@ -2102,6 +2169,20 @@ export function AuthenticatedSession({
       }
       return [clean, ...prev];
     };
+
+    // Offline-First: keep uncommitted draft locally (pending/local — NEVER marked synced)
+    // and verify server revision atomically upon reconnect.
+    if (!isOnline) {
+      playbookOfflineQueueRef.current.enqueueDraft({
+        run: clean,
+        baseRevision: baseRev,
+      });
+      playbookRunsRef.current = applyUpsert(playbookRunsRef.current);
+      setPlaybookRuns(applyUpsert);
+      syncPlaybookQueueMetadata();
+      return;
+    }
+
     playbookRunsRef.current = applyUpsert(playbookRunsRef.current);
 
     playbookRunOpsRef.current.runScopedMutation({
@@ -2110,13 +2191,90 @@ export function AuthenticatedSession({
       previousEntity: prevEntity,
       setState: setPlaybookRuns,
       applyOptimistic: applyUpsert,
-      dispatchWrite: () => fbSavePlaybookRun(clean),
+      dispatchWrite: () => fbSavePlaybookRun(clean, { expectedBaseRevision: baseRev }),
       onServerConfirmed: ({ wasSuperseded }) => {
-        knownPlaybookRunRevisionRef.current.set(clean.id, clean.revision ?? 1);
+        if (!wasSuperseded) {
+          knownPlaybookRunRevisionRef.current.set(
+            clean.id,
+            Math.max(clean.revision ?? 1, baseRev + 1)
+          );
+          playbookOfflineQueueRef.current.remove(clean.id);
+          syncPlaybookQueueMetadata();
+        }
         clearRejectedForEntity('playbookRun', clean.id, wasSuperseded);
       },
       onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
         console.warn('Save playbookRun rejected by server:', error);
+        if (wasSuperseded) return;
+
+        if (error instanceof PlaybookRevisionConflictError) {
+          if (error.casCode === 'CONFLICT' && error.serverRun) {
+            knownPlaybookRunRevisionRef.current.set(clean.id, error.serverRun.revision ?? 1);
+            const applyServerSnapshot = (prev: PlaybookRun[]) => {
+              const idx = prev.findIndex((r) => r.id === clean.id);
+              if (idx >= 0) {
+                const next = [...prev];
+                next[idx] = error.serverRun!;
+                return next;
+              }
+              return [error.serverRun!, ...prev];
+            };
+            playbookRunsRef.current = applyServerSnapshot(playbookRunsRef.current);
+            setPlaybookRuns(applyServerSnapshot);
+
+            const conflictItem: ConflictItem =
+              error.conflict ||
+              checkPlaybookRunRevisionConflict({
+                localRun: error.localDraft,
+                remoteRun: error.serverRun,
+                expectedBaseRevision: baseRev,
+              }) || {
+                id: `conflict-${clean.id}-${Date.now()}`,
+                entityType: 'playbookRun',
+                entityTitle: error.localDraft.templateName || error.serverRun.templateName || clean.id,
+                localVersion: error.localDraft,
+                remoteVersion: error.serverRun,
+                differingFields: [
+                  {
+                    field: 'revision',
+                    fieldLabelArabic: 'رقم المراجعة',
+                    localValue: error.localDraft.revision ?? baseRev,
+                    remoteValue: error.serverRun.revision ?? 1,
+                  },
+                ],
+                detectedAt: new Date().toISOString(),
+                isSimulated: false,
+                detectionSource: 'revision_cas',
+              };
+            openPlaybookConflict(conflictItem);
+            return;
+          }
+
+          recordRejectedWrite({
+            opId,
+            entityType: 'playbookRun',
+            entityId: clean.id,
+            entityTitle: clean.templateName,
+            operation: 'save',
+            classification,
+            error,
+            payload: error.localDraft || clean,
+            wasSuperseded,
+          });
+          return;
+        }
+
+        if (classification.category === 'unavailable') {
+          playbookOfflineQueueRef.current.enqueueDraft({
+            run: clean,
+            baseRevision: baseRev,
+          });
+          playbookRunsRef.current = applyUpsert(playbookRunsRef.current);
+          setPlaybookRuns(applyUpsert);
+          syncPlaybookQueueMetadata();
+          return;
+        }
+
         recordRejectedWrite({
           opId,
           entityType: 'playbookRun',
@@ -2131,6 +2289,96 @@ export function AuthenticatedSession({
       },
     });
   };
+
+  // Flush queued Offline Playbook drafts through CAS transaction upon reconnect
+  useEffect(() => {
+    if (!isOnline) return;
+    if (playbookOfflineQueueRef.current.getPendingCount() === 0) return;
+    if (isFlushingPlaybookQueueRef.current) return;
+
+    let cancelled = false;
+    isFlushingPlaybookQueueRef.current = true;
+
+    const flush = async () => {
+      try {
+        const results = await playbookOfflineQueueRef.current.flushPending(({ nextRun, expectedBaseRevision }) =>
+          savePlaybookRunAtomic(nextRun, { expectedBaseRevision })
+        );
+        if (cancelled) return;
+
+        for (const { runId, outcome } of results) {
+          if (outcome.ok && outcome.savedRun) {
+            const committed = outcome.savedRun;
+            knownPlaybookRunRevisionRef.current.set(runId, committed.revision ?? 1);
+            const upsertCommitted = (prev: PlaybookRun[]) => {
+              const idx = prev.findIndex((r) => r.id === committed.id);
+              if (idx >= 0) {
+                const next = [...prev];
+                next[idx] = committed;
+                return next;
+              }
+              return [committed, ...prev];
+            };
+            playbookRunsRef.current = upsertCommitted(playbookRunsRef.current);
+            setPlaybookRuns(upsertCommitted);
+            clearRejectedForEntity('playbookRun', runId, false);
+          } else if (!outcome.ok && outcome.code === 'CONFLICT' && outcome.serverRun) {
+            const serverRun = outcome.serverRun;
+            knownPlaybookRunRevisionRef.current.set(runId, serverRun.revision ?? 1);
+            const applyServer = (prev: PlaybookRun[]) => {
+              const idx = prev.findIndex((r) => r.id === runId);
+              if (idx >= 0) {
+                const next = [...prev];
+                next[idx] = serverRun;
+                return next;
+              }
+              return [serverRun, ...prev];
+            };
+            playbookRunsRef.current = applyServer(playbookRunsRef.current);
+            setPlaybookRuns(applyServer);
+            if (outcome.conflict) {
+              openPlaybookConflict(outcome.conflict);
+            }
+          } else if (!outcome.ok && (outcome.code === 'MISSING_ON_SERVER' || outcome.code === 'USER_MISMATCH')) {
+            const draft = outcome.localDraft;
+            if (draft) {
+              const syntheticErr = new Error(
+                outcome.errorAr || 'تعذر مزامنة مسودة خطة المتابعة بعد عودة الاتصال.'
+              );
+              recordRejectedWrite({
+                opId: `offline-flush-${runId}-${Date.now()}`,
+                entityType: 'playbookRun',
+                entityId: runId,
+                entityTitle: draft.templateName || runId,
+                operation: 'save',
+                classification: {
+                  category: outcome.code === 'USER_MISMATCH' ? 'permission-denied' : 'failed-precondition',
+                  isPermanentServerRejection: true,
+                  messageArabic:
+                    outcome.errorAr || 'تعذر مزامنة مسودة خطة المتابعة بعد عودة الاتصال.',
+                },
+                error: syntheticErr,
+                payload: draft,
+                wasSuperseded: false,
+              });
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Offline playbook flush paused cleanly:', err);
+      } finally {
+        isFlushingPlaybookQueueRef.current = false;
+        if (!cancelled) {
+          syncPlaybookQueueMetadata();
+        }
+      }
+    };
+
+    void flush();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOnline, user.uid]);
 
   const handleDeletePlaybookRun = (runId: string): void => {
     const prevEntity = playbookRunsRef.current.find((r) => r.id === runId);
@@ -2216,15 +2464,19 @@ export function AuthenticatedSession({
   ) => {
     const targetRun = playbookRunsRef.current.find((r) => r.id === suggestion.runId);
     if (targetRun) {
+      const baseRev = targetRun.revision ?? 0;
       const nextSteps = targetRun.steps.map((s) =>
         s.id === suggestion.stepId ? { ...s, dueDate: suggestion.suggestedDueDate } : s
       );
-      handleSavePlaybookRun({
-        ...targetRun,
-        steps: nextSteps,
-        updatedAt: new Date().toISOString(),
-        revision: (targetRun.revision ?? 1) + 1,
-      });
+      handleSavePlaybookRun(
+        {
+          ...targetRun,
+          steps: nextSteps,
+          updatedAt: new Date().toISOString(),
+          revision: baseRev + 1,
+        },
+        { expectedBaseRevision: baseRev }
+      );
     }
 
     if (applyToLinkedTask) {
@@ -2334,14 +2586,35 @@ export function AuthenticatedSession({
         const resolved = resolveConflictRecord<PlaybookTemplate>(conflict, choice, customMergedNotes);
         handleSavePlaybookTemplate(resolved);
       } else if (conflict.entityType === 'playbookRun') {
-        const resolved = resolveConflictRecord<PlaybookRun>(conflict, choice, customMergedNotes);
-        const maxRev = Math.max(
-          (conflict.localVersion as PlaybookRun).revision ?? 1,
-          (conflict.remoteVersion as PlaybookRun).revision ?? 1
-        );
-        const withNextRev: PlaybookRun = { ...resolved, revision: maxRev + 1 };
-        knownPlaybookRunRevisionRef.current.set(withNextRev.id, withNextRev.revision!);
-        handleSavePlaybookRun(withNextRev);
+        const localRun = conflict.localVersion as PlaybookRun;
+        const remoteRun = conflict.remoteVersion as PlaybookRun;
+        playbookOfflineQueueRef.current.remove(localRun.id);
+
+        if (choice === 'keep_remote') {
+          const acceptedRemote = resolveConflictRecord<PlaybookRun>(conflict, 'keep_remote');
+          knownPlaybookRunRevisionRef.current.set(acceptedRemote.id, acceptedRemote.revision ?? 1);
+          const applyRemote = (prev: PlaybookRun[]) => {
+            const idx = prev.findIndex((r) => r.id === acceptedRemote.id);
+            if (idx >= 0) {
+              const next = [...prev];
+              next[idx] = acceptedRemote;
+              return next;
+            }
+            return [acceptedRemote, ...prev];
+          };
+          playbookRunsRef.current = applyRemote(playbookRunsRef.current);
+          setPlaybookRuns(applyRemote);
+          syncPlaybookQueueMetadata();
+        } else {
+          const resolved = resolveConflictRecord<PlaybookRun>(conflict, choice, customMergedNotes);
+          const remoteRev = remoteRun.revision ?? 0;
+          const withNextRev: PlaybookRun = {
+            ...resolved,
+            revision: remoteRev + 1,
+            updatedAt: new Date().toISOString(),
+          };
+          handleSavePlaybookRun(withNextRev, { expectedBaseRevision: remoteRev });
+        }
       }
     }
 
@@ -3420,7 +3693,7 @@ export function AuthenticatedSession({
               await handle.serverPromise;
             },
             savePlaybookRun: async (run: PlaybookRun) => {
-              const handle = fbSavePlaybookRun(run);
+              const handle = fbSavePlaybookRun(run, { expectedBaseRevision: 0 });
               await handle.serverPromise;
             },
           }}

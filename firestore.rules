@@ -412,6 +412,19 @@ service cloud.firestore {
         && (!('revision' in data) || (data.revision is int && data.revision >= 1));
     }
 
+    function playbookRunRevision(data) {
+      return ('revision' in data && data.revision is int) ? data.revision : 0;
+    }
+
+    function isValidPlaybookRunRevisionAdvance(existingData, incomingData) {
+      return ('revision' in incomingData)
+        && incomingData.revision is int
+        && (
+          incomingData.revision == playbookRunRevision(existingData) + 1
+          || (playbookRunRevision(existingData) == 0 && incomingData.revision == 2)
+        );
+    }
+
     // 5. User-Scoped Data Hierarchy (/users/{userId}/...)
     match /users/{userId} {
       allow get: if isOwner(userId);
@@ -622,7 +635,8 @@ service cloud.firestore {
           && incoming().id == existing().id
           && incoming().startedAt == existing().startedAt
           && (!('userId' in existing()) || incoming().userId == existing().userId)
-          && isValidPlaybookRun(incoming(), userId);
+          && isValidPlaybookRun(incoming(), userId)
+          && isValidPlaybookRunRevisionAdvance(existing(), incoming());
         allow delete: if isOwner(userId) && isValidId(runId);
       }
     }

@@ -1,4 +1,14 @@
-import type { Client, Meeting, ActionItem, Note, ConflictItem, EntityType, ResolutionChoice } from '../types/index.ts';
+import type {
+  Client,
+  Meeting,
+  ActionItem,
+  Note,
+  ConflictItem,
+  EntityType,
+  ResolutionChoice,
+  PlaybookRunStep,
+  PlaybookStepStatus,
+} from '../types/index.ts';
 
 export const FIELD_LABELS_ARABIC: Record<string, string> = {
   name: 'الاسم',
@@ -93,7 +103,13 @@ export function detectEntityConflict(
   if (differingFields.length === 0) return null;
 
   const entityTitle =
-    (local.title as string) || (local.name as string) || (remote.title as string) || (remote.name as string) || local.id;
+    (local.title as string) ||
+    (local.name as string) ||
+    (local.templateName as string) ||
+    (remote.title as string) ||
+    (remote.name as string) ||
+    (remote.templateName as string) ||
+    local.id;
 
   return {
     id: `conflict-${local.id}-${Date.now()}`,
@@ -122,6 +138,98 @@ export function resolveConflictRecord<T extends Record<string, any>>(
   const local = conflict.localVersion as unknown as Record<string, any>;
   const remote = conflict.remoteVersion as unknown as Record<string, any>;
   const now = new Date().toISOString();
+
+  if (conflict.entityType === 'playbookRun') {
+    const remoteRev = typeof remote.revision === 'number' && Number.isFinite(remote.revision) ? remote.revision : 0;
+
+    if (choice === 'keep_local') {
+      return {
+        ...local,
+        startedAt: remote.startedAt || local.startedAt,
+        revision: remoteRev + 1,
+        updatedAt: now,
+      } as unknown as T;
+    }
+
+    if (choice === 'keep_remote') {
+      return {
+        ...remote,
+      } as unknown as T;
+    }
+
+    // Smart per-step merge for PlaybookRun so concurrent edits on different steps are BOTH preserved
+    const statusWeight: Record<PlaybookStepStatus, number> = {
+      pending: 0,
+      in_progress: 1,
+      skipped: 2,
+      completed: 3,
+    };
+    const remoteSteps: PlaybookRunStep[] = Array.isArray(remote.steps) ? remote.steps : [];
+    const localSteps: PlaybookRunStep[] = Array.isArray(local.steps) ? local.steps : [];
+    const localById = new Map<string, PlaybookRunStep>();
+    for (const ls of localSteps) localById.set(ls.id, ls);
+
+    const seenIds = new Set<string>();
+    const mergedSteps: PlaybookRunStep[] = remoteSteps.map((rs) => {
+      seenIds.add(rs.id);
+      const ls = localById.get(rs.id);
+      if (!ls) return rs;
+
+      const rsW = statusWeight[rs.status] ?? 0;
+      const lsW = statusWeight[ls.status] ?? 0;
+      const rsTime = rs.completedAt || rs.skippedAt || rs.startedAt || '';
+      const lsTime = ls.completedAt || ls.skippedAt || ls.startedAt || '';
+
+      let primary: PlaybookRunStep;
+      let secondary: PlaybookRunStep;
+      if (lsW !== rsW) {
+        primary = lsW > rsW ? ls : rs;
+        secondary = lsW > rsW ? rs : ls;
+      } else if (lsTime !== rsTime) {
+        primary = lsTime > rsTime ? ls : rs;
+        secondary = lsTime > rsTime ? rs : ls;
+      } else {
+        primary = ls;
+        secondary = rs;
+      }
+
+      const combined: PlaybookRunStep = { ...primary };
+      if (!combined.linkedTaskId && secondary.linkedTaskId) {
+        combined.linkedTaskId = secondary.linkedTaskId;
+      }
+      if (rs.linkedTaskId && ls.linkedTaskId && rs.linkedTaskId !== ls.linkedTaskId) {
+        // Cloud-confirmed task link takes precedence on conflicting IDs
+        combined.linkedTaskId = rs.linkedTaskId;
+      }
+      if (!combined.linkedInteractionId && secondary.linkedInteractionId) {
+        combined.linkedInteractionId = secondary.linkedInteractionId;
+      }
+      if (rs.note && ls.note && rs.note.trim() !== ls.note.trim()) {
+        combined.note = `[السحابة]: ${rs.note.trim()} | [المحلي]: ${ls.note.trim()}`.slice(0, 1000);
+      } else if (!combined.note && secondary.note) {
+        combined.note = secondary.note;
+      }
+      if (!combined.dueDate && secondary.dueDate) {
+        combined.dueDate = secondary.dueDate;
+      }
+      return combined;
+    });
+
+    for (const ls of localSteps) {
+      if (!seenIds.has(ls.id)) {
+        mergedSteps.push(ls);
+      }
+    }
+
+    const mergedRun: Record<string, any> = {
+      ...remote,
+      steps: mergedSteps,
+      startedAt: remote.startedAt || local.startedAt,
+      revision: remoteRev + 1,
+      updatedAt: now,
+    };
+    return mergedRun as unknown as T;
+  }
 
   if (choice === 'keep_local') {
     return {

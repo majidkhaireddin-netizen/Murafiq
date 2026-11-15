@@ -203,7 +203,7 @@ export type EntityType =
 
 export type ResolutionChoice = 'keep_local' | 'keep_remote' | 'merge';
 
-export type ConflictDetectionSource = 'simulated_dev' | 'manual_review' | 'field_diff';
+export type ConflictDetectionSource = 'simulated_dev' | 'manual_review' | 'field_diff' | 'revision_cas';
 
 export interface ConflictItem {
   id: string;

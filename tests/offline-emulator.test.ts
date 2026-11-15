@@ -19,9 +19,21 @@ import {
   onSnapshot,
   Firestore,
 } from 'firebase/firestore';
-import { sanitizeFirestorePayload } from '../src/services/firebase';
+import {
+  sanitizeFirestorePayload,
+  savePlaybookRunAtomic,
+  createTaskFromPlaybookStepAtomic,
+} from '../src/services/firebase';
+import {
+  BUILTIN_PLAYBOOK_TEMPLATES,
+  PlaybookOfflineSyncQueue,
+  buildPlaybookStepTaskId,
+  completePlaybookStep,
+  startPlaybookRun,
+} from '../src/utils/playbookEngine';
+import { resolveConflictRecord } from '../src/utils/conflictLogic';
 import { OperationCoordinator } from '../src/utils/sessionState';
-import { Client, ActionItem } from '../src/types';
+import { Client, ActionItem, PlaybookRun } from '../src/types';
 import appletConfig from '../firebase-applet-config.json';
 
 const PROJECT_ID = 'demo-murafiq-offline-test';
@@ -355,4 +367,295 @@ test('Murafiq Real Firestore Emulator Offline-to-Online Integration Suite', asyn
     const bobDb = createConnectedDb(bobCtx);
     await assertFails(getDocFromServer(doc(bobDb, `users/${USER_A_UID}/clients/alice_iso_1`)));
   });
+
+  await t.test(
+    '4. Two-device concurrent PlaybookRun edits via real Firestore Emulator CAS transaction prevent Lost Update and merge cleanly',
+    async () => {
+      const aliceCtxA = testEnv.authenticatedContext(USER_A_UID);
+      const aliceCtxB = testEnv.authenticatedContext(USER_A_UID);
+      const dbDeviceA = createConnectedDb(aliceCtxA);
+      const dbDeviceB = createConnectedDb(aliceCtxB);
+
+      const client: Client = {
+        id: 'cli_emu_1',
+        userId: USER_A_UID,
+        name: 'شركة الرواد',
+        createdAt: '2026-11-15T08:00:00.000Z',
+        updatedAt: '2026-11-15T08:00:00.000Z',
+      };
+      const baseRun = startPlaybookRun({
+        id: 'run_emu_cas_1',
+        userId: USER_A_UID,
+        template: BUILTIN_PLAYBOOK_TEMPLATES[0],
+        client,
+        startDateKey: '2026-11-15',
+        nowIso: '2026-11-15T08:00:00.000Z',
+      }).run!;
+
+      const createRes = await savePlaybookRunAtomic(baseRun, {
+        expectedBaseRevision: 0,
+        dbOverride: dbDeviceA,
+        userIdOverride: USER_A_UID,
+      });
+      assert.equal(createRes.ok, true);
+      assert.equal(createRes.savedRun!.revision, 1);
+
+      // Device A completes step 1 -> commits revision=2
+      const devAMut = completePlaybookStep({
+        run: baseRun,
+        stepId: baseRun.steps[0].id,
+        completedAtIso: '2026-11-15T09:00:00.000Z',
+      }).run!;
+      const saveARes = await savePlaybookRunAtomic(devAMut, {
+        expectedBaseRevision: 1,
+        dbOverride: dbDeviceA,
+        userIdOverride: USER_A_UID,
+      });
+      assert.equal(saveARes.ok, true);
+      assert.equal(saveARes.savedRun!.revision, 2);
+
+      // Device B completes step 2 from stale revision=1 -> CAS rejects cleanly!
+      const devBMut = completePlaybookStep({
+        run: baseRun,
+        stepId: baseRun.steps[1].id,
+        completedAtIso: '2026-11-15T09:05:00.000Z',
+      }).run!;
+      const saveBRes = await savePlaybookRunAtomic(devBMut, {
+        expectedBaseRevision: 1,
+        dbOverride: dbDeviceB,
+        userIdOverride: USER_A_UID,
+      });
+      assert.equal(saveBRes.ok, false);
+      assert.equal(saveBRes.code, 'CONFLICT');
+      assert.ok(saveBRes.conflict);
+
+      // Verify server still has revision=2 with step 1 completed
+      const serverSnapAfterB = await getDocFromServer(
+        doc(dbDeviceA, `users/${USER_A_UID}/playbookRuns/${baseRun.id}`)
+      );
+      const serverDataAfterB = serverSnapAfterB.data() as PlaybookRun;
+      assert.equal(serverDataAfterB.revision, 2);
+      assert.equal(serverDataAfterB.steps[0].status, 'completed');
+      assert.equal(serverDataAfterB.steps[1].status, 'pending');
+
+      // Smart merge resolves conflict and commits revision=3
+      const merged = resolveConflictRecord<PlaybookRun>(saveBRes.conflict!, 'merge');
+      const saveMerged = await savePlaybookRunAtomic(merged, {
+        expectedBaseRevision: saveBRes.serverRun!.revision,
+        dbOverride: dbDeviceB,
+        userIdOverride: USER_A_UID,
+      });
+      assert.equal(saveMerged.ok, true);
+      assert.equal(saveMerged.savedRun!.revision, 3);
+
+      const finalServerSnap = await getDocFromServer(
+        doc(dbDeviceA, `users/${USER_A_UID}/playbookRuns/${baseRun.id}`)
+      );
+      const finalData = finalServerSnap.data() as PlaybookRun;
+      assert.equal(finalData.revision, 3);
+      assert.equal(finalData.steps[0].status, 'completed');
+      assert.equal(finalData.steps[1].status, 'completed');
+    }
+  );
+
+  await t.test(
+    '5. Offline PlaybookRun edits queued against baseRevision=1 detect server conflict upon reconnect without silent overwrite',
+    async () => {
+      const dbA = createConnectedDb(testEnv.authenticatedContext(USER_A_UID));
+      const dbB = createConnectedDb(testEnv.authenticatedContext(USER_A_UID));
+
+      const client: Client = {
+        id: 'cli_emu_2',
+        userId: USER_A_UID,
+        name: 'مؤسسة الأفق',
+        createdAt: '2026-11-15T08:00:00.000Z',
+        updatedAt: '2026-11-15T08:00:00.000Z',
+      };
+      const baseRun = startPlaybookRun({
+        id: 'run_emu_off_1',
+        userId: USER_A_UID,
+        template: BUILTIN_PLAYBOOK_TEMPLATES[0],
+        client,
+        startDateKey: '2026-11-15',
+      }).run!;
+
+      await savePlaybookRunAtomic(baseRun, {
+        expectedBaseRevision: 0,
+        dbOverride: dbA,
+        userIdOverride: USER_A_UID,
+      });
+
+      // Device B goes offline and queues draft
+      await disableNetwork(dbB);
+      const queueB = new PlaybookOfflineSyncQueue();
+      const draftB = completePlaybookStep({
+        run: baseRun,
+        stepId: baseRun.steps[0].id,
+        note: 'ملاحظة أوفلاين من الجهاز ب',
+      }).run!;
+      queueB.enqueueDraft({ run: draftB, baseRevision: 1 });
+
+      // Device A advances server to revision=2 online
+      const editA = completePlaybookStep({
+        run: baseRun,
+        stepId: baseRun.steps[1].id,
+        note: 'إنجاز أونلاين من الجهاز أ',
+      }).run!;
+      const resA = await savePlaybookRunAtomic(editA, {
+        expectedBaseRevision: 1,
+        dbOverride: dbA,
+        userIdOverride: USER_A_UID,
+      });
+      assert.equal(resA.ok, true);
+      assert.equal(resA.savedRun!.revision, 2);
+
+      // Device B reconnects and flushes via CAS
+      await enableNetwork(dbB);
+      const flushRes = await queueB.flushPending((inData) =>
+        savePlaybookRunAtomic(inData.nextRun, {
+          expectedBaseRevision: inData.expectedBaseRevision,
+          dbOverride: dbB,
+          userIdOverride: USER_A_UID,
+        })
+      );
+
+      assert.equal(flushRes.length, 1);
+      assert.equal(flushRes[0].outcome.ok, false);
+      assert.equal(flushRes[0].outcome.code, 'CONFLICT');
+      assert.equal(
+        (flushRes[0].outcome.localDraft as PlaybookRun).steps[0].note,
+        'ملاحظة أوفلاين من الجهاز ب'
+      );
+
+      const serverAfterFlush = (
+        await getDocFromServer(doc(dbA, `users/${USER_A_UID}/playbookRuns/${baseRun.id}`))
+      ).data() as PlaybookRun;
+      assert.equal(serverAfterFlush.revision, 2);
+      assert.equal(serverAfterFlush.steps[1].note, 'إنجاز أونلاين من الجهاز أ');
+    }
+  );
+
+  await t.test(
+    '6. Emulator createTaskFromPlaybookStepAtomic enforces STEP_CLOSED, INCOMPATIBLE_EXISTING_TASK, and idempotent retry preservation',
+    async () => {
+      const db = createConnectedDb(testEnv.authenticatedContext(USER_A_UID));
+      const client: Client = {
+        id: 'cli_emu_3',
+        userId: USER_A_UID,
+        name: 'عميل الذرية',
+        createdAt: '2026-11-15T08:00:00.000Z',
+        updatedAt: '2026-11-15T08:00:00.000Z',
+      };
+      let run = startPlaybookRun({
+        id: 'run_emu_atomic_1',
+        userId: USER_A_UID,
+        template: BUILTIN_PLAYBOOK_TEMPLATES[0],
+        client,
+        startDateKey: '2026-11-15',
+      }).run!;
+      run = completePlaybookStep({
+        run,
+        stepId: run.steps[1].id,
+        completedAtIso: '2026-11-15T09:00:00.000Z',
+      }).run!;
+      // Normalize revision=1 for clean initial create
+      run = { ...run, revision: 1 };
+
+      await savePlaybookRunAtomic(run, {
+        expectedBaseRevision: 0,
+        dbOverride: db,
+        userIdOverride: USER_A_UID,
+      });
+
+      // Closed step must be rejected with STEP_CLOSED
+      const closedRes = await createTaskFromPlaybookStepAtomic(
+        {
+          userId: USER_A_UID,
+          runId: run.id,
+          stepId: run.steps[1].id,
+          deterministicTaskId: buildPlaybookStepTaskId(run.id, run.steps[1].id),
+          expectedRunRevision: 1,
+          title: 'ممنوع لخطوة مكتملة',
+          priority: 'medium',
+          nowIso: '2026-11-15T09:05:00.000Z',
+        },
+        { dbOverride: db, userIdOverride: USER_A_UID }
+      );
+      assert.equal(closedRes.ok, false);
+      assert.equal(closedRes.code, 'STEP_CLOSED');
+
+      // Seed incompatible task on step 2 deterministic ID -> must fail INCOMPATIBLE_EXISTING_TASK
+      const incompatTaskId = buildPlaybookStepTaskId(run.id, run.steps[2].id);
+      await setDoc(doc(db, `users/${USER_A_UID}/tasks/${incompatTaskId}`), {
+        id: incompatTaskId,
+        userId: USER_A_UID,
+        clientId: 'different_client_id',
+        playbookRunId: run.id,
+        playbookStepId: run.steps[2].id,
+        title: 'مهمة لعميل مختلف',
+        priority: 'medium',
+        status: 'pending',
+        createdAt: '2026-11-15T09:00:00.000Z',
+      });
+
+      const incompatRes = await createTaskFromPlaybookStepAtomic(
+        {
+          userId: USER_A_UID,
+          runId: run.id,
+          stepId: run.steps[2].id,
+          deterministicTaskId: incompatTaskId,
+          expectedRunRevision: 1,
+          title: 'محاولة ربط خاطئة',
+          priority: 'medium',
+          nowIso: '2026-11-15T09:10:00.000Z',
+        },
+        { dbOverride: db, userIdOverride: USER_A_UID }
+      );
+      assert.equal(incompatRes.ok, false);
+      assert.equal(incompatRes.code, 'INCOMPATIBLE_EXISTING_TASK');
+
+      // Valid atomic creation on step 0 followed by idempotent retry preserves edits
+      const detId0 = buildPlaybookStepTaskId(run.id, run.steps[0].id);
+      const createTaskRes = await createTaskFromPlaybookStepAtomic(
+        {
+          userId: USER_A_UID,
+          runId: run.id,
+          stepId: run.steps[0].id,
+          deterministicTaskId: detId0,
+          expectedRunRevision: 1,
+          title: 'مهمة خطوة 1',
+          priority: 'high',
+          nowIso: '2026-11-15T09:15:00.000Z',
+        },
+        { dbOverride: db, userIdOverride: USER_A_UID }
+      );
+      assert.equal(createTaskRes.ok, true);
+      assert.equal(createTaskRes.alreadyExisted, false);
+      assert.equal(createTaskRes.run!.revision, 2);
+
+      // Simulate user editing task on server, then retry createTaskFromPlaybookStepAtomic
+      await setDoc(
+        doc(db, `users/${USER_A_UID}/tasks/${detId0}`),
+        { ...createTaskRes.task!, title: 'عنوان معدّل يدويًا' },
+        { merge: true }
+      );
+      const retryRes = await createTaskFromPlaybookStepAtomic(
+        {
+          userId: USER_A_UID,
+          runId: run.id,
+          stepId: run.steps[0].id,
+          deterministicTaskId: detId0,
+          expectedRunRevision: 2,
+          title: 'عنوان قديم',
+          priority: 'low',
+          nowIso: '2026-11-15T09:20:00.000Z',
+        },
+        { dbOverride: db, userIdOverride: USER_A_UID }
+      );
+      assert.equal(retryRes.ok, true);
+      assert.equal(retryRes.alreadyExisted, true);
+      assert.equal(retryRes.task!.title, 'عنوان معدّل يدويًا');
+    }
+  );
 });
+

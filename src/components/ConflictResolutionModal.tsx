@@ -88,7 +88,9 @@ export const ConflictResolutionModal: React.FC<ConflictResolutionModalProps> = (
               </div>
               <p className="text-xs text-white/90 mt-0.5">
                 {conflict.isSimulated
-                  ? 'هذه معاينة اختبارية لواجهة فض التعارض فقط؛ المزامنة الفعلية في الإصدار الأول تستخدم Last-Write-Wins.'
+                  ? 'هذه معاينة اختبارية لواجهة فض التعارض فقط.'
+                  : conflict.entityType === 'playbookRun'
+                  ? 'تم تحديث خطة المتابعة من جهاز آخر برقم مراجعة أحدث. تم إيقاف الاستبدال الصامت والاحتفاظ بنسختك لمراجعتها قبل الاعتماد.'
                   : language === 'ar'
                   ? 'تم رصد اختلاف بين نسختين للمراجعة اليدوية قبل الحفظ.'
                   : 'Differences detected for manual comparison and resolution.'}
@@ -122,7 +124,7 @@ export const ConflictResolutionModal: React.FC<ConflictResolutionModalProps> = (
                   <span>نسختك المحلية (هذا الجهاز)</span>
                 </span>
                 <span className="text-[10px] bg-emerald-100 text-emerald-800 font-semibold px-2 py-0.5 rounded-full">
-                  أوفلاين
+                  غير متزامنة
                 </span>
               </div>
 
@@ -211,7 +213,11 @@ export const ConflictResolutionModal: React.FC<ConflictResolutionModalProps> = (
             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-stone-900 text-white hover:bg-stone-800 shadow-xs transition-colors"
           >
             <Layers className="w-3.5 h-3.5" />
-            <span>دمج النصين ومزامنة</span>
+            <span>
+              {conflict.entityType === 'playbookRun'
+                ? 'دمج الخطوات ومزامنة'
+                : 'دمج النصين ومزامنة'}
+            </span>
           </button>
         </div>
       </div>

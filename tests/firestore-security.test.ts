@@ -859,6 +859,7 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
           })
         );
         await assertSucceeds(getDoc(runRef));
+        // Valid step/pause/resume/complete monotonic revision updates succeed (+1 per write)
         await assertSucceeds(
           updateDoc(runRef, {
             status: 'paused',
@@ -867,10 +868,94 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
             revision: 2,
           })
         );
+        await assertSucceeds(
+          updateDoc(runRef, {
+            status: 'active',
+            updatedAt: '2026-11-15T12:30:00.000Z',
+            steps: [
+              {
+                id: 's1',
+                title: 'اتصال أولي',
+                stepType: 'communication',
+                order: 1,
+                status: 'completed',
+                duePolicy: { type: 'from_start', offsetDays: 0 },
+                dueDate: '2026-11-15',
+              },
+            ],
+            revision: 3,
+          })
+        );
+
+        // Stale replay (revision unchanged 3->3), downgrade (3->1 or 3->2), or skip (3->5) MUST FAIL
+        await assertFails(
+          updateDoc(runRef, {
+            status: 'paused',
+            updatedAt: '2026-11-15T12:35:00.000Z',
+            revision: 3,
+          })
+        );
+        await assertFails(
+          updateDoc(runRef, {
+            status: 'paused',
+            updatedAt: '2026-11-15T12:36:00.000Z',
+            revision: 2,
+          })
+        );
+        await assertFails(
+          updateDoc(runRef, {
+            status: 'completed',
+            completedAt: '2026-11-15T12:37:00.000Z',
+            updatedAt: '2026-11-15T12:37:00.000Z',
+            revision: 5,
+          })
+        );
+
+        // Completing the run with monotonic revision 3 -> 4 succeeds
+        await assertSucceeds(
+          updateDoc(runRef, {
+            status: 'completed',
+            completedAt: '2026-11-15T13:00:00.000Z',
+            updatedAt: '2026-11-15T13:00:00.000Z',
+            revision: 4,
+          })
+        );
+
+        // Legacy PlaybookRun missing `revision` on server can be safely upgraded on first edit (1 or 2)
+        const legacyRunRef = doc(aliceDb, `users/${USER_A_UID}/playbookRuns/run_legacy_norev`);
+        await testEnv.withSecurityRulesDisabled(async (adminCtx) => {
+          const adminDb = getDbInstance(adminCtx, dbId);
+          await setDoc(doc(adminDb, `users/${USER_A_UID}/playbookRuns/run_legacy_norev`), {
+            id: 'run_legacy_norev',
+            userId: USER_A_UID,
+            templateName: 'خطة قديمة بدون مراجعة',
+            clientId: 'client_1',
+            status: 'active',
+            steps: [
+              {
+                id: 's1',
+                title: 'خطوة قديمة',
+                stepType: 'task',
+                order: 1,
+                status: 'pending',
+                duePolicy: { type: 'from_start', offsetDays: 0 },
+              },
+            ],
+            startedAt: '2026-11-10T10:00:00.000Z',
+            updatedAt: '2026-11-10T10:00:00.000Z',
+          });
+        });
+        await assertSucceeds(
+          updateDoc(legacyRunRef, {
+            revision: 1,
+            updatedAt: '2026-11-15T14:00:00.000Z',
+          })
+        );
+        await assertSucceeds(deleteDoc(legacyRunRef));
 
         // Reject startedAt mutation, invalid status, revision < 1, or non-date startDateKey
-        await assertFails(updateDoc(runRef, { startedAt: '2020-01-01T00:00:00.000Z' }));
-        await assertFails(updateDoc(runRef, { status: 'bogus_status' }));
+        await assertFails(updateDoc(runRef, { startedAt: '2020-01-01T00:00:00.000Z', revision: 5 }));
+        await assertFails(updateDoc(runRef, { status: 'bogus_status', revision: 5 }));
         await assertFails(updateDoc(runRef, { revision: 0 }));
         await assertFails(
           setDoc(doc(aliceDb, `users/${USER_A_UID}/playbookRuns/run_bad_date`), {

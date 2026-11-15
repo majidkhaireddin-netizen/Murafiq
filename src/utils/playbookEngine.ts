@@ -1661,6 +1661,8 @@ export interface AtomicStepTaskCreationOutcome {
     | 'RUN_NOT_FOUND'
     | 'STEP_NOT_FOUND'
     | 'RUN_NOT_ACTIVE'
+    | 'STEP_CLOSED'
+    | 'INCOMPATIBLE_EXISTING_TASK'
     | 'USER_MISMATCH'
     | 'REVISION_CONFLICT'
     | 'STEP_ALREADY_LINKED_DIFFERENT_TASK'
@@ -1680,6 +1682,7 @@ export interface PlaybookAtomicPersistencePort {
  * Coordinates atomic creation of an ActionItem from a PlaybookRunStep.
  * - Requires online connectivity (refuses to mint uncoordinated offline duplicates).
  * - Uses deterministic task ID (`buildPlaybookStepTaskId`) + backend transaction.
+ * - Refuses creating a new task for a completed/skipped step (unless recovering an existing linkedTaskId).
  * - On retry or concurrent race where the deterministic task already exists,
  *   NEVER overwrites user-modified fields on that existing task.
  */
@@ -1721,6 +1724,15 @@ export async function executeAtomicStepTaskConversion(
       ok: false,
       code: 'STEP_NOT_FOUND',
       errorAr: 'الخطوة المحددة غير موجودة داخل الخطة.',
+    };
+  }
+
+  if (!step.linkedTaskId && (step.status === 'completed' || step.status === 'skipped')) {
+    return {
+      ok: false,
+      code: 'STEP_CLOSED',
+      errorAr:
+        'لا يمكن إنشاء مهمة جديدة لخطوة مكتملة أو متخطاة في خطة المتابعة. أعد فتح الخطوة أولًا إذا احتجت لمتابعة جديدة.',
     };
   }
 
@@ -1826,7 +1838,49 @@ export function applyAtomicStepToTaskInTransactionState(params: {
 
   const serverStep = serverRun.steps[stepIndex];
 
+  const isTaskCompatibleWithStep = (
+    task: ActionItem,
+    requireExplicitStepMeta: boolean
+  ): { ok: true } | { ok: false; code: 'USER_MISMATCH' | 'INCOMPATIBLE_EXISTING_TASK'; errorAr: string } => {
+    if (task.userId && task.userId !== input.userId) {
+      return {
+        ok: false,
+        code: 'USER_MISMATCH',
+        errorAr: 'تعارض ملكية المهمة الموجودة.',
+      };
+    }
+    if (task.clientId !== serverRun.clientId) {
+      return {
+        ok: false,
+        code: 'INCOMPATIBLE_EXISTING_TASK',
+        errorAr: 'المهمة الموجودة تخص عميلًا مختلفًا عن عميل خطة المتابعة ولن يتم ربطها.',
+      };
+    }
+    if (requireExplicitStepMeta) {
+      if (task.playbookRunId !== serverRun.id || task.playbookStepId !== serverStep.id) {
+        return {
+          ok: false,
+          code: 'INCOMPATIBLE_EXISTING_TASK',
+          errorAr: 'المهمة الموجودة بنفس المعرف لا تخص هذه الخطة أو هذه الخطوة ولن يتم ربطها.',
+        };
+      }
+    } else {
+      if (
+        (task.playbookRunId && task.playbookRunId !== serverRun.id) ||
+        (task.playbookStepId && task.playbookStepId !== serverStep.id)
+      ) {
+        return {
+          ok: false,
+          code: 'INCOMPATIBLE_EXISTING_TASK',
+          errorAr: 'المهمة المرتبطة تشير إلى خطة أو خطوة أخرى مختلفة.',
+        };
+      }
+    }
+    return { ok: true };
+  };
+
   // Case 1: The step already points to a linked task on the server -> DO NOT overwrite existing task
+  // Allows safe idempotent recovery even if the step was subsequently closed
   if (serverStep.linkedTaskId) {
     const existingTask =
       serverLinkedTask ||
@@ -1834,6 +1888,10 @@ export function applyAtomicStepToTaskInTransactionState(params: {
         ? serverTaskByDeterministicId
         : undefined);
     if (existingTask) {
+      const compat = isTaskCompatibleWithStep(existingTask, false);
+      if (!compat.ok) {
+        return { ok: false, code: compat.code, errorAr: compat.errorAr };
+      }
       return {
         ok: true,
         alreadyExisted: true,
@@ -1851,16 +1909,24 @@ export function applyAtomicStepToTaskInTransactionState(params: {
   }
 
   // Case 2: Retry or concurrent race where deterministic task doc ALREADY exists on server
-  // MUST return existing task WITHOUT overwriting user-modified fields on it!
+  // Must verify userId, clientId, playbookRunId, and playbookStepId BEFORE returning or linking!
+  // MUST return existing task WITHOUT overwriting user-modified fields on it.
   if (serverTaskByDeterministicId) {
+    const compat = isTaskCompatibleWithStep(serverTaskByDeterministicId, true);
+    if (!compat.ok) {
+      return { ok: false, code: compat.code, errorAr: compat.errorAr };
+    }
+
+    // If the step was closed without a linked task on the server, do not resurrect/link into closed step
     if (
-      serverTaskByDeterministicId.userId &&
-      serverTaskByDeterministicId.userId !== input.userId
+      !serverStep.linkedTaskId &&
+      (serverStep.status === 'completed' || serverStep.status === 'skipped')
     ) {
       return {
         ok: false,
-        code: 'USER_MISMATCH',
-        errorAr: 'تعارض ملكية المهمة الموجودة.',
+        code: 'STEP_CLOSED',
+        errorAr:
+          'لا يمكن إنشاء أو ربط مهمة جديدة لخطوة مكتملة أو متخطاة في خطة المتابعة.',
       };
     }
 
@@ -1884,6 +1950,16 @@ export function applyAtomicStepToTaskInTransactionState(params: {
       task: serverTaskByDeterministicId,
       run: repairedRun,
       nextRunToSave: needsLinkRepair ? repairedRun : undefined,
+    };
+  }
+
+  // Reject creating a brand-new task if the step was closed (completed or skipped)
+  if (serverStep.status === 'completed' || serverStep.status === 'skipped') {
+    return {
+      ok: false,
+      code: 'STEP_CLOSED',
+      errorAr:
+        'لا يمكن إنشاء مهمة جديدة لخطوة مكتملة أو متخطاة في خطة المتابعة. أعد فتح الخطوة أولًا إذا احتجت لمتابعة جديدة.',
     };
   }
 
@@ -2230,8 +2306,367 @@ export function checkPlaybookRunRevisionConflict(params: {
 
   if (remoteRev > baseRev) {
     return detectEntityConflict(localRun, remoteRun, 'playbookRun', {
-      detectionSource: 'field_diff',
+      detectionSource: 'revision_cas',
     });
   }
   return null;
+}
+
+// =========================================================================
+// Task 013-Fix-01: Optimistic Concurrency (Compare-and-Swap) & Offline Draft Queue
+// =========================================================================
+
+export interface PlaybookRunCasSaveInput {
+  userId: string;
+  nextRun: PlaybookRun;
+  /**
+   * The server revision this edit was derived from (0 for brand-new run or legacy run missing revision).
+   */
+  expectedBaseRevision?: number;
+  nowIso: string;
+}
+
+export interface PlaybookRunCasSaveOutcome {
+  ok: boolean;
+  code?: 'CREATED' | 'UPDATED' | 'CONFLICT' | 'USER_MISMATCH' | 'MISSING_ON_SERVER';
+  savedRun?: PlaybookRun;
+  serverRun?: PlaybookRun;
+  localDraft?: PlaybookRun;
+  nextRunToWrite?: PlaybookRun;
+  conflict?: ConflictItem;
+  errorAr?: string;
+}
+
+export interface PlaybookRunCasPort {
+  savePlaybookRunCas(input: PlaybookRunCasSaveInput): Promise<PlaybookRunCasSaveOutcome>;
+}
+
+/**
+ * Pure Compare-and-Swap (Optimistic Concurrency Control) state machine for saving a PlaybookRun.
+ * Prevents silent Last-Write-Wins overwrites across devices:
+ * - New runs require `!serverRun` (if a run with the same ID already exists on server, returns CONFLICT).
+ * - Existing runs require `serverRev === expectedRev` before advancing to `serverRev + 1`.
+ * - On stale `expectedBaseRevision`, aborts write (`nextRunToWrite: undefined`) and returns `CONFLICT`
+ *   with both `serverRun` and `localDraft` preserved cleanly for manual conflict resolution.
+ */
+export function applyPlaybookRunCasSaveInTransactionState(params: {
+  input: PlaybookRunCasSaveInput;
+  serverRun: PlaybookRun | undefined;
+}): PlaybookRunCasSaveOutcome {
+  const { input, serverRun } = params;
+  const draft = sanitizePlaybookRunForSave(
+    {
+      ...input.nextRun,
+      userId: input.userId,
+      updatedAt: input.nextRun.updatedAt || input.nowIso,
+    },
+    input.userId
+  );
+
+  if (serverRun && serverRun.userId && serverRun.userId !== input.userId) {
+    return {
+      ok: false,
+      code: 'USER_MISMATCH',
+      localDraft: draft,
+      errorAr: 'لا تملك صلاحية تعديل خطة متابعة تخص مستخدمًا آخر.',
+    };
+  }
+
+  // Case A: Server does not yet have this document
+  if (!serverRun) {
+    if (typeof input.expectedBaseRevision === 'number' && input.expectedBaseRevision > 0) {
+      return {
+        ok: false,
+        code: 'MISSING_ON_SERVER',
+        localDraft: draft,
+        errorAr:
+          'تم حذف خطة المتابعة من جهاز آخر على الخادم. تم الاحتفاظ بمسودتك محليًا للمراجعة دون فقدانها.',
+      };
+    }
+
+    const createdRun: PlaybookRun = sanitizePlaybookRunForSave(
+      {
+        ...draft,
+        revision: Math.max(1, draft.revision ?? 1),
+      },
+      input.userId
+    );
+
+    return {
+      ok: true,
+      code: 'CREATED',
+      savedRun: createdRun,
+      nextRunToWrite: createdRun,
+    };
+  }
+
+  // Case B: Server already has the document -> Enforce strict CAS on revision
+  const serverRev =
+    typeof serverRun.revision === 'number' && Number.isFinite(serverRun.revision)
+      ? serverRun.revision
+      : 0;
+  const expectedRev =
+    typeof input.expectedBaseRevision === 'number' && Number.isFinite(input.expectedBaseRevision)
+      ? input.expectedBaseRevision
+      : Math.max(0, (draft.revision ?? 1) - 1);
+
+  if (serverRev !== expectedRev) {
+    const conflict: ConflictItem =
+      detectEntityConflict(draft, serverRun, 'playbookRun', {
+        detectionSource: 'revision_cas',
+      }) || {
+        id: `conflict-${draft.id}-${Date.now()}`,
+        entityType: 'playbookRun',
+        entityTitle: draft.templateName || serverRun.templateName || draft.id,
+        localVersion: draft,
+        remoteVersion: serverRun,
+        differingFields: [
+          {
+            field: 'revision',
+            fieldLabelArabic: 'رقم المراجعة',
+            localValue: draft.revision ?? expectedRev,
+            remoteValue: serverRev,
+          },
+        ],
+        detectedAt: input.nowIso,
+        isSimulated: false,
+        detectionSource: 'revision_cas',
+      };
+
+    return {
+      ok: false,
+      code: 'CONFLICT',
+      serverRun,
+      localDraft: draft,
+      conflict,
+      errorAr:
+        'تم تعديل خطة المتابعة من جهاز آخر بإصدار أحدث. تم حفظ مسودتك للمراجعة اليدوية لمنع استبدال التعديلات صمتًا.',
+    };
+  }
+
+  const committedRun: PlaybookRun = sanitizePlaybookRunForSave(
+    {
+      ...draft,
+      startedAt: serverRun.startedAt || draft.startedAt,
+      updatedAt: draft.updatedAt || input.nowIso,
+      revision: serverRev + 1,
+    },
+    input.userId
+  );
+
+  return {
+    ok: true,
+    code: 'UPDATED',
+    savedRun: committedRun,
+    nextRunToWrite: committedRun,
+  };
+}
+
+/**
+ * Combined serialized in-memory CAS + Atomic Task backend for deterministic multi-device
+ * concurrency testing. Supports both CAS run updates and atomic step-to-task creation
+ * sharing the exact same underlying server state.
+ */
+export function createInMemoryPlaybookCasAndAtomicBackend(initialState?: {
+  runs?: PlaybookRun[];
+  tasks?: ActionItem[];
+}): PlaybookRunCasPort &
+  PlaybookAtomicPersistencePort & {
+    getRuns(): PlaybookRun[];
+    getTasks(): ActionItem[];
+  } {
+  const runsMap = new Map<string, PlaybookRun>();
+  const tasksMap = new Map<string, ActionItem>();
+  for (const r of initialState?.runs || []) {
+    runsMap.set(r.id, { ...r, steps: r.steps.map((s) => ({ ...s })) });
+  }
+  for (const t of initialState?.tasks || []) {
+    tasksMap.set(t.id, { ...t });
+  }
+
+  let tail: Promise<unknown> = Promise.resolve();
+
+  return {
+    getRuns: () => Array.from(runsMap.values()),
+    getTasks: () => Array.from(tasksMap.values()),
+    savePlaybookRunCas(input: PlaybookRunCasSaveInput): Promise<PlaybookRunCasSaveOutcome> {
+      const job = tail.then(async () => {
+        await Promise.resolve();
+        const serverRun = runsMap.get(input.nextRun.id);
+        const outcome = applyPlaybookRunCasSaveInTransactionState({
+          input,
+          serverRun,
+        });
+        if (outcome.ok && outcome.nextRunToWrite) {
+          runsMap.set(outcome.nextRunToWrite.id, {
+            ...outcome.nextRunToWrite,
+            steps: outcome.nextRunToWrite.steps.map((s) => ({ ...s })),
+          });
+        }
+        return outcome;
+      });
+      tail = job.catch(() => undefined);
+      return job;
+    },
+    runAtomicStepToTask(input: AtomicStepTaskCreationInput): Promise<AtomicStepTaskCreationOutcome> {
+      const job = tail.then(async () => {
+        await Promise.resolve();
+        const serverRun = runsMap.get(input.runId);
+        const serverTaskByDet = tasksMap.get(input.deterministicTaskId);
+        const linkedTaskId = serverRun?.steps.find((s) => s.id === input.stepId)?.linkedTaskId;
+        const serverLinkedTask = linkedTaskId ? tasksMap.get(linkedTaskId) : undefined;
+
+        const outcome = applyAtomicStepToTaskInTransactionState({
+          input,
+          serverRun,
+          serverTaskByDeterministicId: serverTaskByDet,
+          serverLinkedTask,
+        });
+
+        if (outcome.ok) {
+          if (outcome.nextTaskToCreate) {
+            tasksMap.set(outcome.nextTaskToCreate.id, { ...outcome.nextTaskToCreate });
+          }
+          if (outcome.nextRunToSave) {
+            runsMap.set(outcome.nextRunToSave.id, {
+              ...outcome.nextRunToSave,
+              steps: outcome.nextRunToSave.steps.map((s) => ({ ...s })),
+            });
+          }
+        }
+        return {
+          ok: outcome.ok,
+          code: outcome.code,
+          alreadyExisted: outcome.alreadyExisted,
+          task: outcome.task,
+          run: outcome.run,
+          errorAr: outcome.errorAr,
+        };
+      });
+      tail = job.catch(() => undefined);
+      return job;
+    },
+  };
+}
+
+export interface PendingOfflinePlaybookEntry {
+  runId: string;
+  /** Server revision BEFORE the device went offline / accumulated offline edits */
+  baseRevision: number;
+  draftRun: PlaybookRun;
+  queuedAt: string;
+}
+
+export interface PlaybookOfflineFlushItemResult {
+  runId: string;
+  outcome: PlaybookRunCasSaveOutcome;
+}
+
+/**
+ * Offline-First draft queue for PlaybookRuns.
+ * - Preserves initial `baseRevision` even across multiple offline edits to the same run.
+ * - Keeps drafts in session memory (never writes PII to localStorage).
+ * - Overlays uncommitted drafts above cached snapshots so local work is never wiped.
+ * - Flushes sequentially via CAS upon reconnect; any server revision divergence produces
+ *   an explicit `CONFLICT` with the local draft preserved intact for ConflictResolutionModal.
+ */
+export class PlaybookOfflineSyncQueue {
+  private entries = new Map<string, PendingOfflinePlaybookEntry>();
+
+  enqueueDraft(params: {
+    run: PlaybookRun;
+    baseRevision: number;
+    nowIso?: string;
+  }): PendingOfflinePlaybookEntry {
+    const existing = this.entries.get(params.run.id);
+    const preservedBaseRevision = existing ? existing.baseRevision : params.baseRevision;
+    const entry: PendingOfflinePlaybookEntry = {
+      runId: params.run.id,
+      baseRevision: preservedBaseRevision,
+      draftRun: params.run,
+      queuedAt: existing?.queuedAt || params.nowIso || new Date().toISOString(),
+    };
+    this.entries.set(params.run.id, entry);
+    return entry;
+  }
+
+  hasPending(runId: string): boolean {
+    return this.entries.has(runId);
+  }
+
+  getEntry(runId: string): PendingOfflinePlaybookEntry | undefined {
+    return this.entries.get(runId);
+  }
+
+  getPendingRunIds(): string[] {
+    return Array.from(this.entries.keys());
+  }
+
+  getPendingCount(): number {
+    return this.entries.size;
+  }
+
+  remove(runId: string): void {
+    this.entries.delete(runId);
+  }
+
+  clear(): void {
+    this.entries.clear();
+  }
+
+  overlayPendingDrafts(serverOrCacheRuns: PlaybookRun[]): PlaybookRun[] {
+    if (this.entries.size === 0) return serverOrCacheRuns;
+    const byId = new Map<string, PlaybookRun>();
+    const result: PlaybookRun[] = [];
+    for (const r of serverOrCacheRuns) {
+      const pending = this.entries.get(r.id);
+      if (pending) {
+        byId.set(r.id, pending.draftRun);
+        result.push(pending.draftRun);
+      } else {
+        byId.set(r.id, r);
+        result.push(r);
+      }
+    }
+    for (const entry of this.entries.values()) {
+      if (!byId.has(entry.runId)) {
+        result.unshift(entry.draftRun);
+      }
+    }
+    return result;
+  }
+
+  async flushPending(
+    saveCas: (input: {
+      nextRun: PlaybookRun;
+      expectedBaseRevision: number;
+      nowIso: string;
+    }) => Promise<PlaybookRunCasSaveOutcome>,
+    nowIso: string = new Date().toISOString()
+  ): Promise<PlaybookOfflineFlushItemResult[]> {
+    const snapshotEntries = Array.from(this.entries.values());
+    const results: PlaybookOfflineFlushItemResult[] = [];
+
+    for (const entry of snapshotEntries) {
+      const outcome = await saveCas({
+        nextRun: entry.draftRun,
+        expectedBaseRevision: entry.baseRevision,
+        nowIso,
+      });
+
+      results.push({ runId: entry.runId, outcome });
+
+      // Remove from pending queue once either committed cleanly or moved into explicit Conflict/Missing state.
+      // Transient 'unavailable' failures stay queued for retry on the next online event.
+      if (outcome.ok || outcome.code === 'CONFLICT' || outcome.code === 'MISSING_ON_SERVER' || outcome.code === 'USER_MISMATCH') {
+        const current = this.entries.get(entry.runId);
+        // Only remove if no newer offline mutation superseded the flushed draft while flushing
+        if (current && current.draftRun.updatedAt === entry.draftRun.updatedAt) {
+          this.entries.delete(entry.runId);
+        }
+      }
+    }
+
+    return results;
+  }
 }
