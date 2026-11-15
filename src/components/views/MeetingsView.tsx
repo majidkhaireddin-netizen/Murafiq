@@ -111,6 +111,7 @@ interface MeetingsViewProps {
   collectionsLoaded?: Partial<PreparationCollectionsLoadedState>;
   hasPendingWrites?: boolean;
   onSaveMeeting: (meeting: Meeting) => Promise<void> | void;
+  onSaveMeetingConfirmed?: (meeting: Meeting) => Promise<void> | void;
   onDeleteMeeting?: (
     meetingId: string,
     knownAttachmentsCount?: number
@@ -182,6 +183,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
   collectionsLoaded,
   hasPendingWrites = false,
   onSaveMeeting,
+  onSaveMeetingConfirmed,
   onDeleteMeeting,
   onSaveTask,
   onToggleTask,
@@ -446,6 +448,37 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
         err?.message ||
           'تعذر حفظ التعديلات سحابياً حالياً. تم الإبقاء على مسودتك في هذه الجلسة لتتمكن من إعادة المحاولة.'
       );
+    }
+  };
+
+  // Strict Cloud-Confirmed Meeting Save for Document AI (re-throws errors, rejects offline)
+  const persistActiveMeetingConfirmed = async (nextMeeting: Meeting, noticeMsg?: string) => {
+    if (!isOnline) {
+      throw new Error('أنت في وضع عدم الاتصال: لا يمكن إتمام الاعتماد السحابي المؤكد بدون اتصال بالإنترنت.');
+    }
+    const sanitized = sanitizeMeetingForSave({
+      ...nextMeeting,
+      updatedAt: new Date().toISOString(),
+    });
+    setActiveMeeting(sanitized);
+    setDraftDiscussionSummary(sanitized.discussionSummary ?? '');
+    setWorkspaceSaveError(null);
+    try {
+      if (onSaveMeetingConfirmed) {
+        await onSaveMeetingConfirmed(sanitized);
+      } else {
+        await onSaveMeeting(sanitized);
+      }
+      if (noticeMsg) {
+        setWorkspaceNotice(noticeMsg);
+        setTimeout(() => setWorkspaceNotice(null), 2600);
+      }
+    } catch (err: any) {
+      setWorkspaceSaveError(
+        err?.message ||
+          'تعذر حفظ التعديلات سحابياً. يرجى إعادة المحاولة.'
+      );
+      throw err;
     }
   };
 
@@ -2515,7 +2548,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
                   tasks={tasks}
                   agendaItems={activeAgenda}
                   isOnline={isOnline}
-                  onPersistMeetingUpdate={persistActiveMeeting}
+                  onPersistMeetingUpdate={persistActiveMeetingConfirmed}
                   onSaveTask={onSaveTask || (() => onNewTaskFromMeeting(activeMeeting))}
                   onRequestReopenMinutes={() => setPendingReopenTarget('review')}
                   externalSelectedAttachment={selectedAttachmentForDocAi}

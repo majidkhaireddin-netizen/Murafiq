@@ -1163,7 +1163,7 @@ export function AuthenticatedSession({
     });
   };
 
-  // Meeting Mutations
+  // Meeting Mutations (Standard Offline-First Optimistic)
   const handleSaveMeeting = async (meeting: Meeting): Promise<void> => {
     const prevEntity = meetingsRef.current.find((m) => m.id === meeting.id);
     const applyUpsert = (prev: Meeting[]) => {
@@ -1177,9 +1177,49 @@ export function AuthenticatedSession({
     };
     meetingsRef.current = applyUpsert(meetingsRef.current);
 
+    meetingOpsRef.current.runScopedMutation({
+      entityId: meeting.id,
+      entityType: 'meeting',
+      previousEntity: prevEntity,
+      setState: setMeetings,
+      applyOptimistic: applyUpsert,
+      dispatchWrite: () => fbSaveMeeting(meeting),
+      onServerConfirmed: ({ wasSuperseded }) => {
+        clearRejectedForEntity('meeting', meeting.id, wasSuperseded);
+      },
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+        console.warn('Save meeting rejected by server:', error);
+        recordRejectedWrite({
+          opId,
+          entityType: 'meeting',
+          entityId: meeting.id,
+          entityTitle: meeting.title,
+          operation: 'save',
+          classification,
+          error,
+          payload: meeting,
+          wasSuperseded,
+        });
+      },
+    });
+  };
+
+  // Cloud-Confirmed Meeting Save (Strict Server Confirmation for Document AI)
+  const handleSaveMeetingConfirmed = async (meeting: Meeting): Promise<void> => {
     if (!isOnline) {
-      throw new Error('أنت في وضع عدم الاتصال: لا يمكن تأكيد الحفظ السحابي للقاء حالياً.');
+      throw new Error('أنت في وضع عدم الاتصال: لا يمكن إتمام الاعتماد السحابي المؤكد بدون اتصال بالإنترنت.');
     }
+    const prevEntity = meetingsRef.current.find((m) => m.id === meeting.id);
+    const applyUpsert = (prev: Meeting[]) => {
+      const idx = prev.findIndex((m) => m.id === meeting.id);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = meeting;
+        return next;
+      }
+      return [meeting, ...prev];
+    };
+    meetingsRef.current = applyUpsert(meetingsRef.current);
 
     const handle = meetingOpsRef.current.runScopedMutation({
       entityId: meeting.id,
@@ -1192,7 +1232,7 @@ export function AuthenticatedSession({
         clearRejectedForEntity('meeting', meeting.id, wasSuperseded);
       },
       onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
-        console.warn('Save meeting rejected by server:', error);
+        console.warn('Save meeting confirmed rejected by server:', error);
         recordRejectedWrite({
           opId,
           entityType: 'meeting',
@@ -3420,6 +3460,7 @@ export function AuthenticatedSession({
               }}
               hasPendingWrites={collectionSync.meetings.hasPendingWrites}
               onSaveMeeting={handleSaveMeeting}
+              onSaveMeetingConfirmed={handleSaveMeetingConfirmed}
               onDeleteMeeting={handleDeleteMeeting}
               onSaveTask={handleSaveTaskWithResult}
               onToggleTask={handleToggleTask}
