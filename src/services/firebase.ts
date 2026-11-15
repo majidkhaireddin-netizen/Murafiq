@@ -48,12 +48,14 @@ import {
   ConflictItem,
   PlaybookTemplate,
   PlaybookRun,
+  CommunicationTemplate,
 } from '../types';
 import {
   DEFAULT_FOLLOW_UP_PREFERENCES,
   FOLLOW_UP_PREFERENCES_DOC_ID,
   normalizeFollowUpPreferences,
 } from '../utils/followUpEngine';
+import { sanitizeCommunicationTemplateForSave } from '../utils/communicationComposerEngine';
 import {
   deriveCacheRuntimeState,
   formatOptOutExecutionResult,
@@ -1654,6 +1656,77 @@ export async function createTaskFromPlaybookStepAtomic(
 export const firestorePlaybookAtomicAdapter: PlaybookAtomicPersistencePort = {
   runAtomicStepToTask: (input) => createTaskFromPlaybookStepAtomic(input),
 };
+
+// =========================================================================
+// Task 015: Communication Templates (/users/{uid}/communicationTemplates)
+// =========================================================================
+
+export function subscribeCommunicationTemplates(
+  onData: (templates: CommunicationTemplate[], metadata: SyncMetadata) => void,
+  onError?: (err: Error) => void
+) {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/communicationTemplates`;
+  const colRef = collection(db, 'users', uid, 'communicationTemplates');
+  return onSnapshot(
+    colRef,
+    { includeMetadataChanges: true },
+    (snapshot) => {
+      const items: CommunicationTemplate[] = [];
+      const pendingDocIds: string[] = [];
+      snapshot.forEach((d) => {
+        items.push(d.data() as CommunicationTemplate);
+        if (d.metadata.hasPendingWrites) {
+          pendingDocIds.push(d.id);
+        }
+      });
+      onData(items, {
+        fromCache: snapshot.metadata.fromCache,
+        hasPendingWrites: snapshot.metadata.hasPendingWrites,
+        pendingDocIds,
+      });
+    },
+    (error) => {
+      logFirestoreError(error, OperationType.LIST, path);
+      if (onError) onError(error as Error);
+    }
+  );
+}
+
+export function saveCommunicationTemplate(template: CommunicationTemplate): QueuedWriteHandle {
+  const uid = getAuthenticatedUid();
+  const now = new Date().toISOString();
+  const rawPayload = sanitizeCommunicationTemplateForSave(
+    {
+      ...template,
+      userId: uid,
+      createdAt: template.createdAt || now,
+      updatedAt: template.updatedAt || now,
+    },
+    uid,
+    now
+  );
+  const path = `users/${uid}/communicationTemplates/${rawPayload.id}`;
+  const payload = sanitizeFirestorePayload(rawPayload);
+  const serverPromise = trackInFlightWrite(
+    setDoc(doc(db, 'users', uid, 'communicationTemplates', rawPayload.id), payload).catch((error) =>
+      handleFirestoreError(error, OperationType.WRITE, path)
+    )
+  );
+  return { localAccepted: true, path, serverPromise };
+}
+
+export function deleteCommunicationTemplate(templateId: string): QueuedWriteHandle {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/communicationTemplates/${templateId}`;
+  const serverPromise = trackInFlightWrite(
+    deleteDoc(doc(db, 'users', uid, 'communicationTemplates', templateId)).catch((error) =>
+      handleFirestoreError(error, OperationType.DELETE, path)
+    )
+  );
+  return { localAccepted: true, path, serverPromise };
+}
+
 
 
 

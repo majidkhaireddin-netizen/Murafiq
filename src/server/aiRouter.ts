@@ -3,6 +3,8 @@ import type { NextFunction, Request, Response } from 'express';
 import type {
   AiBriefingInputPayload,
   AiMeetingInputPayload,
+  CommunicationDraftRequest,
+  CommunicationDraftResult,
   MeetingAiAnalysisResult,
   MeetingAiBriefingResult,
 } from '../types/index.ts';
@@ -24,6 +26,7 @@ import {
   GeminiServiceError,
   generateMeetingBriefingWithGemini,
 } from './geminiMeetingAssistant.ts';
+import { generateCommunicationDraftWithGemini } from './communicationAiService.ts';
 
 export interface AiRouterDeps {
   verifyBearerToken?: (authHeader: string | undefined) => Promise<VerifiedFirebaseUser>;
@@ -40,6 +43,18 @@ export interface AiRouterDeps {
     payload: AiBriefingInputPayload;
     signal?: AbortSignal;
   }) => Promise<MeetingAiBriefingResult>;
+  generateCommunicationDraft?: (params: {
+    request: CommunicationDraftRequest;
+    contextData: {
+      clientName?: string;
+      companyName?: string;
+      contactName?: string;
+      opportunityTitle?: string;
+      opportunityValue?: string;
+      nextAction?: string;
+    };
+    signal?: AbortSignal;
+  }) => Promise<CommunicationDraftResult>;
   nowMs?: () => number;
   rateLimitMaxRequests?: number;
   rateLimitWindowMs?: number;
@@ -56,6 +71,8 @@ export function createAiRouter(customDeps: AiRouterDeps = {}) {
     customDeps.verifyMeetingOwnership ?? verifyMeetingOwnershipInNamedDb;
   const analyzeMeeting = customDeps.analyzeMeeting ?? analyzeMeetingWithGemini;
   const generateBriefing = customDeps.generateBriefing ?? generateMeetingBriefingWithGemini;
+  const generateDraft =
+    customDeps.generateCommunicationDraft ?? generateCommunicationDraftWithGemini;
   const nowMs = customDeps.nowMs ?? (() => Date.now());
   const rateLimitMax = customDeps.rateLimitMaxRequests ?? AI_RATE_LIMIT_MAX_REQUESTS;
   const rateLimitWindow = customDeps.rateLimitWindowMs ?? AI_RATE_LIMIT_WINDOW_MS;
@@ -379,6 +396,77 @@ export function createAiRouter(customDeps: AiRouterDeps = {}) {
       });
     } finally {
       inFlightKeys.delete(inFlightKey);
+      res.off('close', onResponseClose);
+    }
+  });
+
+  router.post('/communication-draft', async (req: AuthenticatedRequest, res: Response) => {
+    const uid = req.authUser!.uid;
+    const body = (req.body || {}) as Record<string, unknown>;
+
+    const claimedUid = body.uid ?? body.userId ?? body.ownerId;
+    if (claimedUid !== undefined && claimedUid !== uid) {
+      res.status(403).json({
+        error: 'FORBIDDEN',
+        messageArabic: 'مرفوض: لا يُسمح بطلب صياغة ذكية لحساب آخر.',
+      });
+      return;
+    }
+
+    const requestPayload = (body.request || body) as CommunicationDraftRequest;
+    if (!requestPayload || !requestPayload.channel) {
+      res.status(400).json({
+        error: 'INVALID_COMMUNICATION_DRAFT_REQUEST',
+        messageArabic: 'بيانات طلب الصياغة غير صالحة أو قناة التواصل غير مشخصة.',
+      });
+      return;
+    }
+
+    const contextData = (body.contextData || {}) as {
+      clientName?: string;
+      companyName?: string;
+      contactName?: string;
+      opportunityTitle?: string;
+      opportunityValue?: string;
+      nextAction?: string;
+    };
+
+    const requestAbortController = new AbortController();
+    const onResponseClose = () => {
+      if (!res.writableEnded) {
+        requestAbortController.abort();
+      }
+    };
+    res.on('close', onResponseClose);
+
+    try {
+      const draftResult = await generateDraft({
+        request: requestPayload,
+        contextData,
+        signal: requestAbortController.signal,
+      });
+
+      if (res.writableEnded || requestAbortController.signal.aborted) {
+        return;
+      }
+
+      res.json(draftResult);
+    } catch (err: any) {
+      if (res.writableEnded) return;
+
+      if (err instanceof GeminiServiceError) {
+        res.status(err.statusCode).json({
+          error: err.errorCode,
+          messageArabic: err.message,
+        });
+        return;
+      }
+
+      res.status(502).json({
+        error: 'COMMUNICATION_DRAFT_FAILED',
+        messageArabic: 'تعذر توليد مسودة المراسلة الذكية حالياً.',
+      });
+    } finally {
       res.off('close', onResponseClose);
     }
   });

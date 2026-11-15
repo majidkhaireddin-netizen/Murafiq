@@ -1507,3 +1507,57 @@ export interface DocumentAiAnalysisResult {
   limitations: string[];
   warningsArabic: string[];
 }
+
+// =========================================================================
+// Task 015: Smart Outreach & Communication Composer Types
+// =========================================================================
+
+export type CommunicationTemplateCategory =
+  | 'intro_lead'
+  | 'proposal_send'
+  | 'meeting_invite'
+  | 'meeting_follow_up'
+  | 'opportunity_check_in'
+  | 'payment_reminder'
+  | 'reactivation'
+  | 'custom';
+
+export interface CommunicationTemplate {
+  id: string;
+  userId?: string;
+  title: string;
+  category: CommunicationTemplateCategory;
+  channel: CommunicationChannel | 'any';
+  subjectTemplate?: string;
+  bodyTemplate: string;
+  variables: string[];
+  isSystemTemplate: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type CommunicationOutreachTone = 'formal' | 'friendly' | 'persuasive' | 'concise';
+export type CommunicationOutreachGranularity = 'short' | 'medium' | 'detailed';
+
+export interface CommunicationDraftRequest {
+  templateId?: string;
+  customPrompt?: string;
+  channel: CommunicationChannel;
+  clientId: string;
+  contactId?: string;
+  opportunityId?: string;
+  meetingId?: string;
+  tone?: CommunicationOutreachTone;
+  granularity?: CommunicationOutreachGranularity;
+}
+
+export interface CommunicationDraftResult {
+  draftId: string;
+  generatedAt: string;
+  model: string;
+  subject?: string;
+  body: string;
+  variablesUsed: Record<string, string>;
+  warningsArabic: string[];
+}
+
