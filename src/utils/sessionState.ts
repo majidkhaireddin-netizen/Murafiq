@@ -107,6 +107,7 @@ export function classifyWriteError(
     preference: 'إعدادات المتابعة',
     opportunity: 'فرصة العمل',
     opportunityStageEvent: 'سجل مرحلة الفرصة',
+    interaction: 'سجل التواصل',
   };
   const entityName = names[entityType];
   const actionVerb = isDelete ? 'حذف' : 'حفظ';
@@ -348,6 +349,7 @@ export function getArabicSaveErrorMessage(entityType: EntityType, isDelete: bool
     preference: 'إعدادات المتابعة',
     opportunity: 'فرصة العمل',
     opportunityStageEvent: 'سجل مرحلة الفرصة',
+    interaction: 'سجل التواصل',
   };
 
   const entityName = names[entityType];

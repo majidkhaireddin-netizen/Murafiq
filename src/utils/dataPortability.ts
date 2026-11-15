@@ -2,6 +2,7 @@ import type {
   ActionItem,
   Client,
   ClientContact,
+  CommunicationInteraction,
   CsvExportEntityType,
   ExportCompletenessMeta,
   ImportCollectionExecutionReport,
@@ -32,6 +33,15 @@ import {
 } from './opportunities.ts';
 import { normalizeArabicSearchText } from './searchEngine.ts';
 import { decodeTaskTimeBlockFromFirestore } from './calendarEngine.ts';
+import {
+  COMMUNICATION_CHANNEL_META,
+  COMMUNICATION_DIRECTION_META,
+  COMMUNICATION_OUTCOME_META,
+  isValidCommunicationChannel,
+  isValidCommunicationDirection,
+  isValidCommunicationOutcome,
+  resolveInteractionContact,
+} from './communications.ts';
 
 export const MURAFIQ_EXPORT_SCHEMA_VERSION = 'murafiq-export-v1' as const;
 export const LEGACY_PROTOTYPE_SCHEMA_VERSION = '1.0.0-prototype' as const;
@@ -136,6 +146,7 @@ const TASK_ALLOWED_KEYS = new Set([
   'meetingId',
   'clientId',
   'opportunityId',
+  'interactionId',
   'title',
   'description',
   'dueDate',
@@ -195,6 +206,28 @@ const STAGE_EVENT_ALLOWED_KEYS = new Set([
   'occurredAt',
 ]);
 
+const INTERACTION_ALLOWED_KEYS = new Set([
+  'id',
+  'userId',
+  'clientId',
+  'contactId',
+  'opportunityId',
+  'meetingId',
+  'channel',
+  'direction',
+  'occurredAt',
+  'durationMinutes',
+  'subject',
+  'summary',
+  'topics',
+  'outcome',
+  'nextStep',
+  'nextFollowUpDate',
+  'linkedTaskId',
+  'createdAt',
+  'updatedAt',
+]);
+
 export function isValidFirestoreId(id: unknown): id is string {
   return typeof id === 'string' && VALID_ID_REGEX.test(id);
 }
@@ -227,6 +260,7 @@ export interface BuildExportBundleParams {
   notes: Note[];
   opportunities: Opportunity[];
   opportunityStageEvents: OpportunityStageEvent[];
+  interactions?: CommunicationInteraction[];
   isOnline?: boolean;
   collectionsLoaded?: {
     clients?: boolean;
@@ -235,6 +269,7 @@ export interface BuildExportBundleParams {
     notes?: boolean;
     opportunities?: boolean;
     opportunityStageEvents?: boolean;
+    interactions?: boolean;
   };
   hasPendingLocalWrites?: boolean;
   exportedAt?: string;
@@ -247,6 +282,7 @@ const EXPORT_COLLECTION_LABELS_AR: Record<string, string> = {
   notes: 'الملاحظات',
   opportunities: 'فرص الأعمال',
   opportunityStageEvents: 'سجل مراحل الفرص',
+  interactions: 'سجل التواصل',
 };
 
 /**
@@ -261,7 +297,7 @@ export function buildUserDataExportBundle(
   const hasPendingLocalWrites = Boolean(params.hasPendingLocalWrites);
   const exportedAt = params.exportedAt || new Date().toISOString();
 
-  const loadedFlags = {
+  const loadedFlags: Record<string, boolean> = {
     clients: params.collectionsLoaded?.clients ?? true,
     meetings: params.collectionsLoaded?.meetings ?? true,
     tasks: params.collectionsLoaded?.tasks ?? true,
@@ -269,6 +305,9 @@ export function buildUserDataExportBundle(
     opportunities: params.collectionsLoaded?.opportunities ?? true,
     opportunityStageEvents: params.collectionsLoaded?.opportunityStageEvents ?? true,
   };
+  if (params.collectionsLoaded?.interactions !== undefined) {
+    loadedFlags.interactions = params.collectionsLoaded.interactions;
+  }
 
   const unloadedCollections: string[] = [];
   for (const [key, loaded] of Object.entries(loadedFlags)) {
@@ -300,6 +339,7 @@ export function buildUserDataExportBundle(
   const rawNotes = filterOwned(params.notes);
   const rawOpportunities = filterOwned(params.opportunities);
   const rawStageEvents = filterOwned(params.opportunityStageEvents);
+  const rawInteractions = filterOwned(params.interactions || []);
 
   let meetingsWithLegacyPhotoPathsCount = 0;
   let totalLegacyPhotoPathsCount = 0;
@@ -350,6 +390,11 @@ export function buildUserDataExportBundle(
     userId: uid,
   }));
 
+  const cleanInteractions = rawInteractions.map((i) => ({
+    ...stripSecretsAndInternalFields(i),
+    userId: uid,
+  }));
+
   return {
     schemaVersion: MURAFIQ_EXPORT_SCHEMA_VERSION,
     application: 'Murafiq',
@@ -375,6 +420,7 @@ export function buildUserDataExportBundle(
       notes: cleanNotes.length,
       opportunities: cleanOpportunities.length,
       opportunityStageEvents: cleanStageEvents.length,
+      ...(params.interactions !== undefined ? { interactions: cleanInteractions.length } : {}),
     },
     data: {
       clients: cleanClients,
@@ -383,6 +429,7 @@ export function buildUserDataExportBundle(
       notes: cleanNotes,
       opportunities: cleanOpportunities,
       opportunityStageEvents: cleanStageEvents,
+      ...(params.interactions !== undefined ? { interactions: cleanInteractions } : {}),
     },
   };
 }
@@ -483,10 +530,11 @@ export interface BuildEntityCsvParams {
   meetings: Meeting[];
   tasks: ActionItem[];
   opportunities: Opportunity[];
+  interactions?: CommunicationInteraction[];
 }
 
 /**
- * Generates an Arabic UTF-8 BOM CSV string for Clients, Tasks, Meetings, or Opportunities.
+ * Generates an Arabic UTF-8 BOM CSV string for Clients, Tasks, Meetings, Opportunities, or Interactions.
  * Respects multi-currency separation for Opportunities (value and currency in separate columns, never summed across currencies).
  */
 export function buildEntityCsv(params: BuildEntityCsvParams): string {
@@ -496,14 +544,59 @@ export function buildEntityCsv(params: BuildEntityCsvParams): string {
 
   const ownedClients = filterOwned(params.clients);
   const clientNameMap = new Map<string, string>();
+  const clientMap = new Map<string, Client>();
   for (const c of ownedClients) {
     clientNameMap.set(c.id, c.name);
+    clientMap.set(c.id, c);
   }
 
   const ownedOpportunities = filterOwned(params.opportunities);
   const opportunityTitleMap = new Map<string, string>();
   for (const o of ownedOpportunities) {
     opportunityTitleMap.set(o.id, o.title);
+  }
+
+  if (params.entityType === 'interactions') {
+    const ownedInteractions = filterOwned(params.interactions || []);
+    const headers = [
+      'معرف التواصل',
+      'الموضوع',
+      'العميل',
+      'جهة الاتصال',
+      'الفرصة المرتبطة',
+      'القناة',
+      'الاتجاه',
+      'تاريخ ووقت التواصل',
+      'المدة (دقائق)',
+      'النتيجة',
+      'الموضوعات',
+      'الملخص',
+      'الخطوة التالية',
+      'تاريخ المتابعة القادمة',
+      'معرف المهمة المرتبطة',
+    ];
+    const rows = ownedInteractions.map((i) => {
+      const client = clientMap.get(i.clientId);
+      const contact = resolveInteractionContact(client, i.contactId);
+      return [
+        i.id,
+        i.subject,
+        clientNameMap.get(i.clientId) || i.clientId,
+        contact ? contact.name : i.contactId || '',
+        i.opportunityId ? opportunityTitleMap.get(i.opportunityId) || i.opportunityId : '',
+        COMMUNICATION_CHANNEL_META[i.channel]?.labelAr || i.channel,
+        COMMUNICATION_DIRECTION_META[i.direction]?.labelAr || i.direction,
+        i.occurredAt || '',
+        i.durationMinutes !== undefined ? i.durationMinutes : '',
+        COMMUNICATION_OUTCOME_META[i.outcome]?.labelAr || i.outcome,
+        Array.isArray(i.topics) ? i.topics.join(' | ') : '',
+        i.summary || '',
+        i.nextStep || '',
+        i.nextFollowUpDate || '',
+        i.linkedTaskId || '',
+      ];
+    });
+    return buildCsvDocument(headers, rows);
   }
 
   if (params.entityType === 'clients') {
@@ -816,6 +909,7 @@ export interface ExistingUserDataForImport {
   notes: Note[];
   opportunities: Opportunity[];
   opportunityStageEvents: OpportunityStageEvent[];
+  interactions?: CommunicationInteraction[];
 }
 
 export interface ValidateImportInput {
@@ -835,6 +929,7 @@ function createEmptyCountsByCollection(): ImportPreviewResult['countsByCollectio
     notes: { totalInFile: 0, validToImport: 0, duplicateSkipped: 0, rejected: 0 },
     opportunities: { totalInFile: 0, validToImport: 0, duplicateSkipped: 0, rejected: 0 },
     opportunityStageEvents: { totalInFile: 0, validToImport: 0, duplicateSkipped: 0, rejected: 0 },
+    interactions: { totalInFile: 0, validToImport: 0, duplicateSkipped: 0, rejected: 0 },
   };
 }
 
@@ -846,6 +941,7 @@ function createEmptyBatch(): SanitizedImportBatch {
     notes: [],
     opportunities: [],
     opportunityStageEvents: [],
+    interactions: [],
   };
 }
 
@@ -1055,6 +1151,9 @@ export function validateAndPreviewImport(input: ValidateImportInput): ImportPrev
   const rawStageEvents: unknown[] = Array.isArray(sourceContainer.opportunityStageEvents)
     ? sourceContainer.opportunityStageEvents
     : [];
+  const rawInteractions: unknown[] = Array.isArray(sourceContainer.interactions)
+    ? sourceContainer.interactions
+    : [];
 
   // Existing IDs in current user's account
   const existingClientIds = new Set(input.existingData.clients.map((c) => c.id));
@@ -1064,6 +1163,9 @@ export function validateAndPreviewImport(input: ValidateImportInput): ImportPrev
   const existingOppIds = new Set(input.existingData.opportunities.map((o) => o.id));
   const existingEventIds = new Set(
     input.existingData.opportunityStageEvents.map((e) => e.id)
+  );
+  const existingInteractionIds = new Set(
+    (input.existingData.interactions || []).map((i) => i.id)
   );
 
   // Track valid target IDs (existing + newly validated in this batch) for relational integrity
@@ -1077,6 +1179,7 @@ export function validateAndPreviewImport(input: ValidateImportInput): ImportPrev
   const seenTaskIdsInFile = new Set<string>();
   const seenNoteIdsInFile = new Set<string>();
   const seenEventIdsInFile = new Set<string>();
+  const seenInteractionIdsInFile = new Set<string>();
 
   let brokenRelationshipsCount = 0;
 
@@ -1986,13 +2089,135 @@ export function validateAndPreviewImport(input: ValidateImportInput): ImportPrev
     countsByCollection.opportunityStageEvents.validToImport++;
   }
 
+  // 7. Validate Interactions
+  const interactionCounts = countsByCollection.interactions!;
+  interactionCounts.totalInFile = rawInteractions.length;
+  for (let i = 0; i < rawInteractions.length; i++) {
+    const raw = rawInteractions[i];
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      interactionCounts.rejected++;
+      continue;
+    }
+    const obj = raw as Record<string, any>;
+    const id = obj.id;
+    const subject = clampStr(obj.subject, 200);
+    const clientId = clampStr(obj.clientId, 128);
+
+    if (!isValidFirestoreId(id) || !subject || !clientId || !isValidFirestoreId(clientId)) {
+      interactionCounts.rejected++;
+      continue;
+    }
+
+    if (existingInteractionIds.has(id) || seenInteractionIdsInFile.has(id)) {
+      interactionCounts.duplicateSkipped++;
+      issues.push({
+        id: `comm_dup_${id}_${i}`,
+        collection: 'interactions',
+        recordId: id,
+        recordTitle: subject,
+        severity: 'warning',
+        code: 'DUPLICATE_SKIPPED',
+        messageAr: `تم تخطي سجل التواصل «${subject}» (${id}) لأنه موجود مسبقاً.`,
+      });
+      continue;
+    }
+
+    if (!validClientIds.has(clientId)) {
+      interactionCounts.rejected++;
+      brokenRelationshipsCount++;
+      issues.push({
+        id: `comm_missing_client_${id}`,
+        collection: 'interactions',
+        recordId: id,
+        recordTitle: subject,
+        severity: 'error',
+        code: 'MISSING_CLIENT_SKIPPED',
+        messageAr: `تم رفض سجل التواصل «${subject}» لأن العميل المرتبط (${clientId}) غير موجود.`,
+      });
+      continue;
+    }
+
+    checkUnknownAndForbiddenKeys(
+      obj,
+      INTERACTION_ALLOWED_KEYS,
+      'interactions',
+      id,
+      subject,
+      issues
+    );
+
+    const comm: CommunicationInteraction = {
+      id,
+      userId: uid,
+      clientId,
+      channel: isValidCommunicationChannel(obj.channel) ? obj.channel : 'phone_call',
+      direction: isValidCommunicationDirection(obj.direction) ? obj.direction : 'outbound',
+      occurredAt: clampStr(obj.occurredAt, 50) || nowIso,
+      subject,
+      outcome: isValidCommunicationOutcome(obj.outcome) ? obj.outcome : 'answered',
+      createdAt: clampStr(obj.createdAt, 50) || nowIso,
+      updatedAt: clampStr(obj.updatedAt, 50) || nowIso,
+    };
+
+    const contactId = clampStr(obj.contactId, 128);
+    if (contactId && isValidFirestoreId(contactId)) comm.contactId = contactId;
+
+    const opportunityId = clampStr(obj.opportunityId, 128);
+    if (opportunityId && validOpportunityIds.has(opportunityId)) {
+      comm.opportunityId = opportunityId;
+    }
+
+    const meetingId = clampStr(obj.meetingId, 128);
+    if (meetingId && validMeetingIds.has(meetingId)) {
+      comm.meetingId = meetingId;
+    }
+
+    if (
+      typeof obj.durationMinutes === 'number' &&
+      Number.isFinite(obj.durationMinutes) &&
+      obj.durationMinutes >= 0 &&
+      obj.durationMinutes <= 1440
+    ) {
+      comm.durationMinutes = Math.round(obj.durationMinutes);
+    }
+
+    const summary = clampStr(obj.summary, 5000);
+    if (summary) comm.summary = summary;
+
+    if (Array.isArray(obj.topics)) {
+      const topics = obj.topics
+        .map((t: unknown) => clampStr(t, 60))
+        .filter((t): t is string => Boolean(t))
+        .slice(0, 20);
+      if (topics.length > 0) comm.topics = topics;
+    }
+
+    const nextStep = clampStr(obj.nextStep, 500);
+    if (nextStep) comm.nextStep = nextStep;
+
+    const nextFollowUpDate = clampStr(obj.nextFollowUpDate, 20);
+    if (nextFollowUpDate && DATE_ONLY_REGEX.test(nextFollowUpDate)) {
+      comm.nextFollowUpDate = nextFollowUpDate;
+    }
+
+    const linkedTaskId = clampStr(obj.linkedTaskId, 128);
+    if (linkedTaskId && isValidFirestoreId(linkedTaskId)) {
+      comm.linkedTaskId = linkedTaskId;
+    }
+
+    seenInteractionIdsInFile.add(id);
+    sanitizedBatch.interactions!.push(comm);
+    interactionCounts.validToImport++;
+  }
+
   const totalInFile =
     countsByCollection.clients.totalInFile +
     countsByCollection.meetings.totalInFile +
     countsByCollection.tasks.totalInFile +
     countsByCollection.notes.totalInFile +
     countsByCollection.opportunities.totalInFile +
-    countsByCollection.opportunityStageEvents.totalInFile;
+    countsByCollection.opportunityStageEvents.totalInFile +
+    interactionCounts.totalInFile;
 
   const totalValidToImport =
     countsByCollection.clients.validToImport +
@@ -2000,7 +2225,8 @@ export function validateAndPreviewImport(input: ValidateImportInput): ImportPrev
     countsByCollection.tasks.validToImport +
     countsByCollection.notes.validToImport +
     countsByCollection.opportunities.validToImport +
-    countsByCollection.opportunityStageEvents.validToImport;
+    countsByCollection.opportunityStageEvents.validToImport +
+    interactionCounts.validToImport;
 
   const totalDuplicatesSkipped =
     countsByCollection.clients.duplicateSkipped +
@@ -2008,7 +2234,8 @@ export function validateAndPreviewImport(input: ValidateImportInput): ImportPrev
     countsByCollection.tasks.duplicateSkipped +
     countsByCollection.notes.duplicateSkipped +
     countsByCollection.opportunities.duplicateSkipped +
-    countsByCollection.opportunityStageEvents.duplicateSkipped;
+    countsByCollection.opportunityStageEvents.duplicateSkipped +
+    interactionCounts.duplicateSkipped;
 
   const totalRejected =
     countsByCollection.clients.rejected +
@@ -2016,7 +2243,8 @@ export function validateAndPreviewImport(input: ValidateImportInput): ImportPrev
     countsByCollection.tasks.rejected +
     countsByCollection.notes.rejected +
     countsByCollection.opportunities.rejected +
-    countsByCollection.opportunityStageEvents.rejected;
+    countsByCollection.opportunityStageEvents.rejected +
+    interactionCounts.rejected;
 
   return {
     canProceed: totalValidToImport > 0,
@@ -2288,6 +2516,7 @@ export interface ImportPersistenceHandlers {
   saveTask: (task: ActionItem) => Promise<void>;
   saveNote: (note: Note) => Promise<void>;
   saveOpportunityStageEvent: (event: OpportunityStageEvent) => Promise<void>;
+  saveInteraction?: (interaction: CommunicationInteraction) => Promise<void>;
 }
 
 export interface ExecuteSafeImportParams {
@@ -2314,7 +2543,7 @@ function createEmptyCollectionExecutionReport(
  * Executes a validated import preview only after explicit user confirmation (`confirmed === true`)
  * and while online (`isOnline === true`).
  * Writes records in topological order:
- * 1. clients -> 2. opportunities -> 3. meetings -> 4. tasks -> 5. notes -> 6. opportunityStageEvents.
+ * 1. clients -> 2. opportunities -> 3. meetings -> 4. tasks -> 5. notes -> 6. opportunityStageEvents -> 7. interactions.
  * Supports safe retry without duplicating already-succeeded records via `previousSucceededKeys`.
  */
 export async function executeSafeImportPlan(
@@ -2341,6 +2570,9 @@ export async function executeSafeImportPlan(
     ),
     opportunityStageEvents: createEmptyCollectionExecutionReport(
       params.preview.countsByCollection.opportunityStageEvents.duplicateSkipped
+    ),
+    interactions: createEmptyCollectionExecutionReport(
+      params.preview.countsByCollection.interactions?.duplicateSkipped ?? 0
     ),
   };
 
@@ -2555,13 +2787,43 @@ export async function executeSafeImportPlan(
     }
   }
 
+  // 7. Import Communication Interactions
+  for (const comm of batch.interactions || []) {
+    const key = `interactions:${comm.id}`;
+    if (succeededSet.has(key)) continue;
+    if (!params.handlers.saveInteraction) continue;
+    collections.interactions.attempted++;
+    if (failedClientIds.has(comm.clientId)) {
+      collections.interactions.failed++;
+      collections.interactions.failedItems.push({
+        id: comm.id,
+        title: comm.subject,
+        errorAr: 'تعذر حفظ التواصل بسبب فشل حفظ العميل المرتبط به.',
+      });
+      continue;
+    }
+    try {
+      await params.handlers.saveInteraction(comm);
+      collections.interactions.succeeded++;
+      succeededSet.add(key);
+    } catch (err: any) {
+      collections.interactions.failed++;
+      collections.interactions.failedItems.push({
+        id: comm.id,
+        title: comm.subject,
+        errorAr: err?.message || 'تعذر حفظ سجل التواصل.',
+      });
+    }
+  }
+
   const totalSucceeded =
     collections.clients.succeeded +
     collections.opportunities.succeeded +
     collections.meetings.succeeded +
     collections.tasks.succeeded +
     collections.notes.succeeded +
-    collections.opportunityStageEvents.succeeded;
+    collections.opportunityStageEvents.succeeded +
+    collections.interactions.succeeded;
 
   const totalFailed =
     collections.clients.failed +
@@ -2569,7 +2831,8 @@ export async function executeSafeImportPlan(
     collections.meetings.failed +
     collections.tasks.failed +
     collections.notes.failed +
-    collections.opportunityStageEvents.failed;
+    collections.opportunityStageEvents.failed +
+    collections.interactions.failed;
 
   const status: ImportExecutionReport['status'] =
     totalFailed === 0

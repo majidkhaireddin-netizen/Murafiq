@@ -1,5 +1,12 @@
 import React, { useMemo, useState } from 'react';
-import { ActionItem, Client, Meeting, Note, Opportunity } from '../../types';
+import {
+  ActionItem,
+  Client,
+  CommunicationInteraction,
+  Meeting,
+  Note,
+  Opportunity,
+} from '../../types';
 import { formatArabicDate, getHijriDateString } from '../../utils/logic';
 import { computeOpportunityPipelineMetrics } from '../../utils/opportunities';
 import {
@@ -41,6 +48,7 @@ export interface DashboardViewProps {
   tasks: ActionItem[];
   notes: Note[];
   opportunities?: Opportunity[];
+  interactions?: CommunicationInteraction[];
   onSelectMeeting: (meeting: Meeting) => void;
   onSelectClient: (client: Client) => void;
   onToggleTask?: (taskId: string) => void;
@@ -70,6 +78,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   tasks,
   notes,
   opportunities = [],
+  interactions = [],
   onSelectMeeting,
   onSelectClient,
   onNewMeeting,
@@ -106,6 +115,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         meetings,
         tasks,
         notes,
+        interactions,
         preset,
         customRange:
           preset === 'custom'
@@ -120,6 +130,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       meetings,
       tasks,
       notes,
+      interactions,
       preset,
       customStart,
       customEnd,

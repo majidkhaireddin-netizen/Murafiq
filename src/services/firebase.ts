@@ -43,6 +43,7 @@ import {
   FollowUpPreferences,
   Opportunity,
   OpportunityStageEvent,
+  CommunicationInteraction,
 } from '../types';
 import {
   DEFAULT_FOLLOW_UP_PREFERENCES,
@@ -66,6 +67,7 @@ import {
 import { sanitizeMeetingForSave } from '../utils/meetingMinutes';
 import { sanitizeClientForSave } from '../utils/client360';
 import { sanitizeOpportunityForSave } from '../utils/opportunities';
+import { sanitizeInteractionForSave } from '../utils/communications';
 import {
   decodeTaskTimeBlockFromFirestore,
   sanitizeTaskForFirestoreSave,
@@ -480,6 +482,7 @@ export function getUserCollectionPath(
     | 'preferences'
     | 'opportunities'
     | 'opportunityStageEvents'
+    | 'interactions'
 ): string {
   const uid = getAuthenticatedUid();
   return `users/${uid}/${subcollection}`;
@@ -1234,4 +1237,71 @@ export function deleteOpportunityStageEvent(eventId: string): QueuedWriteHandle 
   );
   return { localAccepted: true, path, serverPromise };
 }
+
+// =========================================================================
+// Task 011: Communication Center & Interaction History (/users/{uid}/interactions)
+// =========================================================================
+
+export function subscribeInteractions(
+  onData: (interactions: CommunicationInteraction[], metadata: SyncMetadata) => void,
+  onError?: (err: Error) => void
+) {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/interactions`;
+  const colRef = collection(db, 'users', uid, 'interactions');
+  return onSnapshot(
+    colRef,
+    { includeMetadataChanges: true },
+    (snapshot) => {
+      const items: CommunicationInteraction[] = [];
+      const pendingDocIds: string[] = [];
+      snapshot.forEach((d) => {
+        items.push(d.data() as CommunicationInteraction);
+        if (d.metadata.hasPendingWrites) {
+          pendingDocIds.push(d.id);
+        }
+      });
+      onData(items, {
+        fromCache: snapshot.metadata.fromCache,
+        hasPendingWrites: snapshot.metadata.hasPendingWrites,
+        pendingDocIds,
+      });
+    },
+    (error) => {
+      logFirestoreError(error, OperationType.LIST, path);
+      if (onError) onError(error as Error);
+    }
+  );
+}
+
+export function saveInteraction(interaction: CommunicationInteraction): QueuedWriteHandle {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/interactions/${interaction.id}`;
+  const now = new Date().toISOString();
+  const rawPayload: CommunicationInteraction = sanitizeInteractionForSave({
+    ...interaction,
+    userId: uid,
+    createdAt: interaction.createdAt || now,
+    updatedAt: interaction.updatedAt || now,
+  });
+  const payload = sanitizeFirestorePayload(rawPayload);
+  const serverPromise = trackInFlightWrite(
+    setDoc(doc(db, 'users', uid, 'interactions', rawPayload.id), payload).catch((error) =>
+      handleFirestoreError(error, OperationType.WRITE, path)
+    )
+  );
+  return { localAccepted: true, path, serverPromise };
+}
+
+export function deleteInteraction(interactionId: string): QueuedWriteHandle {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/interactions/${interactionId}`;
+  const serverPromise = trackInFlightWrite(
+    deleteDoc(doc(db, 'users', uid, 'interactions', interactionId)).catch((error) =>
+      handleFirestoreError(error, OperationType.DELETE, path)
+    )
+  );
+  return { localAccepted: true, path, serverPromise };
+}
+
 

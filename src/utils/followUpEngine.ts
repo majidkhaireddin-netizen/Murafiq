@@ -1,6 +1,7 @@
 import type {
   ActionItem,
   Client,
+  CommunicationInteraction,
   DailyCommandSummary,
   DailyTaskBucketKey,
   FollowUpPreferences,
@@ -23,6 +24,11 @@ import {
   evaluateOpportunityFollowUpAlerts,
   isOpportunityClosed,
 } from './opportunities.ts';
+import {
+  COMMUNICATION_CHANNEL_META,
+  findLinkedTaskForInteraction,
+  isInteractionFollowUpPending,
+} from './communications.ts';
 
 export const FOLLOW_UP_PREFERENCES_DOC_ID = 'follow_up';
 
@@ -532,6 +538,7 @@ export function buildDailyClientFollowUps(params: {
   clients: Client[];
   meetings: Meeting[];
   tasks: ActionItem[];
+  interactions?: CommunicationInteraction[];
   preferences: FollowUpPreferences;
   referenceDate?: Date;
   timeZone?: string;
@@ -540,6 +547,7 @@ export function buildDailyClientFollowUps(params: {
     clients,
     meetings,
     tasks,
+    interactions = [],
     preferences,
     referenceDate = new Date(),
     timeZone,
@@ -554,6 +562,7 @@ export function buildDailyClientFollowUps(params: {
   for (const client of clients) {
     const clientMeetings = meetings.filter((m) => m.clientId === client.id);
     const clientTasks = tasks.filter((t) => t.clientId === client.id);
+    const clientInteractions = interactions.filter((i) => i.clientId === client.id);
 
     const overdueTasks = clientTasks.filter((t) => {
       if (t.status === 'completed' || t.status === 'cancelled') return false;
@@ -585,10 +594,20 @@ export function buildDailyClientFollowUps(params: {
       return diff >= -7 && diff <= Math.max(1, preferences.upcomingTaskWindowDays);
     });
 
+    const dueInteractionFollowUps = clientInteractions.filter((comm) => {
+      if (!isInteractionFollowUpPending(comm, clientTasks)) return false;
+      if (!comm.nextFollowUpDate) return false;
+      const followParts = resolveCalendarParts(comm.nextFollowUpDate, timeZone);
+      if (!followParts) return false;
+      const diff = calendarDaysDiff(followParts, refParts);
+      return diff <= Math.max(1, preferences.upcomingTaskWindowDays);
+    });
+
     const c360Alerts = evaluateClientAttentionAlerts({
       client,
       meetings: clientMeetings,
       tasks: clientTasks,
+      interactions: clientInteractions,
       staleThresholdDays: staleDays,
       referenceDate,
     });
@@ -617,6 +636,9 @@ export function buildDailyClientFollowUps(params: {
     if (dueFollowUpMeetings.length > 0) {
       reasonsArabic.push('موعد متابعة مجدول');
     }
+    if (dueInteractionFollowUps.length > 0) {
+      reasonsArabic.push('متابعة تواصل مستحقة');
+    }
     if (client.relationshipStatus === 'follow_up_needed') {
       reasonsArabic.push('حالة العميل: يحتاج متابعة');
     }
@@ -633,6 +655,7 @@ export function buildDailyClientFollowUps(params: {
       overdueTasks.length > 0 || imminentMeetings.length > 0
         ? 'high'
         : dueFollowUpMeetings.length > 0 ||
+          dueInteractionFollowUps.length > 0 ||
           client.relationshipStatus === 'follow_up_needed' ||
           highPriorityTasks.length > 0 ||
           staleContactDays !== null
@@ -646,7 +669,7 @@ export function buildDailyClientFollowUps(params: {
       overdueTasksCount: overdueTasks.length,
       highPriorityTasksCount: highPriorityTasks.length,
       hasImminentMeeting: imminentMeetings.length > 0,
-      hasScheduledFollowUp: dueFollowUpMeetings.length > 0,
+      hasScheduledFollowUp: dueFollowUpMeetings.length > 0 || dueInteractionFollowUps.length > 0,
       staleContactDays,
       basisDisclosureArabic: CLIENT_FOLLOW_UP_DISCLOSURE_AR,
     });
@@ -669,6 +692,7 @@ export function computeDailyCommandSummary(params: {
   meetings: Meeting[];
   tasks: ActionItem[];
   opportunities?: Opportunity[];
+  interactions?: CommunicationInteraction[];
   preferences?: FollowUpPreferences;
   referenceDate?: Date;
   timeZone?: string;
@@ -678,11 +702,13 @@ export function computeDailyCommandSummary(params: {
     meetings,
     tasks,
     opportunities = [],
+    interactions = [],
     preferences = DEFAULT_FOLLOW_UP_PREFERENCES,
     referenceDate = new Date(),
     timeZone,
   } = params;
 
+  const refParts = extractZonedCalendarParts(referenceDate, timeZone);
   const categorized = categorizeDailyWorkTasks(tasks, referenceDate, timeZone);
   const upcomingMeetings = getUpcomingMeetingsForDailyCenter({
     meetings,
@@ -695,6 +721,7 @@ export function computeDailyCommandSummary(params: {
     clients,
     meetings,
     tasks,
+    interactions,
     preferences,
     referenceDate,
     timeZone,
@@ -717,6 +744,13 @@ export function computeDailyCommandSummary(params: {
     return alerts.some((a) => a.kind === 'overdue_next_action');
   }).length;
 
+  const dueInteractionFollowUpsCount = interactions.filter((comm) => {
+    if (!isInteractionFollowUpPending(comm, tasks)) return false;
+    if (!comm.nextFollowUpDate) return false;
+    const parts = resolveCalendarParts(comm.nextFollowUpDate, timeZone);
+    return parts !== null && calendarDaysDiff(parts, refParts) <= 0;
+  }).length;
+
   return {
     dueTodayTasksCount: categorized.today.length,
     overdueTasksCount: categorized.overdue.length,
@@ -725,6 +759,7 @@ export function computeDailyCommandSummary(params: {
     followUpsRequiredCount: clientFollowUps.length,
     highPriorityTasksCount,
     overdueOpportunitiesCount,
+    dueInteractionFollowUpsCount,
   };
 }
 
@@ -783,6 +818,14 @@ export function computeOpportunityFingerprint(opp: Opportunity): string {
   const na = (opp.nextAction || '').trim();
   const raw = `opp|${opp.stage}|${opp.nextActionDate || ''}|${opp.expectedCloseDate || ''}|${opp.updatedAt || ''}|${
     na ? shortHash(na) : '0'
+  }`;
+  return raw.slice(0, 190);
+}
+
+export function computeInteractionFingerprint(comm: CommunicationInteraction): string {
+  const ns = (comm.nextStep || '').trim();
+  const raw = `comm|${comm.outcome}|${comm.nextFollowUpDate || ''}|${comm.linkedTaskId || ''}|${
+    ns ? shortHash(ns) : '0'
   }`;
   return raw.slice(0, 190);
 }
@@ -901,9 +944,36 @@ function inferInvalidationDetails(params: {
   meetingsById: Map<string, Meeting>;
   clientsById: Map<string, Client>;
   opportunitiesById: Map<string, Opportunity>;
+  interactionsById: Map<string, CommunicationInteraction>;
   preferences: FollowUpPreferences;
 }): { titleArabic: string; titleEnglish: string; reasonArabic: string; clientId?: string } {
-  const { persisted, tasksById, meetingsById, clientsById, opportunitiesById, preferences } = params;
+  const {
+    persisted,
+    tasksById,
+    meetingsById,
+    clientsById,
+    opportunitiesById,
+    interactionsById,
+    preferences,
+  } = params;
+
+  if (persisted.sourceType === 'interaction') {
+    const comm = interactionsById.get(persisted.sourceId);
+    if (!comm) {
+      return {
+        titleArabic: 'تذكير تواصل محذوف',
+        titleEnglish: 'Deleted interaction reminder',
+        reasonArabic: 'لم يعد صالحًا: تم حذف سجل التواصل المرتبط',
+        clientId: persisted.clientId,
+      };
+    }
+    return {
+      titleArabic: comm.subject,
+      titleEnglish: comm.subject,
+      reasonArabic: 'لم يعد صالحًا: تمت جدولة أو إنجاز متابعة التواصل',
+      clientId: comm.clientId,
+    };
+  }
 
   if (persisted.sourceType === 'task') {
     const task = tasksById.get(persisted.sourceId);
@@ -1046,6 +1116,7 @@ export function evaluateReminders(params: {
   meetings: Meeting[];
   tasks: ActionItem[];
   opportunities?: Opportunity[];
+  interactions?: CommunicationInteraction[];
   persistedStates?: ReminderStateRecord[];
   preferences?: FollowUpPreferences;
   referenceDate?: Date;
@@ -1056,6 +1127,7 @@ export function evaluateReminders(params: {
     meetings,
     tasks,
     opportunities = [],
+    interactions = [],
     persistedStates = [],
     preferences = DEFAULT_FOLLOW_UP_PREFERENCES,
     referenceDate = new Date(),
@@ -1069,6 +1141,9 @@ export function evaluateReminders(params: {
   const tasksById = new Map<string, ActionItem>(tasks.map((t) => [t.id, t]));
   const meetingsById = new Map<string, Meeting>(meetings.map((m) => [m.id, m]));
   const opportunitiesById = new Map<string, Opportunity>(opportunities.map((o) => [o.id, o]));
+  const interactionsById = new Map<string, CommunicationInteraction>(
+    interactions.map((i) => [i.id, i])
+  );
   const persistedById = new Map<string, ReminderStateRecord>(
     persistedStates.map((s) => [s.id, s])
   );
@@ -1255,24 +1330,29 @@ export function evaluateReminders(params: {
         (m) => m.clientId === client.id && m.status !== 'cancelled'
       );
       const clientTasks = tasks.filter((t) => t.clientId === client.id);
+      const clientInteractions = interactions.filter((i) => i.clientId === client.id);
       const alerts = evaluateClientAttentionAlerts({
         client,
         meetings: clientMeetings,
         tasks: clientTasks,
+        interactions: clientInteractions,
         staleThresholdDays: staleThreshold,
         referenceDate,
       });
       const staleAlert = alerts.find((a) => a.kind === 'stale_contact');
       if (!staleAlert) continue;
 
-      const latestMeetingIso = clientMeetings
-        .map((m) => m.dateTime)
-        .filter((d) => {
-          const ms = parseMeetingDateTimeMs(d, timeZone);
-          return ms !== null && ms <= refMs;
-        })
-        .sort()
-        .pop() || null;
+      const latestContactIso =
+        [
+          ...clientMeetings.map((m) => m.dateTime),
+          ...clientInteractions.map((i) => i.occurredAt),
+        ]
+          .filter((d) => {
+            const ms = parseMeetingDateTimeMs(d, timeZone);
+            return ms !== null && ms <= refMs;
+          })
+          .sort()
+          .pop() || null;
 
       const reason: ReminderReason = 'client_stale_contact';
       const id = buildDeterministicReminderId('client', client.id, reason);
@@ -1289,7 +1369,7 @@ export function evaluateReminders(params: {
           subtitleArabic: staleAlert.messageArabic,
           subtitleEnglish: 'No recent logged activity in app',
           severity: 'medium',
-          sourceFingerprint: computeClientFingerprint(client, latestMeetingIso),
+          sourceFingerprint: computeClientFingerprint(client, latestContactIso),
           basisDisclosureArabic: CLIENT_FOLLOW_UP_DISCLOSURE_AR,
           provenance: 'source',
         });
@@ -1341,6 +1421,55 @@ export function evaluateReminders(params: {
         severity: picked.severity,
         sourceFingerprint: computeOpportunityFingerprint(opp),
         basisDisclosureArabic: picked.disclosureArabic,
+        provenance: 'source',
+      });
+    }
+  }
+
+  // 5. Interaction Follow-Up Candidates (when an interaction has nextFollowUpDate and no linked task already covers it)
+  for (const comm of interactions) {
+    if (!comm.nextFollowUpDate) continue;
+    // If a task is already linked to this interaction, let the task reminder represent it to avoid duplication
+    if (findLinkedTaskForInteraction(comm, tasks)) continue;
+    if (!isInteractionFollowUpPending(comm, tasks)) continue;
+
+    const followParts = resolveCalendarParts(comm.nextFollowUpDate, timeZone);
+    if (!followParts) continue;
+
+    const diff = calendarDaysDiff(followParts, refParts);
+    const windowDays = Math.max(1, preferences.upcomingTaskWindowDays);
+    if (diff > windowDays) continue;
+
+    const reason: ReminderReason =
+      diff < 0 ? 'interaction_follow_up_overdue' : 'interaction_follow_up_due';
+    const id = buildDeterministicReminderId('interaction', comm.id, reason);
+    if (!candidateMap.has(id)) {
+      const clientName = clientsById.get(comm.clientId)?.name;
+      const channelLabel = COMMUNICATION_CHANNEL_META[comm.channel]?.shortLabelAr || 'تواصل';
+      const subtitleArabic =
+        diff < 0
+          ? `متابعة ${channelLabel} متأخرة منذ ${Math.abs(diff)} يوم${comm.nextStep ? ` — ${comm.nextStep}` : ''}`
+          : diff === 0
+          ? `متابعة ${channelLabel} مستحقة اليوم${comm.nextStep ? ` — ${comm.nextStep}` : ''}`
+          : `متابعة ${channelLabel} مستحقة خلال ${diff} يوم${comm.nextStep ? ` — ${comm.nextStep}` : ''}`;
+
+      candidateMap.set(id, {
+        id,
+        sourceType: 'interaction',
+        sourceId: comm.id,
+        reason,
+        clientId: comm.clientId,
+        clientName,
+        interactionId: comm.id,
+        titleArabic: comm.nextStep?.trim()
+          ? `متابعة: ${comm.nextStep.trim()}`
+          : `متابعة تواصل: ${comm.subject}`,
+        titleEnglish: comm.nextStep?.trim() || `Follow-up: ${comm.subject}`,
+        subtitleArabic,
+        subtitleEnglish: diff < 0 ? 'Overdue interaction follow-up' : 'Interaction follow-up due',
+        dueAt: comm.nextFollowUpDate,
+        severity: diff <= 0 ? 'high' : 'medium',
+        sourceFingerprint: computeInteractionFingerprint(comm),
         provenance: 'source',
       });
     }
@@ -1400,6 +1529,7 @@ export function evaluateReminders(params: {
       meetingsById,
       clientsById,
       opportunitiesById,
+      interactionsById,
       preferences,
     });
     const clientName = details.clientId
@@ -1415,6 +1545,7 @@ export function evaluateReminders(params: {
       clientName,
       meetingId: persisted.sourceType === 'meeting' ? persisted.sourceId : undefined,
       taskId: persisted.sourceType === 'task' ? persisted.sourceId : undefined,
+      interactionId: persisted.sourceType === 'interaction' ? persisted.sourceId : undefined,
       titleArabic: details.titleArabic,
       titleEnglish: details.titleEnglish,
       subtitleArabic: details.reasonArabic,

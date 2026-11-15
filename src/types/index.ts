@@ -133,6 +133,7 @@ export interface ActionItem {
   meetingId?: string;
   clientId: string;
   opportunityId?: string;
+  interactionId?: string;
   title: string;
   description?: string;
   dueDate?: string; // YYYY-MM-DD (موعد الاستحقاق)
@@ -167,7 +168,8 @@ export type EntityType =
   | 'reminder'
   | 'preference'
   | 'opportunity'
-  | 'opportunityStageEvent';
+  | 'opportunityStageEvent'
+  | 'interaction';
 
 export type ResolutionChoice = 'keep_local' | 'keep_remote' | 'merge';
 
@@ -231,7 +233,8 @@ export interface RejectedWriteRecord {
     | ReminderStateRecord
     | FollowUpPreferences
     | Opportunity
-    | OpportunityStageEvent;
+    | OpportunityStageEvent
+    | CommunicationInteraction;
   occurredAt: string;
 }
 
@@ -430,7 +433,7 @@ export type DailyTaskBucketKey =
   | 'later'
   | 'no_due_date';
 
-export type ReminderSourceType = 'task' | 'meeting' | 'client' | 'opportunity';
+export type ReminderSourceType = 'task' | 'meeting' | 'client' | 'opportunity' | 'interaction';
 
 export type ReminderReason =
   | 'task_overdue'
@@ -443,7 +446,9 @@ export type ReminderReason =
   | 'opportunity_overdue_action'
   | 'opportunity_closing_soon'
   | 'opportunity_missing_next_action'
-  | 'opportunity_stale';
+  | 'opportunity_stale'
+  | 'interaction_follow_up_due'
+  | 'interaction_follow_up_overdue';
 
 export type ReminderStatus = 'active' | 'snoozed' | 'resolved' | 'invalidated';
 
@@ -491,6 +496,7 @@ export interface ReminderItem {
   clientName?: string;
   meetingId?: string;
   taskId?: string;
+  interactionId?: string;
   titleArabic: string;
   titleEnglish: string;
   subtitleArabic: string;
@@ -513,6 +519,7 @@ export interface DailyCommandSummary {
   followUpsRequiredCount: number;
   highPriorityTasksCount: number;
   overdueOpportunitiesCount?: number;
+  dueInteractionFollowUpsCount?: number;
 }
 
 // =========================================================================
@@ -587,7 +594,8 @@ export type SearchRecordType =
   | 'meeting'
   | 'task'
   | 'note'
-  | 'opportunity';
+  | 'opportunity'
+  | 'interaction';
 
 export type SearchMatchTier =
   | 'exact'
@@ -642,6 +650,7 @@ export interface SearchResultItem {
   taskRef?: ActionItem;
   noteRef?: Note;
   opportunityRef?: Opportunity;
+  interactionRef?: CommunicationInteraction;
 }
 
 export interface SearchCollectionsLoadedState {
@@ -650,6 +659,7 @@ export interface SearchCollectionsLoadedState {
   tasks: boolean;
   notes: boolean;
   opportunities: boolean;
+  interactions?: boolean;
 }
 
 export interface SearchExecutionResult {
@@ -663,7 +673,7 @@ export interface SearchExecutionResult {
   activeFilterCount: number;
 }
 
-export type CsvExportEntityType = 'clients' | 'tasks' | 'meetings' | 'opportunities';
+export type CsvExportEntityType = 'clients' | 'tasks' | 'meetings' | 'opportunities' | 'interactions';
 
 export type DataCompletenessStatus = 'complete_online' | 'partial_or_offline';
 
@@ -698,6 +708,7 @@ export interface MurafiqExportBundleV1 {
     notes: number;
     opportunities: number;
     opportunityStageEvents: number;
+    interactions?: number;
   };
   data: {
     clients: Client[];
@@ -706,6 +717,7 @@ export interface MurafiqExportBundleV1 {
     notes: Note[];
     opportunities: Opportunity[];
     opportunityStageEvents: OpportunityStageEvent[];
+    interactions?: CommunicationInteraction[];
   };
 }
 
@@ -722,7 +734,8 @@ export interface ImportValidationIssue {
     | 'tasks'
     | 'notes'
     | 'opportunities'
-    | 'opportunityStageEvents';
+    | 'opportunityStageEvents'
+    | 'interactions';
   recordId?: string;
   recordTitle?: string;
   severity: ImportIssueSeverity;
@@ -751,6 +764,7 @@ export interface SanitizedImportBatch {
   notes: Note[];
   opportunities: Opportunity[];
   opportunityStageEvents: OpportunityStageEvent[];
+  interactions?: CommunicationInteraction[];
 }
 
 export interface ImportPreviewResult {
@@ -765,6 +779,7 @@ export interface ImportPreviewResult {
     notes: { totalInFile: number; validToImport: number; duplicateSkipped: number; rejected: number };
     opportunities: { totalInFile: number; validToImport: number; duplicateSkipped: number; rejected: number };
     opportunityStageEvents: { totalInFile: number; validToImport: number; duplicateSkipped: number; rejected: number };
+    interactions?: { totalInFile: number; validToImport: number; duplicateSkipped: number; rejected: number };
   };
   totalInFile: number;
   totalValidToImport: number;
@@ -795,6 +810,7 @@ export interface ImportExecutionReport {
     tasks: ImportCollectionExecutionReport;
     notes: ImportCollectionExecutionReport;
     opportunityStageEvents: ImportCollectionExecutionReport;
+    interactions?: ImportCollectionExecutionReport;
   };
   totalSucceeded: number;
   totalSkippedDuplicates: number;
@@ -871,6 +887,7 @@ export interface CalendarEventItem {
   meetingRef?: Meeting;
   taskRef?: ActionItem;
   opportunityRef?: Opportunity;
+  interactionRef?: CommunicationInteraction;
 }
 
 export interface CalendarDayCell {
@@ -930,6 +947,105 @@ export interface WeeklyPlanSummary {
   plannedTaskWorkHours: number;
   conflictsCount: number;
 }
+
+// =========================================================================
+// Task 011: Communication Center & Interaction History Types
+// =========================================================================
+
+export type CommunicationChannel =
+  | 'phone_call'
+  | 'whatsapp'
+  | 'email'
+  | 'in_person_visit'
+  | 'video_call'
+  | 'sms'
+  | 'other';
+
+export type CommunicationDirection = 'outbound' | 'inbound';
+
+export type CommunicationOutcome =
+  | 'answered'
+  | 'no_answer'
+  | 'busy_or_callback'
+  | 'message_sent'
+  | 'replied'
+  | 'agreement_reached'
+  | 'follow_up_needed'
+  | 'info_shared'
+  | 'other';
+
+export interface CommunicationInteraction {
+  id: string;
+  userId?: string;
+  clientId: string;
+  contactId?: string;
+  opportunityId?: string;
+  meetingId?: string;
+  channel: CommunicationChannel;
+  direction: CommunicationDirection;
+  occurredAt: string; // ISO datetime string
+  durationMinutes?: number; // 0..1440
+  subject: string; // 1..200 chars
+  summary?: string; // <= 5000 chars
+  topics?: string[]; // <= 20 tags
+  outcome: CommunicationOutcome;
+  nextStep?: string; // <= 500 chars
+  nextFollowUpDate?: string; // YYYY-MM-DD
+  linkedTaskId?: string; // Optional reference to ActionItem created from this interaction
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type CommunicationDatePreset = 'all' | 'today' | '7d' | '30d' | '90d' | 'custom';
+
+export interface CommunicationFilterState {
+  searchQuery: string;
+  clientId: string; // 'all' or clientId
+  contactId: string; // 'all' or contactId
+  opportunityId: string; // 'all' or opportunityId
+  channel: 'all' | CommunicationChannel;
+  direction: 'all' | CommunicationDirection;
+  outcome: 'all' | CommunicationOutcome;
+  followUpFilter: 'all' | 'needs_follow_up' | 'overdue_follow_up' | 'has_linked_task';
+  datePreset: CommunicationDatePreset;
+  dateFrom?: string; // YYYY-MM-DD
+  dateTo?: string; // YYYY-MM-DD
+  sortBy: 'occurred_desc' | 'occurred_asc' | 'follow_up_asc';
+}
+
+export interface ClientCommunicationSummary {
+  clientId: string;
+  totalInteractions: number;
+  lastInteractionAt: string | null;
+  lastInteractionChannel: CommunicationChannel | null;
+  lastInteractionOutcome: CommunicationOutcome | null;
+  lastContactAt: string | null; // Latest between past held meetings and logged interactions
+  daysSinceLastContact: number | null;
+  isStaleContact: boolean;
+  pendingFollowUpsCount: number;
+  overdueFollowUpsCount: number;
+  nextFollowUpDate: string | null;
+  byChannel: Record<CommunicationChannel, number>;
+  byContactId: Record<string, { count: number; lastOccurredAt: string }>;
+  recentTopics: string[];
+}
+
+export interface CommunicationCenterSummary {
+  totalInteractions: number;
+  interactionsToday: number;
+  interactionsLast7Days: number;
+  interactionsLast30Days: number;
+  outboundCount: number;
+  inboundCount: number;
+  followUpsDueTodayCount: number;
+  followUpsOverdueCount: number;
+  followUpsPendingTotalCount: number;
+  staleClientsCount: number;
+  activeClientsContactedLast30Days: number;
+  byChannel: Record<CommunicationChannel, number>;
+  byOutcome: Record<CommunicationOutcome, number>;
+}
+
 
 
 

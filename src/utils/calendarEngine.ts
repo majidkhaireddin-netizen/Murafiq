@@ -11,6 +11,7 @@ import type {
   CalendarViewMode,
   CalendarWeekStartDay,
   Client,
+  CommunicationInteraction,
   DayAvailableGap,
   Meeting,
   Opportunity,
@@ -29,6 +30,11 @@ import {
 } from './followUpEngine.ts';
 import { isMinutesLocked, MEETING_STATUS_LABELS } from './meetingMinutes.ts';
 import { isOpportunityClosed, OPPORTUNITY_STAGE_CONFIG } from './opportunities.ts';
+import {
+  COMMUNICATION_CHANNEL_META,
+  findLinkedTaskForInteraction,
+  isInteractionFollowUpPending,
+} from './communications.ts';
 
 export const CALENDAR_SETTINGS_STORAGE_PREFIX = 'murafiq_calendar_settings_v1_';
 
@@ -804,6 +810,7 @@ export interface BuildCalendarEventsParams {
   meetings: Meeting[];
   tasks: ActionItem[];
   opportunities?: Opportunity[];
+  interactions?: CommunicationInteraction[];
   currentUserId?: string;
   referenceDate?: Date;
   timeZone?: string;
@@ -824,6 +831,7 @@ export function buildCalendarEvents(params: BuildCalendarEventsParams): Calendar
     meetings,
     tasks,
     opportunities = [],
+    interactions = [],
     currentUserId,
     referenceDate = new Date(),
     timeZone,
@@ -1125,6 +1133,61 @@ export function buildCalendarEvents(params: BuildCalendarEventsParams): Calendar
           });
         }
       }
+    }
+  }
+
+  // 4. Communication Interaction Follow-Ups (nextFollowUpDate)
+  const allowCommFollowUps = filterScope === 'all' || filterScope === 'follow_ups';
+  if (settings.showFollowUps && allowCommFollowUps && interactions.length > 0) {
+    for (const comm of interactions) {
+      if (!isOwnedByCurrentUser(comm.userId, currentUserId)) continue;
+      if (!comm.nextFollowUpDate) continue;
+      if (
+        clientIdFilter &&
+        clientIdFilter !== 'all' &&
+        comm.clientId !== clientIdFilter
+      ) {
+        continue;
+      }
+
+      const linkedTask = findLinkedTaskForInteraction(comm, tasks);
+      const isCompleted = linkedTask?.status === 'completed';
+      const isCancelled = linkedTask?.status === 'cancelled';
+      if (!isInteractionFollowUpPending(comm, tasks) && !isCompleted) continue;
+
+      const followParts = parseDateOnlyString(comm.nextFollowUpDate);
+      if (!followParts) continue;
+
+      const followDateKey = formatCalendarDateKey(followParts);
+      const clientName = clientsById.get(comm.clientId)?.name || 'عميل غير محدد';
+      const channelLabel = COMMUNICATION_CHANNEL_META[comm.channel]?.shortLabelAr || 'تواصل';
+      const isOverdue = !isCompleted && !isCancelled && followDateKey < todayKey;
+
+      events.push({
+        id: `cal-comm-followup-${comm.id}`,
+        sourceId: comm.id,
+        activityType: 'follow_up',
+        activityTypeLabelAr: ACTIVITY_TYPE_META.follow_up.labelAr,
+        activityTypeLabelEn: ACTIVITY_TYPE_META.follow_up.labelEn,
+        title: comm.nextStep?.trim()
+          ? `متابعة ${channelLabel}: ${comm.nextStep.trim()}`
+          : `متابعة ${channelLabel}: ${comm.subject}`,
+        subtitle: `منبثقة من ${COMMUNICATION_CHANNEL_META[comm.channel]?.labelAr || 'تواصل'}`,
+        dateKey: followDateKey,
+        isTimed: false,
+        hasKnownDuration: false,
+        clientId: comm.clientId,
+        clientName,
+        statusLabelAr: isCompleted
+          ? 'متابعة منجزة'
+          : isOverdue
+          ? 'متابعة تواصل متأخرة'
+          : 'متابعة تواصل مجدولة',
+        isCompletedOrClosed: Boolean(isCompleted),
+        isCancelled: Boolean(isCancelled),
+        isOverdue,
+        interactionRef: comm,
+      });
     }
   }
 

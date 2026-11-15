@@ -3,6 +3,7 @@ import type {
   Client,
   ClientImportanceLevel,
   ClientRelationshipStatus,
+  CommunicationInteraction,
   Meeting,
   MeetingStatus,
   MeetingType,
@@ -630,6 +631,7 @@ export interface ComputeDashboardAnalyticsInput {
   meetings: Meeting[];
   tasks: ActionItem[];
   notes: Note[];
+  interactions?: CommunicationInteraction[];
   preset?: AnalyticsDatePreset;
   customRange?: CustomDateRangeInput;
   collectionsLoaded?: {
@@ -650,6 +652,7 @@ export function computeDashboardAnalytics(
     meetings,
     tasks,
     notes,
+    interactions = [],
     preset = '30d',
     customRange,
     collectionsLoaded = { clients: true, meetings: true, tasks: true, notes: true },
@@ -700,7 +703,7 @@ export function computeDashboardAnalytics(
   const next7EndKey = formatCalendarDateKey(addCalendarDays(refParts, 7));
 
   const clientById = new Map<string, Client>(clients.map((c) => [c.id, c]));
-  const dataIndex = buildClientDataIndex({ meetings, tasks, notes });
+  const dataIndex = buildClientDataIndex({ meetings, tasks, notes, interactions });
 
   // Trend series initialization
   const bucketSpecs = buildTrendBucketSpecs(range);
@@ -1042,6 +1045,16 @@ export function computeDashboardAnalytics(
     }
   }
 
+  // Interactions logged in period
+  for (const ix of interactions) {
+    const ixKey = resolveDateKey(ix.occurredAt || ix.createdAt, timeZone);
+    if (isKeyInRange(ixKey, range.startKey, range.endKey)) {
+      loggedActivityIdsCurrent.add(`interaction:${ix.id}`);
+    } else if (isKeyInRange(ixKey, previousRange.startKey, previousRange.endKey)) {
+      loggedActivityIdsPrev.add(`interaction:${ix.id}`);
+    }
+  }
+
   // -------------------------------------------------------------------------
   // 4. Client Relationship Intelligence (Reusing Client 360 Engine)
   // -------------------------------------------------------------------------
@@ -1051,11 +1064,13 @@ export function computeDashboardAnalytics(
   for (const client of clients) {
     const cMeetings = dataIndex.meetingsByClient.get(client.id) || [];
     const cTasks = dataIndex.tasksByClient.get(client.id) || [];
+    const cInteractions = dataIndex.interactionsByClient.get(client.id) || [];
 
     const alerts = evaluateClientAttentionAlerts({
       client,
       meetings: cMeetings,
       tasks: cTasks,
+      interactions: cInteractions,
       staleThresholdDays: STALE_CONTACT_THRESHOLD_DAYS,
       referenceDate,
     });
@@ -1094,9 +1109,13 @@ export function computeDashboardAnalytics(
         .filter((m) => m.status !== 'cancelled')
         .map((m) => parseMeetingDateTimeMs(m.dateTime, timeZone))
         .filter((ms): ms is number => ms !== null && ms <= refMs);
-      if (pastMeetingMs.length > 0) {
-        daysSinceLastContact = Math.floor((refMs - Math.max(...pastMeetingMs)) / 86400000);
-      } else if (cMeetings.length === 0) {
+      const pastInteractionMs = cInteractions
+        .map((ix) => parseMeetingDateTimeMs(ix.occurredAt, timeZone))
+        .filter((ms): ms is number => ms !== null && ms <= refMs);
+      const allPastContactMs = [...pastMeetingMs, ...pastInteractionMs];
+      if (allPastContactMs.length > 0) {
+        daysSinceLastContact = Math.floor((refMs - Math.max(...allPastContactMs)) / 86400000);
+      } else if (cMeetings.length === 0 && cInteractions.length === 0) {
         const createdMs = new Date(client.createdAt).getTime();
         if (!Number.isNaN(createdMs)) {
           daysSinceLastContact = Math.floor((refMs - createdMs) / 86400000);

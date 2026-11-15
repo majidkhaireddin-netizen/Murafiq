@@ -4,6 +4,8 @@ import {
   Client,
   ClientContact,
   ClientRelationshipStatus,
+  CommunicationChannel,
+  CommunicationInteraction,
   Meeting,
   Note,
   Opportunity,
@@ -36,6 +38,18 @@ import {
   setPrimaryClientContact,
   updateClientContact,
 } from '../utils/client360';
+import {
+  COMMUNICATION_CHANNEL_META,
+  COMMUNICATION_DIRECTION_META,
+  COMMUNICATION_OUTCOME_META,
+  EXTERNAL_COMMUNICATION_DISCLOSURE_AR,
+  computeClientCommunicationSummary,
+  convertInteractionNextStepToTaskDraft,
+  findLinkedTaskForInteraction,
+  getContactInteractionHistory,
+  isInteractionFollowUpPending,
+  resolveInteractionContact,
+} from '../utils/communications';
 import {
   decodeTaskTimeBlockFromFirestore,
   formatTimeInZone,
@@ -76,6 +90,7 @@ import {
 
 export type Client360SectionTab =
   | 'overview'
+  | 'communications'
   | 'opportunities'
   | 'timeline'
   | 'meetings'
@@ -89,6 +104,7 @@ interface Client360WorkspaceProps {
   tasks: ActionItem[];
   notes: Note[];
   opportunities?: Opportunity[];
+  interactions?: CommunicationInteraction[];
   syncDisplay: ClientSyncDisplayState;
   collectionsLoaded: boolean;
   onBack: () => void;
@@ -107,6 +123,18 @@ interface Client360WorkspaceProps {
   onNewOpportunity?: (clientId: string) => void;
   onSelectOpportunity?: (opportunity: Opportunity) => void;
   onOpenClientCalendar?: (clientId: string) => void;
+  onLogInteraction?: (defaults?: {
+    clientId?: string;
+    contactId?: string;
+    opportunityId?: string;
+    channel?: CommunicationChannel;
+  }) => void;
+  onEditInteraction?: (interaction: CommunicationInteraction) => void;
+  onDeleteInteraction?: (interactionId: string) => Promise<void> | void;
+  onConvertInteractionToTask?: (
+    updatedInteraction: CommunicationInteraction,
+    taskDraft: ActionItem
+  ) => Promise<void> | void;
   language: 'ar' | 'en';
 }
 
@@ -116,6 +144,7 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
   tasks,
   notes,
   opportunities = [],
+  interactions = [],
   syncDisplay,
   collectionsLoaded,
   onBack,
@@ -134,6 +163,10 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
   onNewOpportunity,
   onSelectOpportunity,
   onOpenClientCalendar,
+  onLogInteraction,
+  onEditInteraction,
+  onDeleteInteraction,
+  onConvertInteractionToTask,
   language,
 }) => {
   const [activeSection, setActiveSection] = useState<Client360SectionTab>('overview');
@@ -198,6 +231,24 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
     [opportunities, client.id]
   );
 
+  const clientInteractions = useMemo(
+    () =>
+      interactions
+        .filter((i) => i.clientId === client.id)
+        .sort((a, b) => (b.occurredAt || '').localeCompare(a.occurredAt || '')),
+    [interactions, client.id]
+  );
+
+  const commSummary = useMemo(
+    () =>
+      computeClientCommunicationSummary({
+        client,
+        interactions: clientInteractions,
+        tasks: clientTasks,
+      }),
+    [client, clientInteractions, clientTasks]
+  );
+
   const oppSummary = useMemo(
     () => computeClientOpportunitySummary(opportunities, client.id),
     [opportunities, client.id]
@@ -210,8 +261,9 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
         meetings: clientMeetings,
         tasks: clientTasks,
         notes: clientNotes,
+        interactions: clientInteractions,
       }),
-    [client, clientMeetings, clientTasks, clientNotes]
+    [client, clientMeetings, clientTasks, clientNotes, clientInteractions]
   );
 
   const attentionAlerts = useMemo(
@@ -220,8 +272,9 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
         client,
         meetings: clientMeetings,
         tasks: clientTasks,
+        interactions: clientInteractions,
       }),
-    [client, clientMeetings, clientTasks]
+    [client, clientMeetings, clientTasks, clientInteractions]
   );
 
   const timelineEvents = useMemo(
@@ -231,10 +284,11 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
         meetings: clientMeetings,
         tasks: clientTasks,
         notes: clientNotes,
+        interactions: clientInteractions,
         filterType: timelineFilter,
         sortOrder: timelineSort,
       }),
-    [client.id, clientMeetings, clientTasks, clientNotes, timelineFilter, timelineSort]
+    [client.id, clientMeetings, clientTasks, clientNotes, clientInteractions, timelineFilter, timelineSort]
   );
 
   const contacts = client.contacts || [];
@@ -552,6 +606,18 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
 
           {/* Direct Quick Actions Row */}
           <div className="pt-3 border-t border-stone-100 flex items-center gap-2 flex-wrap">
+            {onLogInteraction && (
+              <button
+                type="button"
+                data-testid="client-360-log-interaction-btn"
+                onClick={() => onLogInteraction({ clientId: client.id })}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-semibold shadow-2xs transition-colors"
+              >
+                <Phone className="w-3.5 h-3.5" />
+                <span>تسجيل تواصل</span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={() => onNewMeeting(client.id)}
@@ -607,10 +673,11 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
               <a
                 href={`tel:${validTelHref}`}
                 data-testid="client-call-link"
+                title={EXTERNAL_COMMUNICATION_DISCLOSURE_AR}
                 className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-stone-50 hover:bg-stone-100 border border-stone-200 text-stone-700 text-xs font-semibold transition-colors"
               >
                 <Phone className="w-3.5 h-3.5 text-emerald-700" />
-                <span>اتصال</span>
+                <span>اتصال خارجي</span>
               </a>
             )}
 
@@ -619,10 +686,11 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                 href={`https://wa.me/${validWhatsAppDigits}`}
                 target="_blank"
                 rel="noreferrer"
+                title={EXTERNAL_COMMUNICATION_DISCLOSURE_AR}
                 className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 text-xs font-semibold transition-colors"
               >
                 <MessageCircle className="w-3.5 h-3.5 text-emerald-700" />
-                <span>واتساب</span>
+                <span>واتساب خارجي</span>
               </a>
             )}
 
@@ -630,10 +698,11 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
               <a
                 href={`mailto:${validEmailHref}`}
                 data-testid="client-email-link"
+                title={EXTERNAL_COMMUNICATION_DISCLOSURE_AR}
                 className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-stone-50 hover:bg-stone-100 border border-stone-200 text-stone-700 text-xs font-semibold transition-colors"
               >
                 <Mail className="w-3.5 h-3.5 text-sky-700" />
-                <span>بريد</span>
+                <span>بريد خارجي</span>
               </a>
             )}
 
@@ -804,6 +873,7 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
         {(
           [
             { key: 'overview', label: 'نظرة عامة' },
+            { key: 'communications', label: `سجل التواصل (${clientInteractions.length})` },
             { key: 'opportunities', label: `فرص الأعمال (${clientOpportunities.length})` },
             { key: 'timeline', label: `سجل الأنشطة (${timelineEvents.length})` },
             { key: 'meetings', label: `الاجتماعات (${clientMeetings.length})` },
@@ -815,6 +885,7 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
           <button
             key={tab.key}
             type="button"
+            data-testid={`client-360-tab-${tab.key}`}
             onClick={() => setActiveSection(tab.key)}
             className={`px-3 py-2 rounded-t-xl font-bold shrink-0 transition-colors border-b-2 ${
               activeSection === tab.key
@@ -943,6 +1014,8 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                         } else if (ev.sourceType === 'note') {
                           const n = clientNotes.find((x) => x.id === ev.sourceId);
                           if (n) onOpenNote(n);
+                        } else if (ev.sourceType === 'interaction') {
+                          setActiveSection('communications');
                         }
                       }}
                       className="w-full text-start p-2.5 rounded-xl border border-stone-200 hover:border-emerald-300 hover:bg-stone-50 transition-colors flex items-start justify-between gap-2"
@@ -954,6 +1027,8 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                               ? ev.subKind === 'scheduled_follow_up'
                                 ? 'متابعة'
                                 : 'اجتماع'
+                              : ev.type === 'interaction'
+                              ? 'تواصل'
                               : ev.type === 'task'
                               ? 'مهمة'
                               : ev.type === 'decision'
@@ -1211,6 +1286,7 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
             {(
               [
                 { id: 'all', label: 'الكل' },
+                { id: 'interaction', label: 'التواصل' },
                 { id: 'meeting', label: 'اللقاءات' },
                 { id: 'task', label: 'المهام' },
                 { id: 'note', label: 'الملاحظات' },
@@ -1249,6 +1325,8 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                         className={`text-[10px] font-bold px-2 py-0.5 rounded border ${
                           ev.type === 'meeting'
                             ? 'bg-sky-50 text-sky-800 border-sky-200'
+                            : ev.type === 'interaction'
+                            ? 'bg-emerald-50 text-emerald-900 border-emerald-200'
                             : ev.type === 'task'
                             ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
                             : ev.type === 'decision'
@@ -1260,6 +1338,8 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                           ? ev.subKind === 'scheduled_follow_up'
                             ? 'متابعة مجدولة'
                             : 'اجتماع'
+                          : ev.type === 'interaction'
+                          ? 'تواصل'
                           : ev.type === 'task'
                           ? 'مهمة'
                           : ev.type === 'decision'
@@ -1282,8 +1362,11 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                     <div className="text-[11px] text-stone-400">
                       {ev.timestamp ? (
                         <>
-                          {formatArabicDate(ev.timestamp, ev.type === 'meeting')} (
-                          {getRelativeTimeArabic(ev.timestamp)})
+                          {formatArabicDate(
+                            ev.timestamp,
+                            ev.type === 'meeting' || ev.type === 'interaction'
+                          )}{' '}
+                          ({getRelativeTimeArabic(ev.timestamp)})
                         </>
                       ) : (
                         'بدون تاريخ محدد'
@@ -1303,6 +1386,13 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                       } else if (ev.sourceType === 'note') {
                         const n = clientNotes.find((x) => x.id === ev.sourceId);
                         if (n) onOpenNote(n);
+                      } else if (ev.sourceType === 'interaction') {
+                        const inter = clientInteractions.find((x) => x.id === ev.sourceId);
+                        if (inter && onEditInteraction) {
+                          onEditInteraction(inter);
+                        } else {
+                          setActiveSection('communications');
+                        }
                       }
                     }}
                     className="px-2.5 py-1.5 rounded-lg bg-stone-50 hover:bg-emerald-50 border border-stone-200 hover:border-emerald-300 text-stone-700 hover:text-emerald-800 text-[11px] font-semibold shrink-0 self-start sm:self-center"
@@ -1726,6 +1816,12 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
               {contacts.map((c) => {
                 const cTel = sanitizePhoneForTel(c.phone);
                 const cEmail = isValidEmailAddress(c.email) ? c.email!.trim() : null;
+                const contactInteractions = getContactInteractionHistory(
+                  clientInteractions,
+                  c.id,
+                  c.name
+                );
+                const lastContactInteraction = contactInteractions[0] || null;
                 return (
                   <div
                     key={c.id}
@@ -1746,6 +1842,12 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                               جهة اتصال رئيسية
                             </span>
                           )}
+                          <span
+                            data-testid={`contact-interaction-count-${c.id}`}
+                            className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-stone-100 text-stone-700 border border-stone-200 tabular-nums"
+                          >
+                            {contactInteractions.length} تواصل
+                          </span>
                         </div>
                         {(c.title || c.department) && (
                           <p className="text-[11px] text-stone-600 mt-0.5">
@@ -1778,9 +1880,28 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                       {c.phone && <div dir="ltr" className="text-right">{c.phone}</div>}
                       {c.email && <div className="break-all">{c.email}</div>}
                       {c.notes && <p className="text-stone-500 pt-1">{c.notes}</p>}
+                      {lastContactInteraction && (
+                        <p className="text-[10px] text-emerald-800 font-medium pt-1">
+                          آخر تواصل: {formatArabicDate(lastContactInteraction.occurredAt, true)} —{' '}
+                          {lastContactInteraction.subject}
+                        </p>
+                      )}
                     </div>
 
                     <div className="flex items-center gap-2 pt-2 border-t border-stone-100 flex-wrap text-[11px]">
+                      {onLogInteraction && (
+                        <button
+                          type="button"
+                          data-testid={`contact-log-interaction-${c.id}`}
+                          onClick={() =>
+                            onLogInteraction({ clientId: client.id, contactId: c.id })
+                          }
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-semibold"
+                        >
+                          <Plus className="w-3 h-3" />
+                          <span>توثيق تواصل</span>
+                        </button>
+                      )}
                       {!c.isPrimary && (
                         <button
                           type="button"
@@ -1794,6 +1915,7 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                       {cTel && (
                         <a
                           href={`tel:${cTel}`}
+                          title={EXTERNAL_COMMUNICATION_DISCLOSURE_AR}
                           className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-stone-50 border border-stone-200 text-stone-700 font-semibold"
                         >
                           <Phone className="w-3 h-3 text-emerald-700" />
@@ -1803,6 +1925,7 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                       {cEmail && (
                         <a
                           href={`mailto:${cEmail}`}
+                          title={EXTERNAL_COMMUNICATION_DISCLOSURE_AR}
                           className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-stone-50 border border-stone-200 text-stone-700 font-semibold"
                         >
                           <Mail className="w-3 h-3 text-sky-700" />
@@ -2003,6 +2126,244 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                       >
                         فتح تفاصيل الفرصة ←
                       </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* SECTION: COMMUNICATIONS & INTERACTION HISTORY */}
+      {activeSection === 'communications' && (
+        <div
+          data-testid="client-360-communications-section"
+          className="bg-white rounded-2xl border border-stone-200 p-4 shadow-xs space-y-4"
+        >
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div>
+              <h4 className="font-heading font-bold text-sm text-stone-900">
+                سجل التواصل والتفاعلات ({clientInteractions.length})
+              </h4>
+              <p className="text-[11px] text-stone-500">
+                توثيق المكالمات والرسائل والزيارات وجهات الاتصال والموضوعات التي نوقشت والخطوات التالية
+              </p>
+            </div>
+            {onLogInteraction && (
+              <button
+                type="button"
+                data-testid="client-360-section-log-interaction-btn"
+                onClick={() => onLogInteraction({ clientId: client.id })}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>تسجيل تواصل جديد</span>
+              </button>
+            )}
+          </div>
+
+          {/* Summary KPIs */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+            <div className="p-2.5 rounded-xl bg-stone-50 border border-stone-200">
+              <span className="text-[10px] text-stone-500 block">إجمالي التفاعلات</span>
+              <span className="font-bold text-sm text-stone-900 tabular-nums">
+                {commSummary.totalInteractions}
+              </span>
+            </div>
+            <div className="p-2.5 rounded-xl bg-amber-50/70 border border-amber-200">
+              <span className="text-[10px] text-amber-800 block">متابعات تواصل معلقة</span>
+              <span className="font-bold text-sm text-amber-900 tabular-nums">
+                {commSummary.pendingFollowUpsCount}
+              </span>
+            </div>
+            <div className="p-2.5 rounded-xl bg-stone-50 border border-stone-200">
+              <span className="text-[10px] text-stone-500 block">القناة الأكثر استخداماً</span>
+              <span className="font-bold text-xs text-stone-900">
+                {commSummary.mostUsedChannel
+                  ? COMMUNICATION_CHANNEL_META[commSummary.mostUsedChannel].labelAr
+                  : '—'}
+              </span>
+            </div>
+            <div className="p-2.5 rounded-xl bg-stone-50 border border-stone-200">
+              <span className="text-[10px] text-stone-500 block">جهة الاتصال الأكثر تفاعلاً</span>
+              <span className="font-bold text-xs text-stone-900 truncate block">
+                {commSummary.topContactName || '—'}
+              </span>
+            </div>
+          </div>
+
+          {clientInteractions.length === 0 ? (
+            <div className="text-center py-8 bg-stone-50 rounded-xl border border-dashed border-stone-200 text-xs text-stone-500 space-y-2">
+              <p>لا توجد تفاعلات مسجلة لهذا العميل حتى الآن.</p>
+              {onLogInteraction && (
+                <button
+                  type="button"
+                  onClick={() => onLogInteraction({ clientId: client.id })}
+                  className="text-emerald-700 font-bold hover:underline"
+                >
+                  + توثيق أول تواصل مع {client.name}
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {clientInteractions.map((inter) => {
+                const channelMeta = COMMUNICATION_CHANNEL_META[inter.channel];
+                const dirMeta = COMMUNICATION_DIRECTION_META[inter.direction];
+                const outcomeMeta = COMMUNICATION_OUTCOME_META[inter.outcome];
+                const contactResolved = resolveInteractionContact(inter, client);
+                const linkedOpp = inter.opportunityId
+                  ? clientOpportunities.find((o) => o.id === inter.opportunityId)
+                  : undefined;
+                const linkedTask = findLinkedTaskForInteraction(inter, clientTasks);
+                const followUpPending = isInteractionFollowUpPending(inter, clientTasks);
+
+                return (
+                  <div
+                    key={inter.id}
+                    data-testid={`client-360-interaction-card-${inter.id}`}
+                    className="p-3.5 rounded-xl border border-stone-200 bg-white space-y-2.5 text-xs"
+                  >
+                    <div className="flex items-start justify-between gap-2 flex-wrap">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span
+                          className={`text-[10px] font-bold px-2 py-0.5 rounded border ${channelMeta.badgeClass}`}
+                        >
+                          {channelMeta.labelAr}
+                        </span>
+                        <span
+                          className={`text-[10px] font-semibold px-2 py-0.5 rounded border ${dirMeta.badgeClass}`}
+                        >
+                          {dirMeta.labelAr}
+                        </span>
+                        <span
+                          className={`text-[10px] font-semibold px-2 py-0.5 rounded border ${outcomeMeta.badgeClass}`}
+                        >
+                          {outcomeMeta.labelAr}
+                        </span>
+                        <span className="font-bold text-stone-900">{inter.subject}</span>
+                      </div>
+                      <span className="text-[11px] text-stone-500 tabular-nums">
+                        {formatArabicDate(inter.occurredAt, true)}
+                        {inter.durationMinutes ? ` • ${inter.durationMinutes} د` : ''}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-3 text-[11px] text-stone-600 flex-wrap">
+                      <span>
+                        تحدثت مع:{' '}
+                        <strong className="text-stone-900">{contactResolved.displayName}</strong>
+                        {contactResolved.roleOrDepartment
+                          ? ` (${contactResolved.roleOrDepartment})`
+                          : ''}
+                      </span>
+                      {linkedOpp && (
+                        <button
+                          type="button"
+                          onClick={() => onSelectOpportunity?.(linkedOpp)}
+                          className="text-emerald-700 font-semibold hover:underline"
+                        >
+                          فرصة: {linkedOpp.title}
+                        </button>
+                      )}
+                    </div>
+
+                    {inter.summary && (
+                      <p className="text-xs text-stone-700 whitespace-pre-line leading-relaxed">
+                        {inter.summary}
+                      </p>
+                    )}
+
+                    {inter.discussionTopics && inter.discussionTopics.length > 0 && (
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        {inter.discussionTopics.map((topic) => (
+                          <span
+                            key={topic}
+                            className="text-[10px] px-2 py-0.5 rounded bg-stone-100 text-stone-700 border border-stone-200"
+                          >
+                            #{topic}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
+                    {(inter.nextStep || inter.nextFollowUpDate) && (
+                      <div
+                        className={`p-2.5 rounded-xl border flex flex-wrap items-center justify-between gap-2 ${
+                          followUpPending
+                            ? 'bg-amber-50/70 border-amber-200 text-amber-950'
+                            : 'bg-stone-50 border-stone-200 text-stone-700'
+                        }`}
+                      >
+                        <div className="space-y-0.5">
+                          {inter.nextStep && (
+                            <p className="font-semibold text-[11px]">
+                              الخطوة التالية: {inter.nextStep}
+                            </p>
+                          )}
+                          {inter.nextFollowUpDate && (
+                            <p className="text-[10px] tabular-nums">
+                              موعد المتابعة: {formatArabicDate(inter.nextFollowUpDate)}
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          {linkedTask ? (
+                            <button
+                              type="button"
+                              onClick={() => onOpenTask(linkedTask)}
+                              className="px-2.5 py-1 rounded-lg bg-white border border-stone-200 text-[11px] font-semibold text-emerald-800 hover:bg-emerald-50"
+                            >
+                              فتح المهمة المرتبطة ({linkedTask.status === 'completed' ? 'منجزة' : 'مفتوحة'})
+                            </button>
+                          ) : (
+                            inter.nextStep &&
+                            onConvertInteractionToTask && (
+                              <button
+                                type="button"
+                                data-testid={`client-360-convert-inter-task-${inter.id}`}
+                                onClick={() => {
+                                  const res = convertInteractionNextStepToTaskDraft({
+                                    interaction: inter,
+                                    existingTasks: clientTasks,
+                                  });
+                                  if (res.ok && res.task && res.updatedInteraction) {
+                                    void onConvertInteractionToTask(
+                                      res.updatedInteraction,
+                                      res.task
+                                    );
+                                  }
+                                }}
+                                className="px-2.5 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-semibold"
+                              >
+                                تحويل لمهمة متابعة
+                              </button>
+                            )
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-end gap-2 pt-1 border-t border-stone-100">
+                      {onEditInteraction && (
+                        <button
+                          type="button"
+                          onClick={() => onEditInteraction(inter)}
+                          className="px-2.5 py-1 rounded-lg border border-stone-200 hover:bg-stone-50 text-stone-700 text-[11px] font-semibold"
+                        >
+                          تعديل
+                        </button>
+                      )}
+                      {onDeleteInteraction && (
+                        <button
+                          type="button"
+                          onClick={() => void onDeleteInteraction(inter.id)}
+                          className="px-2.5 py-1 rounded-lg border border-rose-200 hover:bg-rose-50 text-rose-700 text-[11px] font-semibold"
+                        >
+                          حذف
+                        </button>
+                      )}
                     </div>
                   </div>
                 );

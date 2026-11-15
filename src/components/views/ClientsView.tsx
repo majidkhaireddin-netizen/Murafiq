@@ -5,6 +5,8 @@ import {
   ClientCategory,
   ClientImportanceLevel,
   ClientRelationshipStatus,
+  CommunicationChannel,
+  CommunicationInteraction,
   Meeting,
   Note,
   Opportunity,
@@ -51,6 +53,7 @@ interface ClientsViewProps {
   tasks: ActionItem[];
   notes: Note[];
   opportunities?: Opportunity[];
+  interactions?: CommunicationInteraction[];
   onSelectMeeting: (meeting: Meeting) => void;
   onOpenMeetingAttachments: (meeting: Meeting) => void;
   onNewMeeting: (clientId: string) => void;
@@ -63,6 +66,18 @@ interface ClientsViewProps {
   onNewOpportunity?: (clientId: string) => void;
   onSelectOpportunity?: (opportunity: Opportunity) => void;
   onOpenClientCalendar?: (clientId: string) => void;
+  onLogInteraction?: (defaults?: {
+    clientId?: string;
+    contactId?: string;
+    opportunityId?: string;
+    channel?: CommunicationChannel;
+  }) => void;
+  onEditInteraction?: (interaction: CommunicationInteraction) => void;
+  onDeleteInteraction?: (interactionId: string) => Promise<void> | void;
+  onConvertInteractionToTask?: (
+    updatedInteraction: CommunicationInteraction,
+    taskDraft: ActionItem
+  ) => Promise<void> | void;
   onSaveClient: (client: Client) => Promise<void> | void;
   onDeleteClient: (clientId: string) => Promise<void> | void;
   selectedClientId?: string | null;
@@ -89,6 +104,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
   tasks,
   notes,
   opportunities = [],
+  interactions = [],
   onSelectMeeting,
   onOpenMeetingAttachments,
   onNewMeeting,
@@ -101,6 +117,10 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
   onNewOpportunity,
   onSelectOpportunity,
   onOpenClientCalendar,
+  onLogInteraction,
+  onEditInteraction,
+  onDeleteInteraction,
+  onConvertInteractionToTask,
   onSaveClient,
   onDeleteClient,
   selectedClientId,
@@ -178,16 +198,24 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
 
   // Compute indexed & filtered list once
   const clientSummaries = useMemo(() => {
-    const base = filterAndSortClients(clients, meetings, tasks, notes, {
-      searchQuery,
-      onlyFavorites: quickFilter === 'favorites',
-      onlyNeedsFollowUp: quickFilter === 'needs_follow_up',
-      onlyWithOverdueTasks: quickFilter === 'overdue_tasks',
-      relationshipStatus: statusFilter,
-      importance: importanceFilter,
-      category: categoryFilter,
-      sortBy,
-    });
+    const base = filterAndSortClients(
+      clients,
+      meetings,
+      tasks,
+      notes,
+      {
+        searchQuery,
+        onlyFavorites: quickFilter === 'favorites',
+        onlyNeedsFollowUp: quickFilter === 'needs_follow_up',
+        onlyWithOverdueTasks: quickFilter === 'overdue_tasks',
+        relationshipStatus: statusFilter,
+        importance: importanceFilter,
+        category: categoryFilter,
+        sortBy,
+      },
+      undefined,
+      interactions
+    );
     if (!createdRangeFilter) return base;
     return base.filter(({ client }) => {
       const parts = resolveCalendarParts(client.createdAt);
@@ -200,6 +228,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
     meetings,
     tasks,
     notes,
+    interactions,
     searchQuery,
     quickFilter,
     createdRangeFilter,
@@ -211,14 +240,14 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
 
   // Quick badge counts computed from unfiltered list
   const quickCounts = useMemo(() => {
-    const all = filterAndSortClients(clients, meetings, tasks, notes);
+    const all = filterAndSortClients(clients, meetings, tasks, notes, {}, undefined, interactions);
     return {
       total: all.length,
       favorites: all.filter((x) => x.client.isFavorite).length,
       needsFollowUp: all.filter((x) => x.needsFollowUp).length,
       overdueTasks: all.filter((x) => x.kpis.overdueTasks > 0).length,
     };
-  }, [clients, meetings, tasks, notes]);
+  }, [clients, meetings, tasks, notes, interactions]);
 
   // Duplicate client detection in create/edit modal (non-blocking)
   const duplicateMatches = useMemo(() => {
@@ -332,6 +361,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
           tasks={tasks}
           notes={notes}
           opportunities={opportunities}
+          interactions={interactions}
           syncDisplay={activeClientSyncDisplay}
           collectionsLoaded={allCollectionsLoaded}
           onBack={() => selectClient(null)}
@@ -350,6 +380,10 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
           onNewOpportunity={onNewOpportunity}
           onSelectOpportunity={onSelectOpportunity}
           onOpenClientCalendar={onOpenClientCalendar}
+          onLogInteraction={onLogInteraction}
+          onEditInteraction={onEditInteraction}
+          onDeleteInteraction={onDeleteInteraction}
+          onConvertInteractionToTask={onConvertInteractionToTask}
           language={language}
         />
       ) : (

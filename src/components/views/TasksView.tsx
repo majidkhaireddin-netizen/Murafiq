@@ -24,6 +24,7 @@ import {
   X,
   Trash2,
   Edit2,
+  PhoneCall,
 } from 'lucide-react';
 
 import {
@@ -398,6 +399,7 @@ export const TasksView: React.FC<TasksViewProps> = ({
       clientId: editingTask.clientId,
       meetingId: editingTask.meetingId,
       opportunityId: validOppId,
+      interactionId: editingTask.interactionId,
       title: editingTask.title,
       description: editingTask.description || '',
       dueDate: editingTask.dueDate,
@@ -518,6 +520,16 @@ export const TasksView: React.FC<TasksViewProps> = ({
                     {opportunities.find((o) => o.id === task.opportunityId)?.title || 'فرصة عمل'}
                   </span>
                 </button>
+              )}
+
+              {task.interactionId && (
+                <span
+                  data-testid={`task-interaction-badge-${task.id}`}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-teal-50 text-teal-800 border border-teal-200 font-semibold text-[10px]"
+                >
+                  <PhoneCall className="w-3 h-3" />
+                  <span>مرتبطة بسجل تواصل</span>
+                </span>
               )}
 
               {task.dueDate && (

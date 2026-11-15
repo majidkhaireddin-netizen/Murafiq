@@ -48,6 +48,7 @@ import {
   CheckCircle2,
   Clock,
   Info,
+  PhoneCall,
   Plus,
   RotateCcw,
   Settings,
@@ -90,6 +91,7 @@ interface TodayViewProps {
   onNewTask: (clientId?: string) => void;
   onNewMeeting: (clientId?: string) => void;
   onNewNote: (clientId?: string) => void;
+  onLogInteraction?: (clientId?: string) => void;
   onOpenReminderSource: (reminder: ReminderItem) => void;
   onSnoozeReminder: (
     reminder: ReminderItem,
@@ -154,6 +156,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
   onNewTask,
   onNewMeeting,
   onNewNote,
+  onLogInteraction,
   onOpenReminderSource,
   onSnoozeReminder,
   onUnsnoozeReminder,
@@ -256,6 +259,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
     if (rem.sourceType === 'task') return 'مهمة';
     if (rem.sourceType === 'meeting') return 'اجتماع';
     if (rem.sourceType === 'opportunity') return 'فرصة';
+    if (rem.sourceType === 'interaction') return 'تواصل';
     return 'عميل';
   };
 
@@ -348,6 +352,17 @@ export const TodayView: React.FC<TodayViewProps> = ({
               <StickyNote className="w-3.5 h-3.5 text-amber-700" />
               <span>ملاحظة عميل</span>
             </button>
+            {onLogInteraction && (
+              <button
+                type="button"
+                data-testid="today-quick-log-interaction"
+                onClick={() => onLogInteraction()}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-xs font-semibold transition-colors"
+              >
+                <PhoneCall className="w-3.5 h-3.5 text-emerald-700" />
+                <span>تسجيل تواصل</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -1171,7 +1186,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
                       {entry.reasonsArabic.join(' • ')}
                     </p>
 
-                    <div className="flex items-center justify-between gap-2 pt-0.5">
+                    <div className="flex items-center justify-between gap-2 pt-0.5 flex-wrap">
                       <button
                         type="button"
                         onClick={() => onSelectClient(entry.client)}
@@ -1179,13 +1194,25 @@ export const TodayView: React.FC<TodayViewProps> = ({
                       >
                         فتح ملف العميل 360
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => onNewMeeting(entry.client.id)}
-                        className="px-2.5 py-1 rounded-lg border border-stone-200 bg-stone-50 hover:bg-stone-100 text-[11px] font-medium text-stone-800"
-                      >
-                        جدولة اجتماع
-                      </button>
+                      <div className="flex items-center gap-1.5">
+                        {onLogInteraction && (
+                          <button
+                            type="button"
+                            data-testid={`today-followup-log-interaction-${entry.client.id}`}
+                            onClick={() => onLogInteraction(entry.client.id)}
+                            className="px-2.5 py-1 rounded-lg border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-[11px] font-medium text-emerald-900"
+                          >
+                            تسجيل تواصل
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => onNewMeeting(entry.client.id)}
+                          className="px-2.5 py-1 rounded-lg border border-stone-200 bg-stone-50 hover:bg-stone-100 text-[11px] font-medium text-stone-800"
+                        >
+                          جدولة اجتماع
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}

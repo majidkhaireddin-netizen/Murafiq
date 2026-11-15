@@ -2,6 +2,7 @@ import type {
   ActionItem,
   Client,
   ClientContact,
+  CommunicationInteraction,
   HighlightSegment,
   Meeting,
   Note,
@@ -24,6 +25,11 @@ import {
   extractZonedCalendarParts,
   resolveCalendarParts,
 } from './followUpEngine.ts';
+import {
+  COMMUNICATION_CHANNEL_META,
+  COMMUNICATION_OUTCOME_META,
+  resolveInteractionContact,
+} from './communications.ts';
 
 export const DEFAULT_SEARCH_FILTERS: SearchFilterState = {
   recordType: 'all',
@@ -49,6 +55,7 @@ export const SEARCH_RECORD_TYPE_LABELS: Record<
   task: { ar: 'مهمة', en: 'Task' },
   note: { ar: 'ملاحظة', en: 'Note' },
   opportunity: { ar: 'فرصة عمل', en: 'Opportunity' },
+  interaction: { ar: 'تواصل', en: 'Interaction' },
 };
 
 const CLIENT_STATUS_LABELS_AR: Record<string, string> = {
@@ -322,6 +329,7 @@ export interface SearchableIndexEntry {
   taskRef?: ActionItem;
   noteRef?: Note;
   opportunityRef?: Opportunity;
+  interactionRef?: CommunicationInteraction;
 }
 
 export interface SearchDataInput {
@@ -330,6 +338,7 @@ export interface SearchDataInput {
   tasks: ActionItem[];
   notes: Note[];
   opportunities?: Opportunity[];
+  interactions?: CommunicationInteraction[];
   currentUserId?: string;
 }
 
@@ -682,6 +691,62 @@ export function buildSearchIndex(data: SearchDataInput): SearchableIndexEntry[] 
     });
   }
 
+  // 6. Index Communication Interactions
+  const ownedInteractions = (data.interactions || []).filter((i) =>
+    isOwnedByCurrentUser(i.userId, currentUserId)
+  );
+  for (const comm of ownedInteractions) {
+    const client = clientMap.get(comm.clientId);
+    const clientName = client?.name;
+    const contact = resolveInteractionContact(client, comm.contactId);
+    const linkedOpp = comm.opportunityId ? opportunityMap.get(comm.opportunityId) : undefined;
+    const channelMeta = COMMUNICATION_CHANNEL_META[comm.channel];
+    const outcomeMeta = COMMUNICATION_OUTCOME_META[comm.outcome];
+
+    const fields: SearchFieldCandidate[] = [];
+    addCandidate(fields, 'موضوع التواصل', comm.subject, true);
+    addCandidate(fields, 'ملخص التواصل', comm.summary, false);
+    addCandidate(fields, 'الخطوة التالية', comm.nextStep, false);
+    addCandidate(fields, 'قناة التواصل', channelMeta?.labelAr || comm.channel, false);
+    addCandidate(fields, 'قناة التواصل (EN)', channelMeta?.labelEn || comm.channel, false);
+    addCandidate(fields, 'نتيجة التواصل', outcomeMeta?.labelAr || comm.outcome, false);
+    addCandidate(fields, 'العميل المرتبط', clientName, false);
+    addCandidate(fields, 'جهة الاتصال', contact?.name, false);
+    addCandidate(fields, 'الفرصة المرتبطة', linkedOpp?.title, false);
+
+    const commTopics = Array.isArray(comm.topics) ? comm.topics.filter(Boolean) : [];
+    for (const topic of commTopics) {
+      addCandidate(fields, 'موضوع نقاش', topic, false);
+    }
+
+    const combinedTags = Array.from(new Set([...(client?.tags || []), ...commTopics]));
+
+    entries.push({
+      id: `interaction:${comm.id}`,
+      recordType: 'interaction',
+      title: comm.subject,
+      NormalizedTitle: normalizeArabicSearchText(comm.subject),
+      subtitle: [channelMeta?.shortLabelAr, contact?.name, clientName].filter(Boolean).join(' • ') || undefined,
+      defaultSnippet:
+        comm.summary ||
+        (comm.nextStep ? `الخطوة التالية: ${comm.nextStep}` : '') ||
+        outcomeMeta?.labelAr ||
+        'سجل تواصل',
+      clientId: comm.clientId,
+      clientName,
+      dateIso: comm.occurredAt || comm.updatedAt || comm.createdAt,
+      statusKey: comm.outcome,
+      statusLabelAr: outcomeMeta?.labelAr || comm.outcome,
+      tags: combinedTags,
+      normalizedTags: combinedTags.map((t) => normalizeArabicSearchText(t)),
+      fields,
+      clientRef: client,
+      contactRef: contact,
+      opportunityRef: linkedOpp,
+      interactionRef: comm,
+    });
+  }
+
   return entries;
 }
 
@@ -967,6 +1032,7 @@ const COLLECTION_LABELS_AR: Record<keyof SearchCollectionsLoadedState, string> =
   tasks: 'المهام',
   notes: 'الملاحظات',
   opportunities: 'فرص الأعمال',
+  interactions: 'سجل التواصل',
 };
 
 /**
@@ -1003,6 +1069,7 @@ export function executeUniversalSearch(
     task: [],
     note: [],
     opportunity: [],
+    interaction: [],
   };
 
   // If neither query nor filter is active, return empty state immediately
@@ -1028,6 +1095,7 @@ export function executeUniversalSearch(
         tasks: [],
         notes: [],
         opportunities: [],
+        interactions: [],
       }
     );
 
@@ -1070,6 +1138,7 @@ export function executeUniversalSearch(
       taskRef: entry.taskRef,
       noteRef: entry.noteRef,
       opportunityRef: entry.opportunityRef,
+      interactionRef: entry.interactionRef,
     });
   }
 
@@ -1101,6 +1170,7 @@ export function executeUniversalSearch(
     task: [],
     note: [],
     opportunity: [],
+    interaction: [],
   };
 
   for (const item of limitedItems) {
@@ -1120,11 +1190,12 @@ export function executeUniversalSearch(
 }
 
 /**
- * Extracts all unique tags across the user's clients and notes for the Smart Filter dropdown.
+ * Extracts all unique tags across the user's clients, notes, and interactions for the Smart Filter dropdown.
  */
 export function extractAvailableSearchTags(data: {
   clients: Client[];
   notes: Note[];
+  interactions?: CommunicationInteraction[];
   currentUserId?: string;
 }): string[] {
   const tagMap = new Map<string, string>();
@@ -1145,6 +1216,18 @@ export function extractAvailableSearchTags(data: {
     if (!isOwnedByCurrentUser(note.userId, data.currentUserId)) continue;
     for (const tag of note.tags || []) {
       const trimmed = String(tag || '').trim();
+      if (!trimmed) continue;
+      const norm = normalizeArabicSearchText(trimmed);
+      if (norm && !tagMap.has(norm)) {
+        tagMap.set(norm, trimmed);
+      }
+    }
+  }
+
+  for (const comm of data.interactions || []) {
+    if (!isOwnedByCurrentUser(comm.userId, data.currentUserId)) continue;
+    for (const topic of comm.topics || []) {
+      const trimmed = String(topic || '').trim();
       if (!trimmed) continue;
       const norm = normalizeArabicSearchText(trimmed);
       if (norm && !tagMap.has(norm)) {

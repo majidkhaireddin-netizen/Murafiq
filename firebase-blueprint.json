@@ -83,6 +83,7 @@
         "clientId": { "type": "string", "maxLength": 128 },
         "meetingId": { "type": "string", "maxLength": 128 },
         "opportunityId": { "type": "string", "maxLength": 128 },
+        "interactionId": { "type": "string", "maxLength": 128 },
         "title": { "type": "string", "maxLength": 250 },
         "description": { "type": "string", "maxLength": 2000 },
         "dueDate": { "type": "string", "maxLength": 50 },
@@ -177,7 +178,7 @@
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
         "userId": { "type": "string", "maxLength": 128 },
-        "sourceType": { "type": "string", "enum": ["task", "meeting", "client", "opportunity"] },
+        "sourceType": { "type": "string", "enum": ["task", "meeting", "client", "opportunity", "interaction"] },
         "sourceId": { "type": "string", "maxLength": 128 },
         "reason": {
           "type": "string",
@@ -192,7 +193,9 @@
             "opportunity_overdue_action",
             "opportunity_closing_soon",
             "opportunity_missing_next_action",
-            "opportunity_stale"
+            "opportunity_stale",
+            "interaction_follow_up_due",
+            "interaction_follow_up_overdue"
           ]
         },
         "clientId": { "type": "string", "maxLength": 128 },
@@ -275,6 +278,47 @@
         "occurredAt": { "type": "string", "maxLength": 50 }
       },
       "required": ["id", "opportunityId", "eventType", "toStage", "occurredAt"]
+    },
+    "Interaction": {
+      "title": "Interaction",
+      "description": "A user-isolated communication or interaction record linked to a client and optional contact/opportunity/task.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "clientId": { "type": "string", "maxLength": 128 },
+        "contactId": { "type": "string", "maxLength": 128 },
+        "contactName": { "type": "string", "maxLength": 150 },
+        "opportunityId": { "type": "string", "maxLength": 128 },
+        "channel": {
+          "type": "string",
+          "enum": ["phone", "whatsapp", "email", "in_person", "video", "sms", "quick_check_in"]
+        },
+        "direction": { "type": "string", "enum": ["outbound", "inbound"] },
+        "occurredAt": { "type": "string", "maxLength": 50 },
+        "durationMinutes": { "type": "number" },
+        "subject": { "type": "string", "maxLength": 200 },
+        "summary": { "type": "string", "maxLength": 4000 },
+        "topics": { "type": "array" },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "answered",
+            "no_answer",
+            "follow_up_needed",
+            "sent_waiting_reply",
+            "completed",
+            "postponed",
+            "escalated"
+          ]
+        },
+        "nextStep": { "type": "string", "maxLength": 500 },
+        "nextFollowUpDate": { "type": "string", "maxLength": 10, "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "followUpTaskId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "clientId", "channel", "direction", "occurredAt", "summary", "outcome", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -317,6 +361,10 @@
     "/users/{userId}/opportunityStageEvents/{eventId}": {
       "schema": { "$ref": "entities/OpportunityStageEvent" },
       "description": "Stores append-only operational stage transition events for opportunities"
+    },
+    "/users/{userId}/interactions/{interactionId}": {
+      "schema": { "$ref": "entities/Interaction" },
+      "description": "Stores user-isolated client and contact communication interactions"
     }
   }
 }

@@ -5,6 +5,7 @@ import type {
   ClientContact,
   ClientImportanceLevel,
   ClientRelationshipStatus,
+  CommunicationInteraction,
   Meeting,
   Note,
   ProvenanceType,
@@ -105,6 +106,8 @@ export function normalizeTextForMatch(value?: string): string {
     .replace(/ى/g, 'ي')
     .replace(/\s+/g, ' ');
 }
+
+export const normalizeArabicSearchText = normalizeTextForMatch;
 
 /**
  * Normalize phone numbers so local and international variants (+9665... vs 05...) match reliably.
@@ -352,16 +355,19 @@ export interface ClientDataIndex {
   meetingsByClient: Map<string, Meeting[]>;
   tasksByClient: Map<string, ActionItem[]>;
   notesByClient: Map<string, Note[]>;
+  interactionsByClient: Map<string, CommunicationInteraction[]>;
 }
 
 export function buildClientDataIndex(params: {
   meetings: Meeting[];
   tasks: ActionItem[];
   notes: Note[];
+  interactions?: CommunicationInteraction[];
 }): ClientDataIndex {
   const meetingsByClient = new Map<string, Meeting[]>();
   const tasksByClient = new Map<string, ActionItem[]>();
   const notesByClient = new Map<string, Note[]>();
+  const interactionsByClient = new Map<string, CommunicationInteraction[]>();
 
   for (const m of params.meetings) {
     if (!m.clientId) continue;
@@ -384,7 +390,14 @@ export function buildClientDataIndex(params: {
     else notesByClient.set(n.clientId, [n]);
   }
 
-  return { meetingsByClient, tasksByClient, notesByClient };
+  for (const i of params.interactions || []) {
+    if (!i.clientId) continue;
+    const arr = interactionsByClient.get(i.clientId);
+    if (arr) arr.push(i);
+    else interactionsByClient.set(i.clientId, [i]);
+  }
+
+  return { meetingsByClient, tasksByClient, notesByClient, interactionsByClient };
 }
 
 // ============================================================================
@@ -399,6 +412,7 @@ export interface ClientKpis {
   completedTasks: number;
   notesCount: number;
   contactsCount: number;
+  totalInteractions?: number;
   lastContactAt: string | null;
   lastActivityAt: string | null;
   nextFollowUpAt: string | null;
@@ -429,9 +443,17 @@ export function computeClientKpis(params: {
   meetings: Meeting[];
   tasks: ActionItem[];
   notes: Note[];
+  interactions?: CommunicationInteraction[];
   referenceDate?: Date;
 }): ClientKpis {
-  const { client, meetings, tasks, notes, referenceDate = new Date() } = params;
+  const {
+    client,
+    meetings,
+    tasks,
+    notes,
+    interactions = [],
+    referenceDate = new Date(),
+  } = params;
   const refTime = referenceDate.getTime();
   const refMidnight = new Date(
     referenceDate.getFullYear(),
@@ -442,6 +464,7 @@ export function computeClientKpis(params: {
   const clientMeetings = meetings.filter((m) => m.clientId === client.id);
   const clientTasks = tasks.filter((t) => t.clientId === client.id);
   const clientNotes = notes.filter((n) => n.clientId === client.id);
+  const clientInteractions = interactions.filter((i) => i.clientId === client.id);
 
   let upcomingMeetings = 0;
   let lastContactMs: number | null = null;
@@ -489,6 +512,27 @@ export function computeClientKpis(params: {
     const mCreatedMs = parseValidTime(m.createdAt);
     if (mCreatedMs !== null && mCreatedMs <= refTime) {
       activityCandidates.push({ ms: mCreatedMs, iso: m.createdAt });
+    }
+  }
+
+  for (const comm of clientInteractions) {
+    const cTime = parseValidTime(comm.occurredAt);
+    if (cTime !== null && cTime <= refTime) {
+      if (lastContactMs === null || cTime > lastContactMs) {
+        lastContactMs = cTime;
+        lastContactAt = comm.occurredAt;
+      }
+      activityCandidates.push({ ms: cTime, iso: comm.occurredAt });
+    }
+
+    if (comm.nextFollowUpDate) {
+      const fMidnight = parseTaskDueMidnight(comm.nextFollowUpDate);
+      if (fMidnight !== null && fMidnight >= refMidnight) {
+        if (nextFollowUpMs === null || fMidnight < nextFollowUpMs) {
+          nextFollowUpMs = fMidnight;
+          nextFollowUpAt = comm.nextFollowUpDate;
+        }
+      }
     }
   }
 
@@ -549,6 +593,7 @@ export function computeClientKpis(params: {
     completedTasks,
     notesCount: clientNotes.length,
     contactsCount: (client.contacts || []).length,
+    totalInteractions: clientInteractions.length,
     lastContactAt,
     lastActivityAt,
     nextFollowUpAt,
@@ -628,7 +673,7 @@ export function deriveClientSyncDisplayState(params: {
 // Unified Chronological Client Activity Timeline (No Duplication)
 // ============================================================================
 
-export type ClientTimelineEventType = 'meeting' | 'task' | 'note' | 'decision';
+export type ClientTimelineEventType = 'meeting' | 'task' | 'note' | 'decision' | 'interaction';
 
 export interface ClientTimelineEvent {
   id: string;
@@ -641,16 +686,40 @@ export interface ClientTimelineEvent {
   summary?: string;
   statusLabelAr?: string;
   provenance: ProvenanceType;
-  sourceType: 'meeting' | 'task' | 'note';
+  sourceType: 'meeting' | 'task' | 'note' | 'interaction';
   sourceId: string;
   meetingId?: string;
+  interactionRef?: CommunicationInteraction;
 }
+
+const CHANNEL_TIMELINE_LABELS: Record<string, string> = {
+  phone_call: 'مكالمة هاتفية',
+  whatsapp: 'رسالة واتساب',
+  email: 'بريد إلكتروني',
+  in_person_visit: 'زيارة ميدانية',
+  video_call: 'اتصال مرئي',
+  sms: 'رسالة نصية',
+  other: 'تواصل',
+};
+
+const OUTCOME_TIMELINE_LABELS: Record<string, string> = {
+  answered: 'تم الرد والنقاش',
+  no_answer: 'لم يتم الرد',
+  busy_or_callback: 'طلب معاودة الاتصال',
+  message_sent: 'تم إرسال الرسالة',
+  replied: 'تم استلام رد',
+  agreement_reached: 'تم الاتفاق',
+  follow_up_needed: 'يحتاج متابعة',
+  info_shared: 'تمت مشاركة معلومات',
+  other: 'نتيجة أخرى',
+};
 
 export function buildClientActivityTimeline(params: {
   clientId: string;
   meetings: Meeting[];
   tasks: ActionItem[];
   notes: Note[];
+  interactions?: CommunicationInteraction[];
   filterType?: 'all' | ClientTimelineEventType;
   sortOrder?: 'desc' | 'asc';
 }): ClientTimelineEvent[] {
@@ -659,6 +728,7 @@ export function buildClientActivityTimeline(params: {
     meetings,
     tasks,
     notes,
+    interactions = [],
     filterType = 'all',
     sortOrder = 'desc',
   } = params;
@@ -796,6 +866,32 @@ export function buildClientActivityTimeline(params: {
     });
   }
 
+  for (const comm of interactions) {
+    if (comm.clientId !== clientId) continue;
+    const timestamp = comm.occurredAt || comm.createdAt;
+    const cMs = parseValidTime(timestamp) ?? 0;
+    const channelLabel = CHANNEL_TIMELINE_LABELS[comm.channel] || 'تواصل';
+    const outcomeLabel = OUTCOME_TIMELINE_LABELS[comm.outcome] || 'مسجل';
+    const summaryParts: string[] = [];
+    if (comm.summary) summaryParts.push(comm.summary);
+    if (comm.nextStep) summaryParts.push(`الخطوة التالية: ${comm.nextStep}`);
+
+    pushUnique({
+      id: `interaction:${comm.id}`,
+      clientId,
+      type: 'interaction',
+      timestamp,
+      sortMs: cMs,
+      title: `${channelLabel}: ${comm.subject}`,
+      summary: summaryParts.length > 0 ? summaryParts.join(' • ') : undefined,
+      statusLabelAr: outcomeLabel,
+      provenance: 'source',
+      sourceType: 'interaction',
+      sourceId: comm.id,
+      interactionRef: comm,
+    });
+  }
+
   const filtered =
     filterType === 'all' ? events : events.filter((ev) => ev.type === filterType);
 
@@ -839,6 +935,7 @@ export function evaluateClientAttentionAlerts(params: {
   client: Client;
   meetings: Meeting[];
   tasks: ActionItem[];
+  interactions?: CommunicationInteraction[];
   staleThresholdDays?: number;
   referenceDate?: Date;
 }): ClientAttentionAlert[] {
@@ -846,6 +943,7 @@ export function evaluateClientAttentionAlerts(params: {
     client,
     meetings,
     tasks,
+    interactions = [],
     staleThresholdDays = STALE_CONTACT_THRESHOLD_DAYS,
     referenceDate = new Date(),
   } = params;
@@ -860,6 +958,7 @@ export function evaluateClientAttentionAlerts(params: {
 
   const clientMeetings = meetings.filter((m) => m.clientId === client.id);
   const clientTasks = tasks.filter((t) => t.clientId === client.id);
+  const clientInteractions = interactions.filter((i) => i.clientId === client.id);
 
   const alerts: ClientAttentionAlert[] = [];
 
@@ -948,16 +1047,19 @@ export function evaluateClientAttentionAlerts(params: {
     });
   }
 
-  // B. Long gap without recorded communication (>= 30 days)
-  const pastOrCurrentMeetings = clientMeetings
-    .map((m) => parseValidTime(m.dateTime))
-    .filter((ms): ms is number => ms !== null && ms <= refTime);
+  // B. Long gap without recorded communication (>= staleThresholdDays)
+  const pastOrCurrentContacts = [
+    ...clientMeetings
+      .filter((m) => m.status !== 'cancelled')
+      .map((m) => parseValidTime(m.dateTime)),
+    ...clientInteractions.map((i) => parseValidTime(i.occurredAt)),
+  ].filter((ms): ms is number => ms !== null && ms <= refTime);
 
   let daysSinceLastContact: number | null = null;
-  if (pastOrCurrentMeetings.length > 0) {
-    const latestMs = Math.max(...pastOrCurrentMeetings);
+  if (pastOrCurrentContacts.length > 0) {
+    const latestMs = Math.max(...pastOrCurrentContacts);
     daysSinceLastContact = Math.floor((refTime - latestMs) / dayMs);
-  } else if (clientMeetings.length === 0) {
+  } else if (clientMeetings.length === 0 && clientInteractions.length === 0) {
     const createdMs = parseValidTime(client.createdAt);
     if (createdMs !== null) {
       daysSinceLastContact = Math.floor((refTime - createdMs) / dayMs);
@@ -1083,6 +1185,7 @@ export interface ClientListFilterOptions {
   onlyNeedsFollowUp?: boolean;
   sortBy?: ClientListSortBy;
   referenceDate?: Date;
+  interactions?: CommunicationInteraction[];
 }
 
 export interface ClientWithSummary {
@@ -1110,9 +1213,10 @@ export function filterAndSortClients(
     onlyNeedsFollowUp = false,
     sortBy = 'last_activity',
     referenceDate = new Date(),
+    interactions = [],
   } = options;
 
-  const index = buildClientDataIndex({ meetings, tasks, notes });
+  const index = buildClientDataIndex({ meetings, tasks, notes, interactions });
   const refTime = referenceDate.getTime();
   const dayMs = 1000 * 60 * 60 * 24;
   const q = normalizeTextForMatch(searchQuery);
@@ -1122,12 +1226,14 @@ export function filterAndSortClients(
     const cMeetings = index.meetingsByClient.get(client.id) || [];
     const cTasks = index.tasksByClient.get(client.id) || [];
     const cNotes = index.notesByClient.get(client.id) || [];
+    const cInteractions = index.interactionsByClient.get(client.id) || [];
 
     const kpis = computeClientKpis({
       client,
       meetings: cMeetings,
       tasks: cTasks,
       notes: cNotes,
+      interactions: cInteractions,
       referenceDate,
     });
 
@@ -1136,7 +1242,7 @@ export function filterAndSortClients(
     const gapDays =
       lastContactMs !== null
         ? Math.floor((refTime - lastContactMs) / dayMs)
-        : cMeetings.length === 0 && createdMs !== null
+        : cMeetings.length === 0 && cInteractions.length === 0 && createdMs !== null
         ? Math.floor((refTime - createdMs) / dayMs)
         : null;
 
@@ -1217,3 +1323,4 @@ export function filterAndSortClients(
 
   return filtered;
 }
+

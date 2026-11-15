@@ -17,7 +17,8 @@ export type CollectionKey =
   | 'reminders'
   | 'preferences'
   | 'opportunities'
-  | 'opportunityStageEvents';
+  | 'opportunityStageEvents'
+  | 'interactions';
 
 export interface DetailedSyncSummary {
   syncState: SyncState;

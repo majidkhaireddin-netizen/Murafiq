@@ -4,6 +4,7 @@ import {
   CalendarCheck,
   CalendarRange,
   Users,
+  PhoneCall,
   Briefcase,
   Calendar,
   CheckSquare,
@@ -15,6 +16,7 @@ export type NavTab =
   | 'today'
   | 'calendar'
   | 'clients'
+  | 'communications'
   | 'opportunities'
   | 'meetings'
   | 'tasks'
@@ -29,6 +31,7 @@ interface BottomNavProps {
   activeRemindersCount?: number;
   overdueOpportunitiesCount?: number;
   calendarConflictsCount?: number;
+  dueCommunicationsCount?: number;
   language: 'ar' | 'en';
 }
 
@@ -40,6 +43,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({
   activeRemindersCount = 0,
   overdueOpportunitiesCount = 0,
   calendarConflictsCount = 0,
+  dueCommunicationsCount = 0,
   language,
 }) => {
   const tabs = [
@@ -68,6 +72,13 @@ export const BottomNav: React.FC<BottomNavProps> = ({
       label: language === 'ar' ? 'العملاء' : 'Clients',
       icon: Users,
       badge: 0,
+    },
+    {
+      id: 'communications' as NavTab,
+      label: language === 'ar' ? 'التواصل' : 'Comms',
+      icon: PhoneCall,
+      badge: dueCommunicationsCount,
+      badgeColor: 'bg-teal-600',
     },
     {
       id: 'opportunities' as NavTab,
@@ -100,7 +111,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({
 
   return (
     <nav className="sticky bottom-0 z-30 bg-white/95 backdrop-blur-md border-t border-stone-200 px-1 py-1.5 transition-all">
-      <div className="flex items-center justify-around max-w-2xl mx-auto gap-0.5">
+      <div className="flex items-center justify-around max-w-3xl mx-auto gap-0.5 overflow-x-auto no-scrollbar">
         {tabs.map((tab) => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;

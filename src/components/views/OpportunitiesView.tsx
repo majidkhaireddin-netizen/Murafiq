@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActionItem,
   Client,
+  CommunicationInteraction,
   Meeting,
   Opportunity,
   OpportunityStage,
@@ -44,6 +45,7 @@ interface OpportunitiesViewProps {
   clients: Client[];
   meetings: Meeting[];
   tasks: ActionItem[];
+  interactions?: CommunicationInteraction[];
   selectedOpportunityId?: string | null;
   onSelectOpportunity: (id: string | null) => void;
   onSaveOpportunity: (
@@ -60,6 +62,7 @@ interface OpportunitiesViewProps {
   onToggleTaskStatus: (task: ActionItem) => Promise<void> | void;
   onCreateLinkedMeeting: (opportunity: Opportunity) => void;
   onCreateLinkedTask: (opportunity: Opportunity) => void;
+  onLogInteraction?: (defaults: { clientId: string; opportunityId: string }) => void;
   onOpenClient: (clientId: string) => void;
   onOpenMeeting: (meetingId: string) => void;
   onOpenTask: (taskId: string) => void;
@@ -75,6 +78,7 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
   clients,
   meetings,
   tasks,
+  interactions = [],
   selectedOpportunityId,
   onSelectOpportunity,
   onSaveOpportunity,
@@ -88,6 +92,7 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
   onToggleTaskStatus,
   onCreateLinkedMeeting,
   onCreateLinkedTask,
+  onLogInteraction,
   onOpenClient,
   onOpenMeeting,
   onOpenTask,
@@ -209,6 +214,7 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
           client={clientsById.get(selectedOpportunity.clientId)}
           meetings={meetings}
           tasks={tasks}
+          interactions={interactions}
           stageEvents={stageEvents}
           onBack={() => onSelectOpportunity(null)}
           onEdit={handleOpenEdit}
@@ -228,6 +234,7 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
           onToggleTaskStatus={onToggleTaskStatus}
           onCreateLinkedMeeting={onCreateLinkedMeeting}
           onCreateLinkedTask={onCreateLinkedTask}
+          onLogInteraction={onLogInteraction}
           onOpenClient={onOpenClient}
           onOpenMeeting={onOpenMeeting}
           onOpenTask={onOpenTask}

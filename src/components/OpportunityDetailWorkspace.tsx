@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActionItem,
   Client,
+  CommunicationInteraction,
   Meeting,
   Opportunity,
   OpportunityStage,
@@ -16,6 +17,10 @@ import {
   formatOpportunityMoney,
   isOpportunityClosed,
 } from '../utils/opportunities';
+import {
+  COMMUNICATION_CHANNEL_META,
+  COMMUNICATION_OUTCOME_META,
+} from '../utils/communications';
 import { formatArabicDate, getPriorityBadge } from '../utils/logic';
 import {
   ArrowRight,
@@ -30,6 +35,7 @@ import {
   History,
   Link2,
   ListChecks,
+  PhoneCall,
   Plus,
   Trash2,
   Unlink,
@@ -42,6 +48,7 @@ interface OpportunityDetailWorkspaceProps {
   client?: Client;
   meetings: Meeting[];
   tasks: ActionItem[];
+  interactions?: CommunicationInteraction[];
   stageEvents: OpportunityStageEvent[];
   onBack: () => void;
   onEdit: (opportunity: Opportunity) => void;
@@ -56,6 +63,7 @@ interface OpportunityDetailWorkspaceProps {
   onToggleTaskStatus: (task: ActionItem) => Promise<void> | void;
   onCreateLinkedMeeting: (opportunity: Opportunity) => void;
   onCreateLinkedTask: (opportunity: Opportunity) => void;
+  onLogInteraction?: (defaults: { clientId: string; opportunityId: string }) => void;
   onOpenClient: (clientId: string) => void;
   onOpenMeeting: (meetingId: string) => void;
   onOpenTask: (taskId: string) => void;
@@ -67,6 +75,7 @@ export const OpportunityDetailWorkspace: React.FC<OpportunityDetailWorkspaceProp
   client,
   meetings,
   tasks,
+  interactions = [],
   stageEvents,
   onBack,
   onEdit,
@@ -81,6 +90,7 @@ export const OpportunityDetailWorkspace: React.FC<OpportunityDetailWorkspaceProp
   onToggleTaskStatus,
   onCreateLinkedMeeting,
   onCreateLinkedTask,
+  onLogInteraction,
   onOpenClient,
   onOpenMeeting,
   onOpenTask,
@@ -140,6 +150,14 @@ export const OpportunityDetailWorkspace: React.FC<OpportunityDetailWorkspaceProp
     [tasks, opportunity.id]
   );
 
+  const linkedInteractions = useMemo(
+    () =>
+      interactions
+        .filter((i) => i.opportunityId === opportunity.id)
+        .sort((a, b) => (b.occurredAt || '').localeCompare(a.occurredAt || '')),
+    [interactions, opportunity.id]
+  );
+
   // Strictly only tasks for the SAME client can be linked
   const linkableTasks = useMemo(
     () =>
@@ -160,6 +178,14 @@ export const OpportunityDetailWorkspace: React.FC<OpportunityDetailWorkspaceProp
         .filter((e) => e.opportunityId === opportunity.id)
         .sort((a, b) => (b.occurredAt || '').localeCompare(a.occurredAt || '')),
     [stageEvents, opportunity.id]
+  );
+
+  const linkedInteractions = useMemo(
+    () =>
+      interactions
+        .filter((i) => i.opportunityId === opportunity.id)
+        .sort((a, b) => (b.occurredAt || '').localeCompare(a.occurredAt || '')),
+    [interactions, opportunity.id]
   );
 
   const handleSaveNextAction = async (e: React.FormEvent) => {
@@ -791,6 +817,104 @@ export const OpportunityDetailWorkspace: React.FC<OpportunityDetailWorkspaceProp
             </div>
           )}
         </div>
+      </div>
+
+      {/* Linked Communication Interactions */}
+      <div
+        className="bg-white rounded-2xl border border-stone-200 p-4 space-y-3"
+        data-testid="opp-linked-interactions-section"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <PhoneCall className="w-4 h-4 text-emerald-700" />
+            <h3 className="text-sm font-bold text-stone-900">
+              {language === 'ar'
+                ? `سجل التواصل المرتبط بالفرصة (${linkedInteractions.length})`
+                : `Linked Communications (${linkedInteractions.length})`}
+            </h3>
+          </div>
+          {onLogInteraction && (
+            <button
+              type="button"
+              data-testid="opp-new-linked-interaction-btn"
+              onClick={() =>
+                onLogInteraction({
+                  clientId: opportunity.clientId,
+                  opportunityId: opportunity.id,
+                })
+              }
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200 text-[11px] font-bold hover:bg-emerald-100"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>{language === 'ar' ? 'تسجيل تواصل مرتبط' : 'Log Communication'}</span>
+            </button>
+          )}
+        </div>
+
+        {linkedInteractions.length === 0 ? (
+          <p className="text-xs text-stone-400 py-3 text-center">
+            {language === 'ar'
+              ? 'لا توجد سجلات تواصل مرتبطة بهذه الفرصة حالياً.'
+              : 'No linked communication records yet.'}
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {linkedInteractions.map((inter) => {
+              const chMeta =
+                COMMUNICATION_CHANNEL_META[inter.channel] || COMMUNICATION_CHANNEL_META.other;
+              const outMeta =
+                COMMUNICATION_OUTCOME_META[inter.outcome] ||
+                COMMUNICATION_OUTCOME_META.successful;
+              const contactInfo = resolveInteractionContact(inter, client);
+              return (
+                <div
+                  key={inter.id}
+                  data-testid={`opp-linked-interaction-${inter.id}`}
+                  className="p-2.5 rounded-xl border border-stone-200 bg-stone-50/70 flex flex-wrap items-center justify-between gap-2 text-xs"
+                >
+                  <div className="space-y-0.5 min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span
+                        className={`px-2 py-0.5 rounded-md text-[10px] font-bold border ${chMeta.badgeClass}`}
+                      >
+                        {language === 'ar' ? chMeta.labelAr : chMeta.labelEn}
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded-md text-[10px] font-semibold border ${outMeta.badgeClass}`}
+                      >
+                        {language === 'ar' ? outMeta.labelAr : outMeta.labelEn}
+                      </span>
+                      <span className="font-bold text-stone-900">{inter.subject}</span>
+                    </div>
+                    <p className="text-[11px] text-stone-600 line-clamp-2">{inter.summary}</p>
+                    <div className="flex flex-wrap items-center gap-2 text-[10px] text-stone-500">
+                      <span>{formatArabicDate(inter.occurredAt, true)}</span>
+                      {contactInfo.hasContact && (
+                        <span>
+                          • {language === 'ar' ? 'مع:' : 'With:'} {contactInfo.displayName}
+                        </span>
+                      )}
+                      {inter.nextStep && (
+                        <span className="text-emerald-800 font-semibold">
+                          • {language === 'ar' ? 'الخطوة التالية:' : 'Next:'} {inter.nextStep}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  {onEditInteraction && (
+                    <button
+                      type="button"
+                      onClick={() => onEditInteraction(inter)}
+                      className="px-2.5 py-1 rounded-lg bg-white border border-stone-200 text-[11px] font-semibold text-stone-700 hover:bg-stone-100 shrink-0"
+                    >
+                      {language === 'ar' ? 'عرض / تعديل' : 'View / Edit'}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Related Decisions from Linked Meetings */}

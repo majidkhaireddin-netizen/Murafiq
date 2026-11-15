@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import type {
   ActionItem,
   Client,
+  CommunicationInteraction,
   Meeting,
   Note,
   Opportunity,
@@ -27,6 +28,7 @@ import {
   Search,
   Users,
   UserCheck,
+  PhoneCall,
   Calendar,
   CheckSquare,
   StickyNote,
@@ -49,6 +51,7 @@ interface SearchModalProps {
     tasks: ActionItem[];
     notes: Note[];
     opportunities?: Opportunity[];
+    interactions?: CommunicationInteraction[];
   };
   currentUserId?: string;
   collectionsLoaded?: Partial<SearchCollectionsLoadedState>;
@@ -57,6 +60,7 @@ interface SearchModalProps {
   onSelectTask: (task: ActionItem) => void;
   onSelectNote?: (note: Note) => void;
   onSelectOpportunity?: (opportunity: Opportunity) => void;
+  onSelectInteraction?: (interaction: CommunicationInteraction) => void;
   language: 'ar' | 'en';
 }
 
@@ -104,6 +108,12 @@ const RECORD_TYPE_META: Record<
     labelEn: 'Contact',
     badgeClass: 'bg-teal-50 text-teal-800 border-teal-200',
     icon: UserCheck,
+  },
+  interaction: {
+    labelAr: 'تواصل',
+    labelEn: 'Interaction',
+    badgeClass: 'bg-cyan-50 text-cyan-900 border-cyan-200',
+    icon: PhoneCall,
   },
   opportunity: {
     labelAr: 'فرصة عمل',
@@ -184,6 +194,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
   onSelectTask,
   onSelectNote,
   onSelectOpportunity,
+  onSelectInteraction,
   language,
 }) => {
   const [rawQuery, setRawQuery] = useState('');
@@ -208,9 +219,18 @@ export const SearchModal: React.FC<SearchModalProps> = ({
         tasks: data.tasks,
         notes: data.notes,
         opportunities: data.opportunities || [],
+        interactions: data.interactions || [],
         currentUserId,
       }),
-    [data.clients, data.meetings, data.tasks, data.notes, data.opportunities, currentUserId]
+    [
+      data.clients,
+      data.meetings,
+      data.tasks,
+      data.notes,
+      data.opportunities,
+      data.interactions,
+      currentUserId,
+    ]
   );
 
   const availableTags = useMemo(
@@ -218,9 +238,10 @@ export const SearchModal: React.FC<SearchModalProps> = ({
       extractAvailableSearchTags({
         clients: data.clients,
         notes: data.notes,
+        interactions: data.interactions || [],
         currentUserId,
       }),
-    [data.clients, data.notes, currentUserId]
+    [data.clients, data.notes, data.interactions, currentUserId]
   );
 
   // Use rawQuery when emptied so clearing the input is instantaneous
@@ -290,6 +311,15 @@ export const SearchModal: React.FC<SearchModalProps> = ({
     }
     if (item.recordType === 'opportunity' && item.opportunityRef && onSelectOpportunity) {
       onSelectOpportunity(item.opportunityRef);
+      onClose();
+      return;
+    }
+    if (item.recordType === 'interaction') {
+      if (item.interactionRef && onSelectInteraction) {
+        onSelectInteraction(item.interactionRef);
+      } else if (item.clientRef) {
+        onSelectClient(item.clientRef);
+      }
       onClose();
     }
   };
@@ -421,6 +451,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
               [
                 'client',
                 'contact',
+                'interaction',
                 'opportunity',
                 'meeting',
                 'task',
