@@ -47,7 +47,7 @@ export function getDateKeyInTimeZone(
 export function normalizeStrictDateOnly(input?: string | null): string | null {
   if (typeof input !== 'string') return null;
   const value = input.trim();
-  const match = /^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(value);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
   if (!match) return null;
 
   const year = Number(match[1]);
