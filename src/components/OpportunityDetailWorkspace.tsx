@@ -180,14 +180,6 @@ export const OpportunityDetailWorkspace: React.FC<OpportunityDetailWorkspaceProp
     [stageEvents, opportunity.id]
   );
 
-  const linkedInteractions = useMemo(
-    () =>
-      interactions
-        .filter((i) => i.opportunityId === opportunity.id)
-        .sort((a, b) => (b.occurredAt || '').localeCompare(a.occurredAt || '')),
-    [interactions, opportunity.id]
-  );
-
   const handleSaveNextAction = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSavingNextAction) return;
