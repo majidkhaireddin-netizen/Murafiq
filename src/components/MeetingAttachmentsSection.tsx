@@ -10,6 +10,7 @@ import {
   Paperclip,
   RefreshCw,
   ShieldCheck,
+  Sparkles,
   Trash2,
   UploadCloud,
   WifiOff,
@@ -37,6 +38,8 @@ interface MeetingAttachmentsSectionProps {
   meetingId: string;
   isOnline: boolean;
   onAttachmentsCountChange?: (count: number) => void;
+  onAttachmentsChange?: (attachments: MeetingAttachment[]) => void;
+  onAnalyzeAttachment?: (attachment: MeetingAttachment) => void;
 }
 
 const STAGE_LABELS_AR: Record<UploadStage, string> = {
@@ -51,6 +54,8 @@ export const MeetingAttachmentsSection: React.FC<MeetingAttachmentsSectionProps>
   meetingId,
   isOnline,
   onAttachmentsCountChange,
+  onAttachmentsChange,
+  onAnalyzeAttachment,
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const uploadAbortRef = useRef<AbortController | null>(null);
@@ -107,6 +112,7 @@ export const MeetingAttachmentsSection: React.FC<MeetingAttachmentsSectionProps>
         (items) => {
           setAttachments(items);
           onAttachmentsCountChange?.(items.length);
+          onAttachmentsChange?.(items);
           setIsLoadingList(false);
           setListError(null);
         },
@@ -668,7 +674,21 @@ export const MeetingAttachmentsSection: React.FC<MeetingAttachmentsSectionProps>
                   </div>
                 </div>
 
-                <div className="flex items-center gap-1 shrink-0">
+                <div className="flex items-center gap-1 shrink-0 flex-wrap justify-end">
+                  {onAnalyzeAttachment && (
+                    <button
+                      type="button"
+                      data-testid={`analyze-attachment-btn-${att.id}`}
+                      onClick={() => onAnalyzeAttachment(att)}
+                      disabled={!isOnline || isBusy || isRecoverableDelete || att.uploadStatus !== 'completed'}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 disabled:opacity-50"
+                      title="تحليل المرفق بالذكاء الاصطناعي"
+                    >
+                      <Sparkles className="w-3 h-3" />
+                      <span>تحليل ذكي</span>
+                    </button>
+                  )}
+
                   <button
                     type="button"
                     onClick={() => void handleOpenViewer(att)}

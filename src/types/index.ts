@@ -1418,4 +1418,92 @@ export interface PlaybookRescheduleSuggestion {
   reasonAr: string;
 }
 
+// =========================================================================
+// Task 014: Document Intelligence & Smart Attachment Analysis Types
+// =========================================================================
 
+export type DocumentAiAnalysisMode = 'comprehensive' | 'question';
+
+export type DocumentAiUiState =
+  | 'idle'
+  | 'consent'
+  | 'loading'
+  | 'success'
+  | 'error'
+  | 'cancelled'
+  | 'offline'
+  | 'unsupported_file'
+  | 'configuration_error';
+
+export type DocumentAiReviewItemState = 'pending' | 'approved' | 'ignored' | 'save_failed';
+
+export interface DocumentAiAnalysisRequest {
+  meetingId: string;
+  attachmentId: string;
+  analysisMode: DocumentAiAnalysisMode;
+  question?: string;
+}
+
+export interface DocumentAiComprehensiveSummary {
+  overview: string;
+  documentTypeLabel?: string;
+  mainSubject?: string;
+  insufficientInfo: boolean;
+}
+
+export interface DocumentAiSuggestedDecision {
+  id: string;
+  text: string;
+  confidence: AiDecisionConfidence;
+  ownerName?: string;
+  sourceEvidence?: string;
+}
+
+export interface DocumentAiSuggestedTask {
+  id: string;
+  title: string;
+  description?: string;
+  ownerName?: string;
+  dueDate?: string;
+  priority: TaskPriority;
+  needsDueDateConfirmation: boolean;
+  needsOwnerConfirmation: boolean;
+  sourceEvidence?: string;
+}
+
+export interface DocumentAiImportantDate {
+  id: string;
+  label: string;
+  dateIso?: string;
+  rawDateText?: string;
+  needsDateConfirmation: boolean;
+  sourceEvidence?: string;
+}
+
+export interface DocumentAiQuestionAnswer {
+  question: string;
+  answer: string;
+  supportingEvidence: string[];
+  insufficientInformation: boolean;
+}
+
+export interface DocumentAiAnalysisResult {
+  analysisId: string;
+  generatedAt: string;
+  model: string;
+  meetingId: string;
+  attachmentId: string;
+  fileName: string;
+  contentType: AllowedAttachmentMimeType;
+  sizeBytes: number;
+  analysisMode: DocumentAiAnalysisMode;
+  summary?: DocumentAiComprehensiveSummary;
+  keyPoints: string[];
+  decisions: DocumentAiSuggestedDecision[];
+  suggestedTasks: DocumentAiSuggestedTask[];
+  importantDates: DocumentAiImportantDate[];
+  openQuestions: AiOpenPoint[];
+  questionAnswer?: DocumentAiQuestionAnswer;
+  limitations: string[];
+  warningsArabic: string[];
+}

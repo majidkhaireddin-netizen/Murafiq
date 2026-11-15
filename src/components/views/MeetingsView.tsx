@@ -5,6 +5,7 @@ import {
   CommunicationInteraction,
   Meeting,
   MeetingAgendaItem,
+  MeetingAttachment,
   MeetingDecision,
   MeetingParticipant,
   MeetingStatus,
@@ -21,8 +22,10 @@ import { formatArabicDate } from '../../utils/logic';
 import { parseMeetingDateTimeMs } from '../../utils/followUpEngine';
 import { MeetingAttachmentsSection } from '../MeetingAttachmentsSection';
 import { MeetingAiAssistant } from '../MeetingAiAssistant';
+import { DocumentAiAssistant } from '../DocumentAiAssistant';
 import { MeetingPreparationWorkspace } from '../MeetingPreparationWorkspace';
 import type { requestMeetingAiSuggestions } from '../../services/meetingAi';
+import type { requestDocumentAnalysis } from '../../services/documentAi';
 import {
   CustomTemplateOverride,
   MeetingTemplateModal,
@@ -135,6 +138,7 @@ interface MeetingsViewProps {
   language: 'ar' | 'en';
   isOnline?: boolean;
   requestAiAnalysisFn?: typeof requestMeetingAiSuggestions;
+  requestDocumentAnalysisFn?: typeof requestDocumentAnalysis;
 }
 
 export type WorkspaceSectionTab =
@@ -197,6 +201,7 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
   language,
   isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true,
   requestAiAnalysisFn,
+  requestDocumentAnalysisFn,
 }) => {
   const isArabic = language === 'ar';
 
@@ -268,6 +273,10 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
 
   // Meeting deletion guard UI state (preserved from Task 004-A-Fix-03)
   const [activeMeetingAttachmentsCount, setActiveMeetingAttachmentsCount] = useState<number>(0);
+  const [activeMeetingAttachments, setActiveMeetingAttachments] = useState<MeetingAttachment[]>([]);
+  const [selectedAttachmentForDocAi, setSelectedAttachmentForDocAi] =
+    useState<MeetingAttachment | null>(null);
+  const [docAiConsentTrigger, setDocAiConsentTrigger] = useState<number>(0);
   const [confirmDeleteMeeting, setConfirmDeleteMeeting] = useState<boolean>(false);
   const [deleteMeetingError, setDeleteMeetingError] = useState<string | null>(null);
   const [deleteMeetingNotice, setDeleteMeetingNotice] = useState<string | null>(null);
@@ -335,6 +344,9 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
     setTaskCreateNotice(null);
     setPendingReopenTarget(null);
     setActiveMeetingAttachmentsCount(0);
+    setActiveMeetingAttachments([]);
+    setSelectedAttachmentForDocAi(null);
+    setDocAiConsentTrigger(0);
     setConfirmDeleteMeeting(false);
     setDeleteMeetingError(null);
     setDeleteMeetingNotice(null);
@@ -2485,6 +2497,30 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
                   meetingId={activeMeeting.id}
                   isOnline={isOnline}
                   onAttachmentsCountChange={setActiveMeetingAttachmentsCount}
+                  onAttachmentsChange={setActiveMeetingAttachments}
+                  onAnalyzeAttachment={(att) => {
+                    setSelectedAttachmentForDocAi(att);
+                    setDocAiConsentTrigger((n) => n + 1);
+                  }}
+                />
+              )}
+
+              {/* Document Intelligence & Smart Attachment Analysis (Task 014) */}
+              {(workspaceTab === 'all' ||
+                workspaceTab === 'attachments' ||
+                workspaceTab === 'ai') && (
+                <DocumentAiAssistant
+                  meeting={activeMeeting}
+                  attachments={activeMeetingAttachments}
+                  tasks={tasks}
+                  agendaItems={activeAgenda}
+                  isOnline={isOnline}
+                  onPersistMeetingUpdate={persistActiveMeeting}
+                  onSaveTask={onSaveTask || (() => onNewTaskFromMeeting(activeMeeting))}
+                  onRequestReopenMinutes={() => setPendingReopenTarget('review')}
+                  externalSelectedAttachment={selectedAttachmentForDocAi}
+                  externalTriggerNonce={docAiConsentTrigger}
+                  requestAnalysisFn={requestDocumentAnalysisFn}
                 />
               )}
 

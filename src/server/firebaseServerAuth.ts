@@ -5,6 +5,7 @@ import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import type {
   AttachmentDeleteStatus,
+  AttachmentUploadStatus,
   MeetingAttachment,
   MeetingAttachmentGuardRecord,
   UploadIntentRecord,
@@ -284,9 +285,12 @@ export async function verifyFirebaseBearerToken(
 export interface MeetingAttachmentRecordCheck {
   exists: boolean;
   record?: MeetingAttachment;
+  meetingId?: string;
   fileName?: string;
   contentType?: string;
+  sizeBytes?: number;
   storageKey?: string;
+  uploadStatus?: AttachmentUploadStatus;
   deleteStatus?: AttachmentDeleteStatus;
 }
 
@@ -297,6 +301,21 @@ function parseFirestoreRestStringField(
   const val = fields?.[key];
   if (val && typeof val.stringValue === 'string') {
     return val.stringValue;
+  }
+  return undefined;
+}
+
+function parseFirestoreRestIntegerField(
+  fields: Record<string, any> | undefined,
+  key: string
+): number | undefined {
+  const val = fields?.[key];
+  if (val && val.integerValue !== undefined && val.integerValue !== null) {
+    const parsed = Number(val.integerValue);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  if (val && typeof val.doubleValue === 'number' && Number.isFinite(val.doubleValue)) {
+    return val.doubleValue;
   }
   return undefined;
 }
@@ -334,9 +353,12 @@ async function fetchDocumentViaVerifiedUserRest(params: {
     data: {
       id: parseFirestoreRestStringField(fields, 'id'),
       userId: parseFirestoreRestStringField(fields, 'userId'),
+      meetingId: parseFirestoreRestStringField(fields, 'meetingId'),
       fileName: parseFirestoreRestStringField(fields, 'fileName'),
       contentType: parseFirestoreRestStringField(fields, 'contentType'),
+      sizeBytes: parseFirestoreRestIntegerField(fields, 'sizeBytes'),
       storageKey: parseFirestoreRestStringField(fields, 'storageKey'),
+      uploadStatus: parseFirestoreRestStringField(fields, 'uploadStatus'),
       deleteStatus: parseFirestoreRestStringField(fields, 'deleteStatus'),
     },
   };
@@ -403,9 +425,12 @@ export async function verifyAttachmentOwnershipInNamedDb(params: {
     return {
       exists: true,
       record: data,
+      meetingId: typeof data?.meetingId === 'string' ? data.meetingId : undefined,
       fileName: typeof data?.fileName === 'string' ? data.fileName : undefined,
       contentType: typeof data?.contentType === 'string' ? data.contentType : undefined,
+      sizeBytes: typeof data?.sizeBytes === 'number' ? data.sizeBytes : undefined,
       storageKey: typeof data?.storageKey === 'string' ? data.storageKey : undefined,
+      uploadStatus: data?.uploadStatus,
       deleteStatus: data?.deleteStatus,
     };
   } catch (adminErr: any) {
@@ -418,9 +443,12 @@ export async function verifyAttachmentOwnershipInNamedDb(params: {
     if (restRes.data?.userId && restRes.data.userId !== uid) return { exists: false };
     return {
       exists: true,
+      meetingId: restRes.data?.meetingId,
       fileName: restRes.data?.fileName,
       contentType: restRes.data?.contentType,
+      sizeBytes: typeof restRes.data?.sizeBytes === 'number' ? restRes.data.sizeBytes : undefined,
       storageKey: restRes.data?.storageKey,
+      uploadStatus: restRes.data?.uploadStatus as AttachmentUploadStatus | undefined,
       deleteStatus: restRes.data?.deleteStatus as AttachmentDeleteStatus | undefined,
     };
   }
@@ -698,9 +726,12 @@ export function createFirebaseAttachmentMetadataStore(
         return {
           exists: true,
           record: data,
+          meetingId: typeof data?.meetingId === 'string' ? data.meetingId : undefined,
           fileName: data?.fileName,
           contentType: data?.contentType,
+          sizeBytes: typeof data?.sizeBytes === 'number' ? data.sizeBytes : undefined,
           storageKey: data?.storageKey,
+          uploadStatus: data?.uploadStatus,
           deleteStatus: data?.deleteStatus,
         };
       } catch (err) {
