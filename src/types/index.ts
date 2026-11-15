@@ -1435,7 +1435,7 @@ export type DocumentAiUiState =
   | 'unsupported_file'
   | 'configuration_error';
 
-export type DocumentAiReviewItemState = 'pending' | 'approved' | 'ignored' | 'save_failed';
+export type DocumentAiReviewItemState = 'pending' | 'approved' | 'ignored' | 'save_failed' | 'saving';
 
 export interface DocumentAiAnalysisRequest {
   meetingId: string;

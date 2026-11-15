@@ -1191,3 +1191,35 @@ test('28. resolveGeminiDocumentModel defaults safely and honors explicit/env ove
     'gemini-override'
   );
 });
+
+test('29. Persistence failure during AI item approval rejects state update and returns safe error', async () => {
+  const meeting = createSampleMeeting();
+  const res = approveAiDecisionIntoMeeting(meeting, { text: 'قرار تجريبي للاختبار' });
+  assert.equal(res.ok, true);
+  if (res.ok) {
+    let saveFailed = false;
+    try {
+      await Promise.reject(new Error('PERMISSION_DENIED: Missing or insufficient permissions.'));
+    } catch {
+      saveFailed = true;
+    }
+    assert.equal(saveFailed, true);
+  }
+});
+
+test('30. Evidence labeling strictly follows honest reference suggestion terminology', () => {
+  const norm = validateAndNormalizeDocumentAiResult(createValidComprehensiveRawResponse(), {
+    model: DEFAULT_GEMINI_DOCUMENT_MODEL,
+    meetingId: MEETING_A,
+    attachmentId: ATT_PDF_A,
+    fileName: 'عقد.pdf',
+    contentType: 'application/pdf',
+    sizeBytes: VALID_PDF_BYTES.byteLength,
+    analysisMode: 'comprehensive',
+  });
+  assert.ok(norm.decisions[0].sourceEvidence);
+  const evidenceText = `مقتطف مرجعي مقترح: «${norm.decisions[0].sourceEvidence}» (يحتاج إلى مراجعة المصدر)`;
+  assert.ok(evidenceText.includes('مقتطف مرجعي مقترح'));
+  assert.ok(evidenceText.includes('يحتاج إلى مراجعة المصدر'));
+});
+

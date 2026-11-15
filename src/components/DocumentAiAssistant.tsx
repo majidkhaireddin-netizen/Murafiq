@@ -414,30 +414,51 @@ export const DocumentAiAssistant: React.FC<DocumentAiAssistantProps> = ({
   };
 
   const handleApplySummary = async (mode: 'append' | 'replace') => {
+    if (summaryState === 'approved' || summaryState === 'saving') return;
+    setSummaryState('saving' as any);
+    setActionBanner(null);
+
     const res = applyAiSummaryToMeeting(meeting, summaryDraftText, mode);
     if (!res.ok) {
+      setSummaryState('pending');
       setActionBanner({ type: 'warning', text: res.reasonArabic });
       setConfirmReplaceSummaryOpen(false);
       return;
     }
 
-    await onPersistMeetingUpdate(
-      res.meeting,
-      mode === 'replace'
-        ? 'تم اعتماد ملخص المستند واستبدال ملخص المناقشات.'
-        : 'تمت إضافة ملخص المستند المعتمد إلى قسم المناقشات.'
-    );
+    try {
+      await onPersistMeetingUpdate(
+        res.meeting,
+        mode === 'replace'
+          ? 'تم اعتماد ملخص المستند واستبدال ملخص المناقشات.'
+          : 'تمت إضافة ملخص المستند المعتمد إلى قسم المناقشات.'
+      );
 
-    setSummaryState('approved');
-    setIsEditingSummary(false);
-    setConfirmReplaceSummaryOpen(false);
-    setActionBanner({
-      type: 'success',
-      text: 'تم حفظ الملخص المعتمد في ملخص المناقشات دون المساس بالملاحظات النصية السابقة.',
-    });
+      setSummaryState('approved');
+      setIsEditingSummary(false);
+      setConfirmReplaceSummaryOpen(false);
+      setActionBanner({
+        type: 'success',
+        text: 'تم حفظ الملخص المعتمد في ملخص المناقشات دون المساس بالملاحظات النصية السابقة.',
+      });
+    } catch (err: any) {
+      setSummaryState('save_failed');
+      const errMsg = err?.message || 'تعذر حفظ الملخص المعتمد على الخادم. يرجى إعادة المحاولة.';
+      setActionBanner({ type: 'error', text: errMsg });
+    }
   };
 
   const handleApproveDecision = async (dec: DocumentAiSuggestedDecision) => {
+    const st = decisionStates[dec.id];
+    if (st === 'approved' || st === 'saving') return;
+
+    setDecisionStates((prev) => ({ ...prev, [dec.id]: 'saving' as any }));
+    setDecisionErrors((prev) => {
+      const copy = { ...prev };
+      delete copy[dec.id];
+      return copy;
+    });
+
     const draft = decisionDrafts[dec.id] || {
       text: dec.text,
       ownerName: dec.ownerName || '',
@@ -450,19 +471,28 @@ export const DocumentAiAssistant: React.FC<DocumentAiAssistantProps> = ({
     });
 
     if (!res.ok) {
+      setDecisionStates((prev) => ({ ...prev, [dec.id]: 'save_failed' }));
       setDecisionErrors((prev) => ({ ...prev, [dec.id]: res.reasonArabic }));
       setActionBanner({ type: 'warning', text: res.reasonArabic });
       return;
     }
 
-    await onPersistMeetingUpdate(res.meeting, 'تم اعتماد القرار المستخرج وإضافته إلى المحضر.');
-    setDecisionStates((prev) => ({ ...prev, [dec.id]: 'approved' }));
-    setDecisionErrors((prev) => {
-      const copy = { ...prev };
-      delete copy[dec.id];
-      return copy;
-    });
-    setEditingDecisionId((curr) => (curr === dec.id ? null : curr));
+    try {
+      await onPersistMeetingUpdate(res.meeting, 'تم اعتماد القرار المستخرج وإضافته إلى المحضر.');
+      setDecisionStates((prev) => ({ ...prev, [dec.id]: 'approved' }));
+      setDecisionErrors((prev) => {
+        const copy = { ...prev };
+        delete copy[dec.id];
+        return copy;
+      });
+      setEditingDecisionId((curr) => (curr === dec.id ? null : curr));
+      setActionBanner({ type: 'success', text: 'تم اعتماد القرار وحفظه بنجاح.' });
+    } catch (err: any) {
+      setDecisionStates((prev) => ({ ...prev, [dec.id]: 'save_failed' }));
+      const errMsg = err?.message || 'تعذر حفظ القرار على الخادم.';
+      setDecisionErrors((prev) => ({ ...prev, [dec.id]: errMsg }));
+      setActionBanner({ type: 'error', text: errMsg });
+    }
   };
 
   const buildTaskCandidate = (item: DocumentAiSuggestedTask) => {
@@ -484,31 +514,45 @@ export const DocumentAiAssistant: React.FC<DocumentAiAssistantProps> = ({
   };
 
   const handleApproveSingleTask = async (item: DocumentAiSuggestedTask) => {
-    if (taskStates[item.id] === 'approved') return;
+    const st = taskStates[item.id];
+    if (st === 'approved' || st === 'saving') return;
 
-    const candidate = buildTaskCandidate(item);
-    const res = await approveAiSuggestedTask({
-      candidate,
-      meeting,
-      existingTasks: tasks,
-      saveTaskFn: onSaveTask,
+    setTaskStates((prev) => ({ ...prev, [item.id]: 'saving' as any }));
+    setTaskErrors((prev) => {
+      const copy = { ...prev };
+      delete copy[item.id];
+      return copy;
     });
 
-    if (res.ok) {
-      setTaskStates((prev) => ({ ...prev, [item.id]: 'approved' }));
-      setTaskErrors((prev) => {
-        const copy = { ...prev };
-        delete copy[item.id];
-        return copy;
+    const candidate = buildTaskCandidate(item);
+    try {
+      const res = await approveAiSuggestedTask({
+        candidate,
+        meeting,
+        existingTasks: tasks,
+        saveTaskFn: onSaveTask,
       });
-      setEditingTaskId((curr) => (curr === item.id ? null : curr));
-      setActionBanner({
-        type: 'success',
-        text: `تم إنشاء المهمة «${res.task.title}» وربطها باللقاء والعميل.`,
-      });
-    } else {
+
+      if (res.ok) {
+        setTaskStates((prev) => ({ ...prev, [item.id]: 'approved' }));
+        setTaskErrors((prev) => {
+          const copy = { ...prev };
+          delete copy[item.id];
+          return copy;
+        });
+        setEditingTaskId((curr) => (curr === item.id ? null : curr));
+        setActionBanner({
+          type: 'success',
+          text: `تم إنشاء المهمة «${res.task.title}» وربطها باللقاء والعميل.`,
+        });
+      } else {
+        setTaskStates((prev) => ({ ...prev, [item.id]: 'save_failed' }));
+        setTaskErrors((prev) => ({ ...prev, [item.id]: res.reasonArabic }));
+      }
+    } catch (err: any) {
       setTaskStates((prev) => ({ ...prev, [item.id]: 'save_failed' }));
-      setTaskErrors((prev) => ({ ...prev, [item.id]: res.reasonArabic }));
+      const errMsg = err?.message || 'تعذر حفظ المهمة على الخادم.';
+      setTaskErrors((prev) => ({ ...prev, [item.id]: errMsg }));
     }
   };
 
@@ -524,7 +568,7 @@ export const DocumentAiAssistant: React.FC<DocumentAiAssistantProps> = ({
     const targets = result.suggestedTasks
       .filter((item) => {
         const st = taskStates[item.id];
-        if (st === 'approved' || st === 'ignored') return false;
+        if (st === 'approved' || st === 'ignored' || st === 'saving') return false;
         return Boolean(selectedTaskIds[item.id]);
       })
       .map(buildTaskCandidate);
@@ -590,6 +634,9 @@ export const DocumentAiAssistant: React.FC<DocumentAiAssistantProps> = ({
   };
 
   const handleAdoptImportantDateAsFollowUp = async (dt: DocumentAiImportantDate) => {
+    const st = dateStates[dt.id];
+    if (st === 'approved' || st === 'saving') return;
+
     const rawDate = (dateDraftIso[dt.id] || dt.dateIso || '').trim();
     if (!isValidIsoDateOnly(rawDate)) {
       setDateErrors((prev) => ({
@@ -599,23 +646,39 @@ export const DocumentAiAssistant: React.FC<DocumentAiAssistantProps> = ({
       return;
     }
 
-    const res = applyAiFollowUpDateToMeeting(meeting, rawDate);
-    if (!res.ok) {
-      setDateErrors((prev) => ({ ...prev, [dt.id]: res.reasonArabic }));
-      setActionBanner({ type: 'warning', text: res.reasonArabic });
-      return;
-    }
-
-    await onPersistMeetingUpdate(
-      res.meeting,
-      `تم اعتماد التاريخ (${rawDate}) كموعد متابعة في هذا اللقاء.`
-    );
-    setDateStates((prev) => ({ ...prev, [dt.id]: 'approved' }));
+    setDateStates((prev) => ({ ...prev, [dt.id]: 'saving' as any }));
     setDateErrors((prev) => {
       const copy = { ...prev };
       delete copy[dt.id];
       return copy;
     });
+
+    const res = applyAiFollowUpDateToMeeting(meeting, rawDate);
+    if (!res.ok) {
+      setDateStates((prev) => ({ ...prev, [dt.id]: 'save_failed' }));
+      setDateErrors((prev) => ({ ...prev, [dt.id]: res.reasonArabic }));
+      setActionBanner({ type: 'warning', text: res.reasonArabic });
+      return;
+    }
+
+    try {
+      await onPersistMeetingUpdate(
+        res.meeting,
+        `تم اعتماد التاريخ (${rawDate}) كموعد متابعة في هذا اللقاء.`
+      );
+      setDateStates((prev) => ({ ...prev, [dt.id]: 'approved' }));
+      setDateErrors((prev) => {
+        const copy = { ...prev };
+        delete copy[dt.id];
+        return copy;
+      });
+      setActionBanner({ type: 'success', text: 'تم اعتماد موعد المتابعة وحفظه بنجاح.' });
+    } catch (err: any) {
+      setDateStates((prev) => ({ ...prev, [dt.id]: 'save_failed' }));
+      const errMsg = err?.message || 'تعذر حفظ موعد المتابعة على الخادم.';
+      setDateErrors((prev) => ({ ...prev, [dt.id]: errMsg }));
+      setActionBanner({ type: 'error', text: errMsg });
+    }
   };
 
   const pendingTaskCount = result
@@ -999,7 +1062,7 @@ export const DocumentAiAssistant: React.FC<DocumentAiAssistantProps> = ({
               {result.questionAnswer.supportingEvidence.length > 0 && (
                 <div className="bg-stone-50 rounded-xl p-2.5 border border-stone-200 space-y-1">
                   <div className="text-[11px] font-bold text-stone-700">
-                    الشواهد والأدلة من المستند:
+                    مقتطفات مرجعية مقترحة من المستند (تحتاج إلى مراجعة المصدر):
                   </div>
                   <ul className="list-disc list-inside space-y-0.5 text-[11px] text-stone-700">
                     {result.questionAnswer.supportingEvidence.map((ev, i) => (
@@ -1324,7 +1387,7 @@ export const DocumentAiAssistant: React.FC<DocumentAiAssistantProps> = ({
                                   {draft.ownerName && <span>المسؤول: {draft.ownerName}</span>}
                                   {dec.sourceEvidence && (
                                     <span className="text-stone-500">
-                                      الشاهد: «{dec.sourceEvidence}»
+                                      مقتطف مرجعي مقترح: «{dec.sourceEvidence}» (يحتاج إلى مراجعة المصدر)
                                     </span>
                                   )}
                                 </div>
@@ -1735,7 +1798,7 @@ export const DocumentAiAssistant: React.FC<DocumentAiAssistantProps> = ({
                               )}
                               {dt.sourceEvidence && (
                                 <div className="text-[11px] text-stone-500">
-                                  الشاهد: «{dt.sourceEvidence}»
+                                  مقتطف مرجعي مقترح: «{dt.sourceEvidence}» (يحتاج إلى مراجعة المصدر)
                                 </div>
                               )}
                             </div>
