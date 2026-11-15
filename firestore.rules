@@ -56,6 +56,12 @@ service cloud.firestore {
     match /interactions/{interactionId} {
       allow read, write: if false;
     }
+    match /playbookTemplates/{templateId} {
+      allow read, write: if false;
+    }
+    match /playbookRuns/{runId} {
+      allow read, write: if false;
+    }
 
     // 4. Schema & Data Integrity Validation Helpers
 
@@ -154,7 +160,7 @@ service cloud.firestore {
 
     // Task Validation
     function isValidTask(data, userId) {
-      return data.keys().hasOnly(['id', 'userId', 'meetingId', 'clientId', 'opportunityId', 'interactionId', 'title', 'description', 'dueDate', 'scheduledStartAt', 'scheduledEndAt', 'priority', 'status', 'reminderDate', 'completedAt', 'provenance', 'createdAt'])
+      return data.keys().hasOnly(['id', 'userId', 'meetingId', 'clientId', 'opportunityId', 'interactionId', 'playbookRunId', 'playbookStepId', 'title', 'description', 'dueDate', 'scheduledStartAt', 'scheduledEndAt', 'priority', 'status', 'reminderDate', 'completedAt', 'provenance', 'createdAt'])
         && data.keys().hasAll(['id', 'clientId', 'title', 'priority', 'status'])
         && data.id is string && isValidId(data.id)
         && data.clientId is string && isValidId(data.clientId)
@@ -165,6 +171,8 @@ service cloud.firestore {
         && (!('meetingId' in data) || (data.meetingId is string && isValidId(data.meetingId)))
         && (!('opportunityId' in data) || (data.opportunityId is string && isValidId(data.opportunityId)))
         && (!('interactionId' in data) || (data.interactionId is string && isValidId(data.interactionId)))
+        && (!('playbookRunId' in data) || (data.playbookRunId is string && isValidId(data.playbookRunId)))
+        && (!('playbookStepId' in data) || (data.playbookStepId is string && isValidId(data.playbookStepId)))
         && (!('description' in data) || (data.description is string && data.description.size() <= 2000))
         && (!('dueDate' in data) || (data.dueDate is string && data.dueDate.size() <= 50))
         && (!('scheduledStartAt' in data) || (data.scheduledStartAt is string && data.scheduledStartAt.size() <= 50))
@@ -226,14 +234,15 @@ service cloud.firestore {
         ])
         && data.keys().hasAll(['id', 'sourceType', 'sourceId', 'reason', 'status', 'sourceFingerprint'])
         && data.id is string && isValidId(data.id)
-        && data.sourceType in ['task', 'meeting', 'client', 'opportunity', 'interaction']
+        && data.sourceType in ['task', 'meeting', 'client', 'opportunity', 'interaction', 'playbook_step']
         && data.sourceId is string && isValidId(data.sourceId)
         && data.reason in [
           'task_overdue', 'task_due_today', 'task_due_soon', 'task_high_priority',
           'meeting_imminent', 'meeting_follow_up', 'client_stale_contact',
           'opportunity_overdue_action', 'opportunity_closing_soon',
           'opportunity_missing_next_action', 'opportunity_stale',
-          'interaction_follow_up_due', 'interaction_follow_up_overdue'
+          'interaction_follow_up_due', 'interaction_follow_up_overdue',
+          'playbook_step_due_today', 'playbook_step_overdue', 'playbook_step_due_soon'
         ]
         && data.status in ['snoozed', 'resolved', 'invalidated']
         && data.sourceFingerprint is string && data.sourceFingerprint.size() > 0 && data.sourceFingerprint.size() <= 200
@@ -357,6 +366,50 @@ service cloud.firestore {
         && (!('followUpTaskId' in data) || (data.followUpTaskId is string && isValidId(data.followUpTaskId)))
         && data.createdAt is string && data.createdAt.size() > 0 && data.createdAt.size() <= 50
         && data.updatedAt is string && data.updatedAt.size() > 0 && data.updatedAt.size() <= 50;
+    }
+
+    // Playbook Template Validation (Task 013: User-created Relationship Playbook Templates)
+    function isValidPlaybookTemplate(data, userId) {
+      return data.keys().hasOnly([
+          'id', 'userId', 'name', 'description', 'category', 'steps',
+          'isSystemTemplate', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasAll(['id', 'name', 'category', 'steps', 'isSystemTemplate', 'createdAt', 'updatedAt'])
+        && data.id is string && isValidId(data.id)
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 160
+        && data.category in ['lead_engagement', 'proposal_follow_up', 'post_meeting', 'relationship_reactivation', 'custom']
+        && data.isSystemTemplate == false
+        && data.steps is list && data.steps.size() >= 1 && data.steps.size() <= 20
+        && (!('userId' in data) || (data.userId is string && data.userId == userId))
+        && (!('description' in data) || (data.description is string && data.description.size() <= 2000))
+        && data.createdAt is string && data.createdAt.size() > 0 && data.createdAt.size() <= 50
+        && data.updatedAt is string && data.updatedAt.size() > 0 && data.updatedAt.size() <= 50;
+    }
+
+    // Playbook Run Validation (Task 013: Active/Historical Relationship Playbook Runs)
+    function isValidPlaybookRun(data, userId) {
+      return data.keys().hasOnly([
+          'id', 'userId', 'templateId', 'templateName', 'clientId', 'opportunityId',
+          'status', 'steps', 'startDateKey', 'startedAt', 'completedAt',
+          'pausedAt', 'cancelledAt', 'cancelReason', 'updatedAt', 'revision'
+        ])
+        && data.keys().hasAll(['id', 'templateName', 'clientId', 'status', 'steps', 'startedAt', 'updatedAt'])
+        && data.id is string && isValidId(data.id)
+        && data.clientId is string && isValidId(data.clientId)
+        && data.templateName is string && data.templateName.size() > 0 && data.templateName.size() <= 160
+        && data.status in ['active', 'paused', 'completed', 'cancelled']
+        && data.steps is list && data.steps.size() >= 1 && data.steps.size() <= 20
+        && (!('userId' in data) || (data.userId is string && data.userId == userId))
+        && (!('templateId' in data) || (data.templateId is string && isValidId(data.templateId)))
+        && (!('opportunityId' in data) || (data.opportunityId is string && isValidId(data.opportunityId)))
+        && (!('startDateKey' in data) || isValidDateOnlyString(data.startDateKey))
+        && data.startedAt is string && data.startedAt.size() > 0 && data.startedAt.size() <= 50
+        && (!('completedAt' in data) || (data.completedAt is string && data.completedAt.size() <= 50))
+        && (!('pausedAt' in data) || (data.pausedAt is string && data.pausedAt.size() <= 50))
+        && (!('cancelledAt' in data) || (data.cancelledAt is string && data.cancelledAt.size() <= 50))
+        && (!('cancelReason' in data) || (data.cancelReason is string && data.cancelReason.size() <= 500))
+        && data.updatedAt is string && data.updatedAt.size() > 0 && data.updatedAt.size() <= 50
+        && (!('revision' in data) || (data.revision is int && data.revision >= 1));
     }
 
     // 5. User-Scoped Data Hierarchy (/users/{userId}/...)
@@ -535,6 +588,42 @@ service cloud.firestore {
           && (!('userId' in existing()) || incoming().userId == existing().userId)
           && isValidInteraction(incoming(), userId);
         allow delete: if isOwner(userId) && isValidId(interactionId);
+      }
+
+      // Scoped Subcollection: Custom Relationship Playbook Templates (Task 013)
+      match /playbookTemplates/{templateId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && isValidId(templateId)
+          && incoming().id == templateId
+          && (!('userId' in incoming()) || incoming().userId == userId)
+          && isValidPlaybookTemplate(incoming(), userId);
+        allow update: if isOwner(userId)
+          && isValidId(templateId)
+          && incoming().id == templateId
+          && incoming().id == existing().id
+          && incoming().createdAt == existing().createdAt
+          && (!('userId' in existing()) || incoming().userId == existing().userId)
+          && isValidPlaybookTemplate(incoming(), userId);
+        allow delete: if isOwner(userId) && isValidId(templateId);
+      }
+
+      // Scoped Subcollection: Relationship Playbook Runs (Task 013)
+      match /playbookRuns/{runId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && isValidId(runId)
+          && incoming().id == runId
+          && (!('userId' in incoming()) || incoming().userId == userId)
+          && isValidPlaybookRun(incoming(), userId);
+        allow update: if isOwner(userId)
+          && isValidId(runId)
+          && incoming().id == runId
+          && incoming().id == existing().id
+          && incoming().startedAt == existing().startedAt
+          && (!('userId' in existing()) || incoming().userId == existing().userId)
+          && isValidPlaybookRun(incoming(), userId);
+        allow delete: if isOwner(userId) && isValidId(runId);
       }
     }
   }

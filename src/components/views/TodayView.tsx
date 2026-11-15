@@ -7,6 +7,7 @@ import {
   FollowUpPreferences,
   Meeting,
   Opportunity,
+  PlaybookRun,
   ReminderItem,
   ReminderStatus,
   SnoozePreset,
@@ -38,6 +39,11 @@ import {
 } from '../../utils/calendarEngine';
 import { ProvenanceBadge } from '../ProvenanceBadge';
 import {
+  PLAYBOOK_RUN_STATUS_META,
+  computePlaybookRunProgress,
+  getPlaybookRunStepPointers,
+} from '../../utils/playbookEngine';
+import {
   AlertCircle,
   Bell,
   BellOff,
@@ -48,6 +54,7 @@ import {
   CheckCircle2,
   Clock,
   Info,
+  ListChecks,
   PhoneCall,
   Plus,
   RotateCcw,
@@ -63,6 +70,7 @@ interface TodayViewProps {
   meetings: Meeting[];
   tasks: ActionItem[];
   opportunities?: Opportunity[];
+  playbookRuns?: PlaybookRun[];
   categorizedDaily: CategorizedDailyTasks;
   upcomingMeetings: DailyUpcomingMeetingItem[];
   clientFollowUps: DailyClientFollowUpEntry[];
@@ -89,6 +97,8 @@ interface TodayViewProps {
   onPrepareMeeting?: (meeting: Meeting) => void;
   onSelectClient: (client: Client) => void;
   onSelectOpportunity?: (opportunity: Opportunity) => void;
+  onOpenPlaybookRun?: (runId: string) => void;
+  onStartPlaybook?: () => void;
   onNewTask: (clientId?: string) => void;
   onNewMeeting: (clientId?: string) => void;
   onNewNote: (clientId?: string) => void;
@@ -135,6 +145,7 @@ const PRIORITY_LABEL_AR: Record<ActionItem['priority'], { label: string; cls: st
 export const TodayView: React.FC<TodayViewProps> = ({
   clients,
   opportunities = [],
+  playbookRuns = [],
   categorizedDaily,
   upcomingMeetings,
   clientFollowUps,
@@ -155,6 +166,8 @@ export const TodayView: React.FC<TodayViewProps> = ({
   onPrepareMeeting,
   onSelectClient,
   onSelectOpportunity,
+  onOpenPlaybookRun,
+  onStartPlaybook,
   onNewTask,
   onNewMeeting,
   onNewNote,
@@ -257,11 +270,20 @@ export const TodayView: React.FC<TodayViewProps> = ({
       .filter((item) => item.alerts.length > 0);
   }, [opportunities, referenceDate]);
 
+  const activePlaybookRuns = useMemo(
+    () =>
+      playbookRuns
+        .filter((r) => r.status === 'active')
+        .sort((a, b) => (b.updatedAt || b.startedAt).localeCompare(a.updatedAt || a.startedAt)),
+    [playbookRuns]
+  );
+
   const getReminderTypeLabel = (rem: ReminderItem) => {
     if (rem.sourceType === 'task') return 'مهمة';
     if (rem.sourceType === 'meeting') return 'اجتماع';
     if (rem.sourceType === 'opportunity') return 'فرصة';
     if (rem.sourceType === 'interaction') return 'تواصل';
+    if (rem.sourceType === 'playbook_step') return 'خطة متابعة';
     return 'عميل';
   };
 
@@ -1228,6 +1250,134 @@ export const TodayView: React.FC<TodayViewProps> = ({
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+          </section>
+
+          {/* خطط المتابعة النشطة (Playbooks) */}
+          <section
+            data-testid="today-playbook-runs-section"
+            className="bg-white rounded-2xl border border-stone-200 p-4 space-y-3"
+          >
+            <div className="flex items-center justify-between gap-2 pb-2 border-b border-stone-100">
+              <div className="flex items-center gap-1.5">
+                <ListChecks className="w-4 h-4 text-indigo-700" />
+                <h3 className="font-heading font-bold text-sm text-stone-900">
+                  خطط المتابعة ({activePlaybookRuns.length})
+                </h3>
+              </div>
+              {onStartPlaybook && (
+                <button
+                  type="button"
+                  data-testid="today-start-playbook-btn"
+                  onClick={onStartPlaybook}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-900 text-[11px] font-bold transition-colors"
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>بدء خطة</span>
+                </button>
+              )}
+            </div>
+
+            {activePlaybookRuns.length === 0 ? (
+              <div className="py-5 text-center border border-dashed border-stone-200 rounded-xl space-y-1.5">
+                <ListChecks className="w-5 h-5 text-stone-400 mx-auto" />
+                <p className="text-xs font-semibold text-stone-700">
+                  لا توجد خطط متابعة نشطة حالياً
+                </p>
+                {onStartPlaybook && (
+                  <button
+                    type="button"
+                    onClick={onStartPlaybook}
+                    className="text-[11px] font-bold text-indigo-700 hover:underline"
+                  >
+                    + بدء خطة متابعة جديدة
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className="divide-y divide-stone-100 border border-stone-200 rounded-xl overflow-hidden">
+                {activePlaybookRuns.slice(0, 6).map((run) => {
+                  const clientObj = clientsById.get(run.clientId);
+                  const progress = computePlaybookRunProgress(run);
+                  const pointers = getPlaybookRunStepPointers(run);
+                  const currentOrNextStep = pointers.currentStep || pointers.nextStep;
+                  const isStepOverdue =
+                    Boolean(currentOrNextStep?.dueDate) &&
+                    currentOrNextStep!.dueDate! < todayKey;
+                  const statusMeta = PLAYBOOK_RUN_STATUS_META[run.status];
+
+                  return (
+                    <div
+                      key={run.id}
+                      data-testid={`today-playbook-run-${run.id}`}
+                      className="p-3 bg-white space-y-2"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <button
+                            type="button"
+                            onClick={() => onOpenPlaybookRun && onOpenPlaybookRun(run.id)}
+                            className="text-xs font-bold text-stone-900 hover:text-indigo-800 text-start block truncate"
+                          >
+                            {run.templateName}
+                          </button>
+                          <span className="text-[11px] text-stone-500 block truncate">
+                            {clientObj ? clientObj.name : 'عميل غير محدد'}
+                          </span>
+                        </div>
+                        <span
+                          className={`text-[10px] font-bold px-2 py-0.5 rounded border shrink-0 ${statusMeta.badgeClass}`}
+                        >
+                          {progress.completionPercent}% ({progress.completedStepsCount}/{progress.totalStepsCount})
+                        </span>
+                      </div>
+
+                      <div className="w-full h-1.5 bg-stone-100 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-indigo-600 rounded-full transition-all"
+                          style={{ width: `${progress.completionPercent}%` }}
+                        />
+                      </div>
+
+                      {currentOrNextStep && (
+                        <p
+                          className={`text-[11px] leading-snug ${
+                            isStepOverdue
+                              ? 'text-rose-800 font-semibold'
+                              : 'text-stone-700 font-medium'
+                          }`}
+                        >
+                          الخطوة الحالية: {currentOrNextStep.title}
+                          {currentOrNextStep.dueDate
+                            ? ` • ${formatArabicDate(currentOrNextStep.dueDate)}${
+                                isStepOverdue ? ' (متأخرة)' : ''
+                              }`
+                            : ''}
+                        </p>
+                      )}
+
+                      <div className="flex items-center justify-between gap-2 pt-0.5">
+                        <button
+                          type="button"
+                          onClick={() => onOpenPlaybookRun && onOpenPlaybookRun(run.id)}
+                          className="text-[11px] font-bold text-indigo-700 hover:text-indigo-900"
+                        >
+                          فتح الخطة ←
+                        </button>
+                        {clientObj && (
+                          <button
+                            type="button"
+                            onClick={() => onSelectClient(clientObj)}
+                            className="text-[11px] font-medium text-stone-600 hover:text-stone-900"
+                          >
+                            ملف العميل
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </section>

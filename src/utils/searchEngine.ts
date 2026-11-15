@@ -7,6 +7,7 @@ import type {
   Meeting,
   Note,
   Opportunity,
+  PlaybookRun,
   SearchCollectionsLoadedState,
   SearchExecutionResult,
   SearchFilterState,
@@ -30,6 +31,11 @@ import {
   COMMUNICATION_OUTCOME_META,
   resolveInteractionContact,
 } from './communications.ts';
+import {
+  BUILTIN_PLAYBOOK_TEMPLATES,
+  PLAYBOOK_CATEGORY_META,
+  PLAYBOOK_RUN_STATUS_META,
+} from './playbookEngine.ts';
 
 export const DEFAULT_SEARCH_FILTERS: SearchFilterState = {
   recordType: 'all',
@@ -56,6 +62,7 @@ export const SEARCH_RECORD_TYPE_LABELS: Record<
   note: { ar: 'ملاحظة', en: 'Note' },
   opportunity: { ar: 'فرصة عمل', en: 'Opportunity' },
   interaction: { ar: 'تواصل', en: 'Interaction' },
+  playbook: { ar: 'خطة متابعة', en: 'Playbook' },
 };
 
 const CLIENT_STATUS_LABELS_AR: Record<string, string> = {
@@ -330,6 +337,7 @@ export interface SearchableIndexEntry {
   noteRef?: Note;
   opportunityRef?: Opportunity;
   interactionRef?: CommunicationInteraction;
+  playbookRunRef?: PlaybookRun;
 }
 
 export interface SearchDataInput {
@@ -339,6 +347,7 @@ export interface SearchDataInput {
   notes: Note[];
   opportunities?: Opportunity[];
   interactions?: CommunicationInteraction[];
+  playbookRuns?: PlaybookRun[];
   currentUserId?: string;
 }
 
@@ -747,6 +756,65 @@ export function buildSearchIndex(data: SearchDataInput): SearchableIndexEntry[] 
     });
   }
 
+  // 7. Index Playbook Runs
+  const ownedPlaybookRuns = (data.playbookRuns || []).filter((r) =>
+    isOwnedByCurrentUser(r.userId, currentUserId)
+  );
+  for (const run of ownedPlaybookRuns) {
+    const client = clientMap.get(run.clientId);
+    const clientName = client?.name;
+    const linkedOpp = run.opportunityId ? opportunityMap.get(run.opportunityId) : undefined;
+    const statusMeta = PLAYBOOK_RUN_STATUS_META[run.status];
+    const matchedTemplate = run.templateId
+      ? BUILTIN_PLAYBOOK_TEMPLATES.find((t) => t.id === run.templateId)
+      : undefined;
+    const categoryMeta = matchedTemplate
+      ? PLAYBOOK_CATEGORY_META[matchedTemplate.category]
+      : undefined;
+
+    const fields: SearchFieldCandidate[] = [];
+    addCandidate(fields, 'اسم خطة المتابعة', run.templateName, true);
+    addCandidate(fields, 'العميل المرتبط', clientName, false);
+    addCandidate(fields, 'الفرصة المرتبطة', linkedOpp?.title, false);
+    addCandidate(fields, 'حالة الخطة', statusMeta?.labelAr || run.status, false);
+    if (categoryMeta) {
+      addCandidate(fields, 'تصنيف الخطة', categoryMeta.labelAr, false);
+    }
+    for (const step of run.steps || []) {
+      addCandidate(fields, 'خطوة في الخطة', step.title, false);
+      addCandidate(fields, 'وصف الخطوة', step.description, false);
+      addCandidate(fields, 'ملاحظة الخطوة', step.note, false);
+    }
+
+    const clientTags = client?.tags || [];
+    const nextPending = (run.steps || []).find(
+      (s) => s.status === 'in_progress' || s.status === 'pending'
+    );
+
+    entries.push({
+      id: `playbook:${run.id}`,
+      recordType: 'playbook',
+      title: run.templateName,
+      NormalizedTitle: normalizeArabicSearchText(run.templateName),
+      subtitle: [clientName, linkedOpp?.title].filter(Boolean).join(' • ') || undefined,
+      defaultSnippet:
+        nextPending
+          ? `الخطوة الحالية: ${nextPending.title}${nextPending.dueDate ? ` (${nextPending.dueDate})` : ''}`
+          : statusMeta?.labelAr || 'خطة متابعة',
+      clientId: run.clientId,
+      clientName,
+      dateIso: nextPending?.dueDate || run.startDateKey || run.updatedAt || run.startedAt,
+      statusKey: run.status,
+      statusLabelAr: statusMeta?.labelAr || run.status,
+      tags: clientTags,
+      normalizedTags: clientTags.map((t) => normalizeArabicSearchText(t)),
+      fields,
+      clientRef: client,
+      opportunityRef: linkedOpp,
+      playbookRunRef: run,
+    });
+  }
+
   return entries;
 }
 
@@ -1033,6 +1101,7 @@ const COLLECTION_LABELS_AR: Record<keyof SearchCollectionsLoadedState, string> =
   notes: 'الملاحظات',
   opportunities: 'فرص الأعمال',
   interactions: 'سجل التواصل',
+  playbookRuns: 'خطط المتابعة',
 };
 
 /**
@@ -1070,6 +1139,7 @@ export function executeUniversalSearch(
     note: [],
     opportunity: [],
     interaction: [],
+    playbook: [],
   };
 
   // If neither query nor filter is active, return empty state immediately
@@ -1096,6 +1166,7 @@ export function executeUniversalSearch(
         notes: [],
         opportunities: [],
         interactions: [],
+        playbookRuns: [],
       }
     );
 
@@ -1139,6 +1210,7 @@ export function executeUniversalSearch(
       noteRef: entry.noteRef,
       opportunityRef: entry.opportunityRef,
       interactionRef: entry.interactionRef,
+      playbookRunRef: entry.playbookRunRef,
     });
   }
 
@@ -1171,6 +1243,7 @@ export function executeUniversalSearch(
     note: [],
     opportunity: [],
     interaction: [],
+    playbook: [],
   };
 
   for (const item of limitedItems) {

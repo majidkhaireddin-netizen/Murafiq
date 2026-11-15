@@ -746,6 +746,8 @@ test('12. computeDetailedSyncSummary honestly reports pending and failed states 
     interactions: { ...syncedStatus },
     reminders: { ...syncedStatus, hasPendingWrites: true, pendingDocIds: ['rem_task_1'] },
     preferences: { ...syncedStatus },
+    playbookTemplates: { ...syncedStatus },
+    playbookRuns: { ...syncedStatus },
   };
 
   const pendingSummary = computeDetailedSyncSummary({

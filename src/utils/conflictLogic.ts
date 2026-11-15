@@ -26,6 +26,14 @@ export const FIELD_LABELS_ARABIC: Record<string, string> = {
   minutesStatus: 'حالة المحضر',
   minutesAdditionalNotes: 'ملاحظات إضافية للمحضر',
   minutesIncludedSections: 'أقسام المحضر المختارة',
+  templateName: 'عنوان الخطة',
+  steps: 'خطوات الخطة',
+  startedAt: 'تاريخ البدء',
+  pausedAt: 'تاريخ الإيقاف المؤقت',
+  cancelledAt: 'تاريخ الإلغاء',
+  cancelReason: 'سبب الإلغاء',
+  revision: 'رقم المراجعة',
+  category: 'التصنيف',
 };
 
 /**

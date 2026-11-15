@@ -10,7 +10,15 @@ import type {
   CommunicationOutcome,
   Meeting,
   Opportunity,
+  PlaybookRescheduleSuggestion,
+  PlaybookRun,
+  PlaybookRunStep,
+  PlaybookTemplate,
 } from '../../types';
+import type { AtomicStepTaskCreationOutcome } from '../../utils/playbookEngine';
+import { PlaybookRunsView } from './PlaybookRunsView';
+import { PlaybookTemplatesView } from './PlaybookTemplatesView';
+import { PlaybookRunWorkspace } from '../PlaybookRunWorkspace';
 import {
   COMMUNICATION_CHANNEL_META,
   COMMUNICATION_CHANNELS_ORDER,
@@ -55,7 +63,11 @@ import {
   Info,
   ExternalLink,
   Sparkles,
+  ListChecks,
+  Play,
 } from 'lucide-react';
+
+export type CommunicationsSubTab = 'interactions' | 'playbooks' | 'templates';
 
 interface CommunicationsViewProps {
   clients: Client[];
@@ -63,6 +75,15 @@ interface CommunicationsViewProps {
   tasks: ActionItem[];
   opportunities: Opportunity[];
   interactions: CommunicationInteraction[];
+  playbookRuns?: PlaybookRun[];
+  customPlaybookTemplates?: PlaybookTemplate[];
+  currentUserId?: string;
+  isOnline?: boolean;
+  playbooksLoading?: boolean;
+  playbookSubTab?: CommunicationsSubTab;
+  onChangePlaybookSubTab?: (tab: CommunicationsSubTab) => void;
+  selectedPlaybookRunId?: string | null;
+  onSelectPlaybookRun?: (runId: string | null) => void;
   staleThresholdDays?: number;
   language: 'ar' | 'en';
   onOpenNewInteraction: (defaults?: {
@@ -80,6 +101,31 @@ interface CommunicationsViewProps {
   onSelectClient: (client: Client) => void;
   onSelectOpportunity?: (opportunity: Opportunity) => void;
   onNavigateToTasks?: () => void;
+  onOpenTask?: (task: ActionItem) => void;
+  onOpenStartPlaybook?: (defaults?: {
+    templateId?: string;
+    clientId?: string;
+    opportunityId?: string;
+  }) => void;
+  onOpenCreatePlaybookTemplate?: () => void;
+  onOpenEditPlaybookTemplate?: (template: PlaybookTemplate) => void;
+  onSavePlaybookTemplate?: (template: PlaybookTemplate) => void;
+  onDeletePlaybookTemplate?: (templateId: string) => void;
+  onSavePlaybookRun?: (run: PlaybookRun) => void;
+  onSaveTask?: (task: ActionItem) => void;
+  onAtomicConvertStepToTask?: (
+    run: PlaybookRun,
+    stepId: string
+  ) => Promise<AtomicStepTaskCreationOutcome>;
+  onApprovePlaybookRescheduleSuggestion?: (
+    suggestion: PlaybookRescheduleSuggestion,
+    applyToLinkedTask: boolean
+  ) => void;
+  onLogCommunicationForPlaybookStep?: (params: {
+    run: PlaybookRun;
+    step: PlaybookRunStep;
+    suggestedChannel?: CommunicationChannel;
+  }) => void;
 }
 
 const DATE_PRESET_LABELS: Record<CommunicationDatePreset, { ar: string; en: string }> = {
@@ -97,6 +143,15 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
   tasks,
   opportunities,
   interactions,
+  playbookRuns = [],
+  customPlaybookTemplates = [],
+  currentUserId = '',
+  isOnline = true,
+  playbooksLoading = false,
+  playbookSubTab: controlledSubTab,
+  onChangePlaybookSubTab,
+  selectedPlaybookRunId: controlledRunId,
+  onSelectPlaybookRun,
   staleThresholdDays = 14,
   language,
   onOpenNewInteraction,
@@ -106,13 +161,49 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
   onSelectClient,
   onSelectOpportunity,
   onNavigateToTasks,
+  onOpenTask,
+  onOpenStartPlaybook,
+  onOpenCreatePlaybookTemplate,
+  onOpenEditPlaybookTemplate,
+  onSavePlaybookTemplate,
+  onDeletePlaybookTemplate,
+  onSavePlaybookRun,
+  onSaveTask,
+  onAtomicConvertStepToTask,
+  onApprovePlaybookRescheduleSuggestion,
+  onLogCommunicationForPlaybookStep,
 }) => {
+  const [internalSubTab, setInternalSubTab] = useState<CommunicationsSubTab>('interactions');
+  const activeSubTab = controlledSubTab ?? internalSubTab;
+  const setActiveSubTab = (next: CommunicationsSubTab) => {
+    setInternalSubTab(next);
+    onChangePlaybookSubTab?.(next);
+    onSelectPlaybookRun?.(null);
+  };
+
+  const [internalRunId, setInternalRunId] = useState<string | null>(null);
+  const selectedRunId = controlledRunId !== undefined ? controlledRunId : internalRunId;
+  const setSelectedRunId = (id: string | null) => {
+    setInternalRunId(id);
+    onSelectPlaybookRun?.(id);
+  };
+
   const [filters, setFilters] = useState<CommunicationFilterState>(
     DEFAULT_COMMUNICATION_FILTER_STATE
   );
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
   const [showStaleClientsPanel, setShowStaleClientsPanel] = useState(true);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  const selectedRun = useMemo(
+    () => (selectedRunId ? playbookRuns.find((r) => r.id === selectedRunId) : undefined),
+    [playbookRuns, selectedRunId]
+  );
+
+  const activePlaybookRunsCount = useMemo(
+    () => playbookRuns.filter((r) => r.status === 'active').length,
+    [playbookRuns]
+  );
 
   const clientById = useMemo(
     () => new Map<string, Client>(clients.map((c) => [c.id, c])),
@@ -213,6 +304,116 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
 
   return (
     <div className="space-y-5 pb-8" data-testid="communications-center-view">
+      {/* Unified Sub-Navigation (Communications | Playbooks | Playbook Templates) */}
+      <div
+        data-testid="communications-subnav"
+        className="bg-white rounded-2xl border border-stone-200 p-1.5 flex items-center gap-1.5 flex-wrap shadow-2xs text-xs"
+      >
+        <button
+          type="button"
+          data-testid="comm-subtab-interactions"
+          onClick={() => setActiveSubTab('interactions')}
+          className={`flex-1 min-w-[120px] inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl font-bold transition-colors ${
+            activeSubTab === 'interactions' && !selectedRun
+              ? 'bg-emerald-900 text-white shadow-2xs'
+              : 'text-stone-700 hover:bg-stone-100'
+          }`}
+        >
+          <Phone className="w-3.5 h-3.5" />
+          <span>سجل التواصل</span>
+        </button>
+
+        <button
+          type="button"
+          data-testid="comm-subtab-playbooks"
+          onClick={() => setActiveSubTab('playbooks')}
+          className={`flex-1 min-w-[120px] inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl font-bold transition-colors ${
+            activeSubTab === 'playbooks' || Boolean(selectedRun)
+              ? 'bg-emerald-900 text-white shadow-2xs'
+              : 'text-stone-700 hover:bg-stone-100'
+          }`}
+        >
+          <Play className="w-3.5 h-3.5" />
+          <span>خطط المتابعة</span>
+          {activePlaybookRunsCount > 0 && (
+            <span
+              className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold tabular-nums ${
+                activeSubTab === 'playbooks' || Boolean(selectedRun)
+                  ? 'bg-white/20 text-white'
+                  : 'bg-emerald-100 text-emerald-900'
+              }`}
+            >
+              {activePlaybookRunsCount}
+            </span>
+          )}
+        </button>
+
+        <button
+          type="button"
+          data-testid="comm-subtab-templates"
+          onClick={() => setActiveSubTab('templates')}
+          className={`flex-1 min-w-[140px] inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl font-bold transition-colors ${
+            activeSubTab === 'templates' && !selectedRun
+              ? 'bg-emerald-900 text-white shadow-2xs'
+              : 'text-stone-700 hover:bg-stone-100'
+          }`}
+        >
+          <ListChecks className="w-3.5 h-3.5" />
+          <span>مكتبة خطط المتابعة</span>
+        </button>
+      </div>
+
+      {selectedRun && onSavePlaybookRun && onAtomicConvertStepToTask ? (
+        <PlaybookRunWorkspace
+          run={selectedRun}
+          allRuns={playbookRuns}
+          clients={clients}
+          opportunities={opportunities}
+          tasks={tasks}
+          interactions={interactions}
+          currentUserId={currentUserId}
+          isOnline={isOnline}
+          language={language}
+          onBack={() => setSelectedRunId(null)}
+          onSaveRun={onSavePlaybookRun}
+          onSaveTask={(t) => onSaveTask?.(t)}
+          onAtomicConvertStepToTask={onAtomicConvertStepToTask}
+          onApproveRescheduleSuggestion={(sug, applyTask) =>
+            onApprovePlaybookRescheduleSuggestion?.(sug, applyTask)
+          }
+          onLogCommunicationForStep={(params) =>
+            onLogCommunicationForPlaybookStep?.(params)
+          }
+          onSelectClient={onSelectClient}
+          onSelectOpportunity={(opp) => onSelectOpportunity?.(opp)}
+          onOpenTask={(t) => onOpenTask?.(t)}
+          onOpenInteraction={onEditInteraction}
+        />
+      ) : activeSubTab === 'playbooks' ? (
+        <PlaybookRunsView
+          runs={playbookRuns}
+          clients={clients}
+          opportunities={opportunities}
+          isLoading={playbooksLoading}
+          language={language}
+          onOpenRun={(run) => setSelectedRunId(run.id)}
+          onOpenStartPlaybook={() => onOpenStartPlaybook?.()}
+          onGoToTemplates={() => setActiveSubTab('templates')}
+        />
+      ) : activeSubTab === 'templates' ? (
+        <PlaybookTemplatesView
+          customTemplates={customPlaybookTemplates}
+          currentUserId={currentUserId}
+          isLoading={playbooksLoading}
+          language={language}
+          onCreateTemplate={() => onOpenCreatePlaybookTemplate?.()}
+          onEditTemplate={(tpl) => onOpenEditPlaybookTemplate?.(tpl)}
+          onSaveClonedTemplate={(tpl) => onSavePlaybookTemplate?.(tpl)}
+          onDeleteTemplate={(id) => onDeletePlaybookTemplate?.(id)}
+          onStartFromTemplate={(templateId) => onOpenStartPlaybook?.({ templateId })}
+        />
+      ) : (
+        <>
       {/* Header Card */}
       <div className="bg-white rounded-2xl border border-stone-200 p-4 sm:p-5 shadow-2xs space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -1072,6 +1273,8 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
           </div>
         )}
       </div>
+        </>
+      )}
     </div>
   );
 };

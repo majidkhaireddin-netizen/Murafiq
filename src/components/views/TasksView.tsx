@@ -4,6 +4,7 @@ import {
   Client,
   Meeting,
   Opportunity,
+  PlaybookRun,
   TaskPriority,
   ProvenanceType,
 } from '../../types';
@@ -25,6 +26,7 @@ import {
   Trash2,
   Edit2,
   PhoneCall,
+  ListChecks,
 } from 'lucide-react';
 
 import {
@@ -64,10 +66,12 @@ interface TasksViewProps {
   clients: Client[];
   meetings: Meeting[];
   opportunities?: Opportunity[];
+  playbookRuns?: PlaybookRun[];
   onToggleTask: (taskId: string) => void;
   onSaveTask: (task: ActionItem) => Promise<void> | void;
   onDeleteTask: (taskId: string) => void;
   onSelectOpportunity?: (opportunityId: string) => void;
+  onOpenPlaybookRun?: (runId: string) => void;
   onScheduleInCalendar?: (task: ActionItem) => void;
   preselectedClientId?: string | null;
   preselectedMeetingId?: string | null;
@@ -91,10 +95,12 @@ export const TasksView: React.FC<TasksViewProps> = ({
   tasks,
   clients,
   opportunities = [],
+  playbookRuns = [],
   onToggleTask,
   onSaveTask,
   onDeleteTask,
   onSelectOpportunity,
+  onOpenPlaybookRun,
   onScheduleInCalendar,
   preselectedClientId,
   preselectedMeetingId,
@@ -400,6 +406,8 @@ export const TasksView: React.FC<TasksViewProps> = ({
       meetingId: editingTask.meetingId,
       opportunityId: validOppId,
       interactionId: editingTask.interactionId,
+      playbookRunId: editingTask.playbookRunId,
+      playbookStepId: editingTask.playbookStepId,
       title: editingTask.title,
       description: editingTask.description || '',
       dueDate: editingTask.dueDate,
@@ -530,6 +538,22 @@ export const TasksView: React.FC<TasksViewProps> = ({
                   <PhoneCall className="w-3 h-3" />
                   <span>مرتبطة بسجل تواصل</span>
                 </span>
+              )}
+
+              {task.playbookRunId && (
+                <button
+                  type="button"
+                  data-testid={`task-playbook-badge-${task.id}`}
+                  onClick={() =>
+                    onOpenPlaybookRun && task.playbookRunId && onOpenPlaybookRun(task.playbookRunId)
+                  }
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-900 border border-indigo-200 font-semibold text-[10px] hover:bg-indigo-100"
+                >
+                  <ListChecks className="w-3 h-3" />
+                  <span>
+                    من خطة: {playbookRuns.find((r) => r.id === task.playbookRunId)?.templateName || 'خطة متابعة'}
+                  </span>
+                </button>
               )}
 
               {task.dueDate && (

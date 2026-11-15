@@ -30,9 +30,34 @@ export const ConflictResolutionModal: React.FC<ConflictResolutionModalProps> = (
         return 'محضر لقاء';
       case 'task':
         return 'مهمة متابعة';
+      case 'opportunity':
+        return 'فرصة أعمال';
+      case 'interaction':
+        return 'سجل تواصل';
+      case 'playbookRun':
+        return 'خطة متابعة';
+      case 'playbookTemplate':
+        return 'قالب خطة متابعة';
       default:
         return 'ملاحظة عامة';
     }
+  };
+
+  const formatFieldDiffValue = (field: string, value: unknown): string => {
+    if (value === undefined || value === null || value === '') return '—';
+    if (field === 'steps' && Array.isArray(value)) {
+      return value
+        .map((s: any, idx: number) => `${idx + 1}. ${s?.title || 'خطوة'} (${s?.status || '—'})`)
+        .join('\n');
+    }
+    if (Array.isArray(value) || typeof value === 'object') {
+      try {
+        return JSON.stringify(value, null, 2);
+      } catch {
+        return String(value);
+      }
+    }
+    return String(value);
   };
 
   return (
@@ -108,7 +133,7 @@ export const ConflictResolutionModal: React.FC<ConflictResolutionModalProps> = (
                       {field.fieldLabelArabic}:
                     </span>
                     <span className="font-medium text-xs whitespace-pre-line text-emerald-950 font-sans">
-                      {String(field.localValue || '—')}
+                      {formatFieldDiffValue(field.field, field.localValue)}
                     </span>
                   </div>
                 ))}
@@ -134,7 +159,7 @@ export const ConflictResolutionModal: React.FC<ConflictResolutionModalProps> = (
                       {field.fieldLabelArabic}:
                     </span>
                     <span className="font-medium text-xs whitespace-pre-line text-sky-950 font-sans">
-                      {String(field.remoteValue || '—')}
+                      {formatFieldDiffValue(field.field, field.remoteValue)}
                     </span>
                   </div>
                 ))}

@@ -108,6 +108,8 @@ export function classifyWriteError(
     opportunity: 'فرصة العمل',
     opportunityStageEvent: 'سجل مرحلة الفرصة',
     interaction: 'سجل التواصل',
+    playbookTemplate: 'قالب خطة المتابعة',
+    playbookRun: 'خطة المتابعة',
   };
   const entityName = names[entityType];
   const actionVerb = isDelete ? 'حذف' : 'حفظ';
@@ -350,6 +352,8 @@ export function getArabicSaveErrorMessage(entityType: EntityType, isDelete: bool
     opportunity: 'فرصة العمل',
     opportunityStageEvent: 'سجل مرحلة الفرصة',
     interaction: 'سجل التواصل',
+    playbookTemplate: 'قالب خطة المتابعة',
+    playbookRun: 'خطة المتابعة',
   };
 
   const entityName = names[entityType];

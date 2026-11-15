@@ -9,6 +9,7 @@ import {
   Meeting,
   Note,
   Opportunity,
+  PlaybookRun,
 } from '../types';
 import { formatArabicDate, getRelativeTimeArabic } from '../utils/logic';
 import {
@@ -57,6 +58,11 @@ import {
 } from '../utils/calendarEngine';
 import { ProvenanceBadge } from './ProvenanceBadge';
 import {
+  PLAYBOOK_RUN_STATUS_META,
+  computePlaybookRunProgress,
+  getPlaybookRunStepPointers,
+} from '../utils/playbookEngine';
+import {
   AlertCircle,
   AlertTriangle,
   ArrowRight,
@@ -71,6 +77,7 @@ import {
   FileText,
   Globe,
   Info,
+  ListChecks,
   Mail,
   MapPin,
   MessageCircle,
@@ -93,6 +100,7 @@ export type Client360SectionTab =
   | 'overview'
   | 'communications'
   | 'opportunities'
+  | 'playbooks'
   | 'timeline'
   | 'meetings'
   | 'tasks'
@@ -106,6 +114,7 @@ interface Client360WorkspaceProps {
   notes: Note[];
   opportunities?: Opportunity[];
   interactions?: CommunicationInteraction[];
+  playbookRuns?: PlaybookRun[];
   syncDisplay: ClientSyncDisplayState;
   collectionsLoaded: boolean;
   onBack: () => void;
@@ -126,6 +135,8 @@ interface Client360WorkspaceProps {
   onNewOpportunity?: (clientId: string) => void;
   onSelectOpportunity?: (opportunity: Opportunity) => void;
   onOpenClientCalendar?: (clientId: string) => void;
+  onOpenPlaybookRun?: (runId: string) => void;
+  onStartPlaybookForClient?: (clientId: string) => void;
   onLogInteraction?: (defaults?: {
     clientId?: string;
     contactId?: string;
@@ -148,6 +159,7 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
   notes,
   opportunities = [],
   interactions = [],
+  playbookRuns = [],
   syncDisplay,
   collectionsLoaded,
   onBack,
@@ -168,6 +180,8 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
   onNewOpportunity,
   onSelectOpportunity,
   onOpenClientCalendar,
+  onOpenPlaybookRun,
+  onStartPlaybookForClient,
   onLogInteraction,
   onEditInteraction,
   onDeleteInteraction,
@@ -702,6 +716,18 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
               </button>
             )}
 
+            {onStartPlaybookForClient && (
+              <button
+                type="button"
+                data-testid="client-360-start-playbook-btn"
+                onClick={() => onStartPlaybookForClient(client.id)}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-900 text-xs font-semibold transition-colors"
+              >
+                <ListChecks className="w-3.5 h-3.5 text-indigo-700" />
+                <span>خطة متابعة جديدة لهذا العميل</span>
+              </button>
+            )}
+
             {onOpenClientCalendar && (
               <button
                 type="button"
@@ -920,6 +946,12 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
             { key: 'overview', label: 'نظرة عامة' },
             { key: 'communications', label: `سجل التواصل (${clientInteractions.length})` },
             { key: 'opportunities', label: `فرص الأعمال (${clientOpportunities.length})` },
+            {
+              key: 'playbooks',
+              label: `خطط المتابعة (${
+                playbookRuns.filter((r) => r.clientId === client.id).length
+              })`,
+            },
             { key: 'timeline', label: `سجل الأنشطة (${timelineEvents.length})` },
             { key: 'meetings', label: `الاجتماعات (${clientMeetings.length})` },
             { key: 'tasks', label: `المهام (${clientTasks.length})` },
@@ -2188,6 +2220,141 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
               })}
             </div>
           )}
+        </div>
+      )}
+
+      {/* SECTION: PLAYBOOKS FOR THIS CLIENT */}
+      {activeSection === 'playbooks' && (
+        <div
+          data-testid="client-360-playbooks-section"
+          className="bg-white rounded-2xl border border-stone-200 p-4 shadow-xs space-y-4"
+        >
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div>
+              <h4 className="font-heading font-bold text-sm text-stone-900">
+                خطط المتابعة ({playbookRuns.filter((r) => r.clientId === client.id).length})
+              </h4>
+              <p className="text-[11px] text-stone-500">
+                خطط المتابعة النشطة والسابقة المرتبطة بهذا العميل مع حالة التقدم والخطوات القادمة
+              </p>
+            </div>
+            {onStartPlaybookForClient && (
+              <button
+                type="button"
+                data-testid="client-360-section-start-playbook-btn"
+                onClick={() => onStartPlaybookForClient(client.id)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-700 hover:bg-indigo-800 text-white text-xs font-semibold"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>بدء خطة متابعة جديدة</span>
+              </button>
+            )}
+          </div>
+
+          {(() => {
+            const clientRuns = playbookRuns
+              .filter((r) => r.clientId === client.id)
+              .sort((a, b) =>
+                (b.updatedAt || b.startedAt).localeCompare(a.updatedAt || a.startedAt)
+              );
+            if (clientRuns.length === 0) {
+              return (
+                <div className="py-8 text-center border border-dashed border-stone-200 rounded-xl space-y-2">
+                  <ListChecks className="w-6 h-6 text-stone-400 mx-auto" />
+                  <p className="text-xs font-semibold text-stone-700">
+                    لا توجد خطط متابعة مسجلة لهذا العميل بعد
+                  </p>
+                  {onStartPlaybookForClient && (
+                    <button
+                      type="button"
+                      onClick={() => onStartPlaybookForClient(client.id)}
+                      className="text-xs font-bold text-indigo-700 hover:underline"
+                    >
+                      + بدء أول خطة متابعة لهذا العميل
+                    </button>
+                  )}
+                </div>
+              );
+            }
+            return (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {clientRuns.map((run) => {
+                  const statusMeta = PLAYBOOK_RUN_STATUS_META[run.status];
+                  const progress = computePlaybookRunProgress(run);
+                  const pointers = getPlaybookRunStepPointers(run);
+                  const linkedOpp = run.opportunityId
+                    ? clientOpportunities.find((o) => o.id === run.opportunityId)
+                    : undefined;
+                  const activeStep = pointers.currentStep || pointers.nextStep;
+
+                  return (
+                    <div
+                      key={run.id}
+                      data-testid={`client-360-playbook-card-${run.id}`}
+                      className="p-3.5 rounded-xl border border-stone-200 bg-stone-50/40 space-y-2"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <h5 className="font-bold text-xs text-stone-900 truncate">
+                            {run.templateName}
+                          </h5>
+                          <p className="text-[11px] text-stone-500 mt-0.5">
+                            بدأت: {formatArabicDate(run.startDateKey || run.startedAt)}
+                            {linkedOpp ? ` • فرصة: ${linkedOpp.title}` : ''}
+                          </p>
+                        </div>
+                        <span
+                          className={`text-[10px] font-bold px-2 py-0.5 rounded border shrink-0 ${statusMeta.badgeClass}`}
+                        >
+                          {statusMeta.labelAr}
+                        </span>
+                      </div>
+
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between text-[11px] text-stone-600">
+                          <span>
+                            الإنجاز: {progress.completedStepsCount} من {progress.totalStepsCount} خطوة
+                          </span>
+                          <span className="font-bold text-indigo-800">
+                            {progress.completionPercent}%
+                          </span>
+                        </div>
+                        <div className="w-full h-1.5 bg-stone-200 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-indigo-600 rounded-full"
+                            style={{ width: `${progress.completionPercent}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      {activeStep && (
+                        <div className="text-[11px] text-stone-700 bg-white border border-stone-200 rounded-lg px-2.5 py-1.5">
+                          <span className="font-semibold">الخطوة الحالية: </span>
+                          <span>{activeStep.title}</span>
+                          {activeStep.dueDate && (
+                            <span className="text-stone-500">
+                              {' '}
+                              ({formatArabicDate(activeStep.dueDate)})
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      <div className="flex justify-end pt-1">
+                        <button
+                          type="button"
+                          onClick={() => onOpenPlaybookRun && onOpenPlaybookRun(run.id)}
+                          className="text-[11px] font-bold text-indigo-700 hover:underline"
+                        >
+                          فتح الخطة وإدارة الخطوات ←
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
         </div>
       )}
 

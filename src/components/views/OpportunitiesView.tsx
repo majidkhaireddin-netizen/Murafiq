@@ -8,6 +8,7 @@ import {
   OpportunityStage,
   OpportunityStageEvent,
   OpportunityType,
+  PlaybookRun,
   SyncState,
   TaskPriority,
 } from '../../types';
@@ -46,6 +47,7 @@ interface OpportunitiesViewProps {
   meetings: Meeting[];
   tasks: ActionItem[];
   interactions?: CommunicationInteraction[];
+  playbookRuns?: PlaybookRun[];
   selectedOpportunityId?: string | null;
   onSelectOpportunity: (id: string | null) => void;
   onSaveOpportunity: (
@@ -67,6 +69,8 @@ interface OpportunitiesViewProps {
   onOpenClient: (clientId: string) => void;
   onOpenMeeting: (meetingId: string) => void;
   onOpenTask: (taskId: string) => void;
+  onOpenPlaybookRun?: (runId: string) => void;
+  onStartPlaybookForOpportunity?: (opportunity: Opportunity) => void;
   createTrigger?: { token: number; clientId?: string } | null;
   isLoading?: boolean;
   syncState?: SyncState;
@@ -80,6 +84,7 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
   meetings,
   tasks,
   interactions = [],
+  playbookRuns = [],
   selectedOpportunityId,
   onSelectOpportunity,
   onSaveOpportunity,
@@ -98,6 +103,8 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
   onOpenClient,
   onOpenMeeting,
   onOpenTask,
+  onOpenPlaybookRun,
+  onStartPlaybookForOpportunity,
   createTrigger,
   isLoading = false,
   syncState,
@@ -217,6 +224,7 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
           meetings={meetings}
           tasks={tasks}
           interactions={interactions}
+          playbookRuns={playbookRuns}
           stageEvents={stageEvents}
           onBack={() => onSelectOpportunity(null)}
           onEdit={handleOpenEdit}
@@ -241,6 +249,8 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
           onOpenClient={onOpenClient}
           onOpenMeeting={onOpenMeeting}
           onOpenTask={onOpenTask}
+          onOpenPlaybookRun={onOpenPlaybookRun}
+          onStartPlaybookForOpportunity={onStartPlaybookForOpportunity}
           language={language}
         />
 

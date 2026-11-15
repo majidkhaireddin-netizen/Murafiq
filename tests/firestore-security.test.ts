@@ -750,6 +750,200 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
         // Owner Alice CAN delete now that _meetingGuard is unlocked
         await assertSucceeds(deleteDoc(lockedMeetingRef));
       });
+
+      // 8d. Task 013: Playbook Templates, Playbook Runs, Playbook Reminders & Playbook Task References
+      await st.test(`8d. Enforces owner isolation and schema validation for playbookTemplates, playbookRuns, playbook_step reminders, and playbook tasks on ${dbId}`, async () => {
+        const aliceCtx = testEnv.authenticatedContext(USER_A_UID);
+        const aliceDb = getDbInstance(aliceCtx, dbId);
+        const bobCtx = testEnv.authenticatedContext(USER_B_UID);
+        const bobDb = getDbInstance(bobCtx, dbId);
+        const unauthCtx = testEnv.unauthenticatedContext();
+        const unauthDb = getDbInstance(unauthCtx, dbId);
+
+        // 1. Custom PlaybookTemplate CRUD by Owner Alice
+        const tplRef = doc(aliceDb, `users/${USER_A_UID}/playbookTemplates/tpl_custom_1`);
+        await assertSucceeds(
+          setDoc(tplRef, {
+            id: 'tpl_custom_1',
+            userId: USER_A_UID,
+            name: 'خطة متابعة كبار العملاء',
+            description: 'مسار مخصص للتواصل المنظم',
+            category: 'custom',
+            isSystemTemplate: false,
+            steps: [
+              {
+                id: 's1',
+                title: 'اتصال أولي',
+                stepType: 'communication',
+                order: 1,
+                duePolicy: { type: 'from_start', offsetDays: 0 },
+              },
+            ],
+            createdAt: '2026-11-15T10:00:00.000Z',
+            updatedAt: '2026-11-15T10:00:00.000Z',
+          })
+        );
+        await assertSucceeds(getDoc(tplRef));
+        await assertSucceeds(
+          updateDoc(tplRef, {
+            name: 'خطة متابعة كبار العملاء المحدثة',
+            updatedAt: '2026-11-15T11:00:00.000Z',
+          })
+        );
+
+        // Reject createdAt mutation on template update
+        await assertFails(
+          updateDoc(tplRef, {
+            createdAt: '2025-01-01T00:00:00.000Z',
+          })
+        );
+
+        // Reject writing a system template (isSystemTemplate: true) or empty steps list
+        await assertFails(
+          setDoc(doc(aliceDb, `users/${USER_A_UID}/playbookTemplates/tpl_spoof_sys`), {
+            id: 'tpl_spoof_sys',
+            userId: USER_A_UID,
+            name: 'قالب نظام مزيف',
+            category: 'custom',
+            isSystemTemplate: true,
+            steps: [{ id: 's1', title: 'خطوة', stepType: 'task', order: 1, duePolicy: { type: 'from_start', offsetDays: 0 } }],
+            createdAt: '2026-11-15T10:00:00.000Z',
+            updatedAt: '2026-11-15T10:00:00.000Z',
+          })
+        );
+        await assertFails(
+          setDoc(doc(aliceDb, `users/${USER_A_UID}/playbookTemplates/tpl_empty_steps`), {
+            id: 'tpl_empty_steps',
+            userId: USER_A_UID,
+            name: 'قالب فارغ',
+            category: 'custom',
+            isSystemTemplate: false,
+            steps: [],
+            createdAt: '2026-11-15T10:00:00.000Z',
+            updatedAt: '2026-11-15T10:00:00.000Z',
+          })
+        );
+
+        // Cross-user Bob & Unauth denied on playbookTemplates + legacy root /playbookTemplates denied
+        await assertFails(getDoc(doc(bobDb, `users/${USER_A_UID}/playbookTemplates/tpl_custom_1`)));
+        await assertFails(deleteDoc(doc(bobDb, `users/${USER_A_UID}/playbookTemplates/tpl_custom_1`)));
+        await assertFails(getDoc(doc(unauthDb, `users/${USER_A_UID}/playbookTemplates/tpl_custom_1`)));
+        await assertFails(getDoc(doc(aliceDb, 'playbookTemplates/tpl_custom_1')));
+
+        // 2. PlaybookRun CRUD by Owner Alice
+        const runRef = doc(aliceDb, `users/${USER_A_UID}/playbookRuns/run_sec_1`);
+        await assertSucceeds(
+          setDoc(runRef, {
+            id: 'run_sec_1',
+            userId: USER_A_UID,
+            templateId: 'tpl_custom_1',
+            templateName: 'خطة متابعة كبار العملاء',
+            clientId: 'client_1',
+            opportunityId: 'opp_1',
+            status: 'active',
+            startDateKey: '2026-11-15',
+            steps: [
+              {
+                id: 's1',
+                title: 'اتصال أولي',
+                stepType: 'communication',
+                order: 1,
+                status: 'pending',
+                duePolicy: { type: 'from_start', offsetDays: 0 },
+                dueDate: '2026-11-15',
+              },
+            ],
+            startedAt: '2026-11-15T10:00:00.000Z',
+            updatedAt: '2026-11-15T10:00:00.000Z',
+            revision: 1,
+          })
+        );
+        await assertSucceeds(getDoc(runRef));
+        await assertSucceeds(
+          updateDoc(runRef, {
+            status: 'paused',
+            pausedAt: '2026-11-15T12:00:00.000Z',
+            updatedAt: '2026-11-15T12:00:00.000Z',
+            revision: 2,
+          })
+        );
+
+        // Reject startedAt mutation, invalid status, revision < 1, or non-date startDateKey
+        await assertFails(updateDoc(runRef, { startedAt: '2020-01-01T00:00:00.000Z' }));
+        await assertFails(updateDoc(runRef, { status: 'bogus_status' }));
+        await assertFails(updateDoc(runRef, { revision: 0 }));
+        await assertFails(
+          setDoc(doc(aliceDb, `users/${USER_A_UID}/playbookRuns/run_bad_date`), {
+            id: 'run_bad_date',
+            userId: USER_A_UID,
+            templateName: 'خطة تاريخ غير صالح',
+            clientId: 'client_1',
+            status: 'active',
+            startDateKey: '2026/11/15',
+            steps: [
+              {
+                id: 's1',
+                title: 'خطوة',
+                stepType: 'task',
+                order: 1,
+                status: 'pending',
+                duePolicy: { type: 'from_start', offsetDays: 0 },
+              },
+            ],
+            startedAt: '2026-11-15T10:00:00.000Z',
+            updatedAt: '2026-11-15T10:00:00.000Z',
+            revision: 1,
+          })
+        );
+
+        // Cross-user Bob & Unauth denied on playbookRuns + legacy root /playbookRuns denied
+        await assertFails(getDoc(doc(bobDb, `users/${USER_A_UID}/playbookRuns/run_sec_1`)));
+        await assertFails(deleteDoc(doc(bobDb, `users/${USER_A_UID}/playbookRuns/run_sec_1`)));
+        await assertFails(getDoc(doc(unauthDb, `users/${USER_A_UID}/playbookRuns/run_sec_1`)));
+        await assertFails(getDoc(doc(aliceDb, 'playbookRuns/run_sec_1')));
+
+        // 3. Playbook Step Reminder State & Linked Task allowed for Alice, denied for Bob
+        const pbRemRef = doc(aliceDb, `users/${USER_A_UID}/reminders/rem_pb_1`);
+        await assertSucceeds(
+          setDoc(pbRemRef, {
+            id: 'rem_pb_1',
+            userId: USER_A_UID,
+            sourceType: 'playbook_step',
+            sourceId: 'run_sec_1__step__s1',
+            reason: 'playbook_step_due_today',
+            clientId: 'client_1',
+            status: 'snoozed',
+            sourceFingerprint: 'fp_pb_1',
+            snoozedUntil: '2026-11-16T09:00:00.000Z',
+            createdAt: '2026-11-15T10:00:00.000Z',
+            updatedAt: '2026-11-15T10:00:00.000Z',
+          })
+        );
+        await assertFails(getDoc(doc(bobDb, `users/${USER_A_UID}/reminders/rem_pb_1`)));
+
+        const pbTaskRef = doc(aliceDb, `users/${USER_A_UID}/tasks/pb_task_run_sec_1__s1`);
+        await assertSucceeds(
+          setDoc(pbTaskRef, {
+            id: 'pb_task_run_sec_1__s1',
+            userId: USER_A_UID,
+            clientId: 'client_1',
+            playbookRunId: 'run_sec_1',
+            playbookStepId: 's1',
+            title: 'اتصال أولي',
+            priority: 'medium',
+            status: 'pending',
+            provenance: 'approved',
+            createdAt: '2026-11-15T10:00:00.000Z',
+          })
+        );
+        await assertFails(getDoc(doc(bobDb, `users/${USER_A_UID}/tasks/pb_task_run_sec_1__s1`)));
+
+        // Cleanup by Owner Alice
+        await assertSucceeds(deleteDoc(pbTaskRef));
+        await assertSucceeds(deleteDoc(pbRemRef));
+        await assertSucceeds(deleteDoc(runRef));
+        await assertSucceeds(deleteDoc(tplRef));
+      });
     });
   }
 

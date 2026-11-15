@@ -27,6 +27,7 @@ import {
   onSnapshot,
   setDoc,
   deleteDoc,
+  runTransaction,
   Firestore,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
@@ -44,6 +45,8 @@ import {
   Opportunity,
   OpportunityStageEvent,
   CommunicationInteraction,
+  PlaybookTemplate,
+  PlaybookRun,
 } from '../types';
 import {
   DEFAULT_FOLLOW_UP_PREFERENCES,
@@ -72,6 +75,14 @@ import {
   decodeTaskTimeBlockFromFirestore,
   sanitizeTaskForFirestoreSave,
 } from '../utils/calendarEngine';
+import {
+  applyAtomicStepToTaskInTransactionState,
+  AtomicStepTaskCreationInput,
+  AtomicStepTaskCreationOutcome,
+  PlaybookAtomicPersistencePort,
+  sanitizePlaybookRunForSave,
+  sanitizePlaybookTemplateForSave,
+} from '../utils/playbookEngine';
 
 // Initialize Firebase App
 const app = initializeApp(firebaseConfig);
@@ -483,6 +494,8 @@ export function getUserCollectionPath(
     | 'opportunities'
     | 'opportunityStageEvents'
     | 'interactions'
+    | 'playbookTemplates'
+    | 'playbookRuns'
 ): string {
   const uid = getAuthenticatedUid();
   return `users/${uid}/${subcollection}`;
@@ -1303,5 +1316,232 @@ export function deleteInteraction(interactionId: string): QueuedWriteHandle {
   );
   return { localAccepted: true, path, serverPromise };
 }
+
+// =========================================================================
+// Task 013: Relationship Playbook Templates & Runs + Atomic Task Conversion
+// =========================================================================
+
+export function subscribePlaybookTemplates(
+  onData: (templates: PlaybookTemplate[], metadata: SyncMetadata) => void,
+  onError?: (err: Error) => void
+) {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/playbookTemplates`;
+  const colRef = collection(db, 'users', uid, 'playbookTemplates');
+  return onSnapshot(
+    colRef,
+    { includeMetadataChanges: true },
+    (snapshot) => {
+      const items: PlaybookTemplate[] = [];
+      const pendingDocIds: string[] = [];
+      snapshot.forEach((d) => {
+        items.push(d.data() as PlaybookTemplate);
+        if (d.metadata.hasPendingWrites) {
+          pendingDocIds.push(d.id);
+        }
+      });
+      onData(items, {
+        fromCache: snapshot.metadata.fromCache,
+        hasPendingWrites: snapshot.metadata.hasPendingWrites,
+        pendingDocIds,
+      });
+    },
+    (error) => {
+      logFirestoreError(error, OperationType.LIST, path);
+      if (onError) onError(error as Error);
+    }
+  );
+}
+
+export function savePlaybookTemplate(template: PlaybookTemplate): QueuedWriteHandle {
+  const uid = getAuthenticatedUid();
+  const now = new Date().toISOString();
+  const rawPayload = sanitizePlaybookTemplateForSave(
+    {
+      ...template,
+      isSystemTemplate: false,
+      userId: uid,
+      createdAt: template.createdAt || now,
+      updatedAt: template.updatedAt || now,
+    },
+    uid
+  );
+  const path = `users/${uid}/playbookTemplates/${rawPayload.id}`;
+  const payload = sanitizeFirestorePayload(rawPayload);
+  const serverPromise = trackInFlightWrite(
+    setDoc(doc(db, 'users', uid, 'playbookTemplates', rawPayload.id), payload).catch((error) =>
+      handleFirestoreError(error, OperationType.WRITE, path)
+    )
+  );
+  return { localAccepted: true, path, serverPromise };
+}
+
+export function deletePlaybookTemplate(templateId: string): QueuedWriteHandle {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/playbookTemplates/${templateId}`;
+  const serverPromise = trackInFlightWrite(
+    deleteDoc(doc(db, 'users', uid, 'playbookTemplates', templateId)).catch((error) =>
+      handleFirestoreError(error, OperationType.DELETE, path)
+    )
+  );
+  return { localAccepted: true, path, serverPromise };
+}
+
+export function subscribePlaybookRuns(
+  onData: (runs: PlaybookRun[], metadata: SyncMetadata) => void,
+  onError?: (err: Error) => void
+) {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/playbookRuns`;
+  const colRef = collection(db, 'users', uid, 'playbookRuns');
+  return onSnapshot(
+    colRef,
+    { includeMetadataChanges: true },
+    (snapshot) => {
+      const items: PlaybookRun[] = [];
+      const pendingDocIds: string[] = [];
+      snapshot.forEach((d) => {
+        items.push(d.data() as PlaybookRun);
+        if (d.metadata.hasPendingWrites) {
+          pendingDocIds.push(d.id);
+        }
+      });
+      onData(items, {
+        fromCache: snapshot.metadata.fromCache,
+        hasPendingWrites: snapshot.metadata.hasPendingWrites,
+        pendingDocIds,
+      });
+    },
+    (error) => {
+      logFirestoreError(error, OperationType.LIST, path);
+      if (onError) onError(error as Error);
+    }
+  );
+}
+
+export function savePlaybookRun(run: PlaybookRun): QueuedWriteHandle {
+  const uid = getAuthenticatedUid();
+  const now = new Date().toISOString();
+  const rawPayload = sanitizePlaybookRunForSave(
+    {
+      ...run,
+      userId: uid,
+      startedAt: run.startedAt || now,
+      updatedAt: run.updatedAt || now,
+    },
+    uid
+  );
+  const path = `users/${uid}/playbookRuns/${rawPayload.id}`;
+  const payload = sanitizeFirestorePayload(rawPayload);
+  const serverPromise = trackInFlightWrite(
+    setDoc(doc(db, 'users', uid, 'playbookRuns', rawPayload.id), payload).catch((error) =>
+      handleFirestoreError(error, OperationType.WRITE, path)
+    )
+  );
+  return { localAccepted: true, path, serverPromise };
+}
+
+export function deletePlaybookRun(runId: string): QueuedWriteHandle {
+  const uid = getAuthenticatedUid();
+  const path = `users/${uid}/playbookRuns/${runId}`;
+  const serverPromise = trackInFlightWrite(
+    deleteDoc(doc(db, 'users', uid, 'playbookRuns', runId)).catch((error) =>
+      handleFirestoreError(error, OperationType.DELETE, path)
+    )
+  );
+  return { localAccepted: true, path, serverPromise };
+}
+
+/**
+ * Atomically creates a task linked to a playbook step via Firestore runTransaction.
+ * Guarantees idempotency on retry and concurrent calls without overwriting user edits.
+ */
+export async function createTaskFromPlaybookStepAtomic(
+  input: AtomicStepTaskCreationInput
+): Promise<AtomicStepTaskCreationOutcome> {
+  const uid = getAuthenticatedUid();
+  if (input.userId !== uid) {
+    return {
+      ok: false,
+      code: 'USER_MISMATCH',
+      errorAr: 'تعارض هوية المستخدم أثناء تنفيذ التحويل الذري.',
+    };
+  }
+
+  const runRef = doc(db, 'users', uid, 'playbookRuns', input.runId);
+  const detTaskRef = doc(db, 'users', uid, 'tasks', input.deterministicTaskId);
+
+  try {
+    return await runTransaction(db, async (tx) => {
+      const [runSnap, detTaskSnap] = await Promise.all([tx.get(runRef), tx.get(detTaskRef)]);
+      const serverRun = runSnap.exists() ? (runSnap.data() as PlaybookRun) : undefined;
+      const serverTaskByDeterministicId = detTaskSnap.exists()
+        ? decodeTaskTimeBlockFromFirestore(detTaskSnap.data() as Record<string, any>)
+        : undefined;
+
+      let serverLinkedTask: ActionItem | undefined = serverTaskByDeterministicId;
+      const serverStep = serverRun?.steps?.find((s) => s.id === input.stepId);
+      if (
+        serverStep?.linkedTaskId &&
+        serverStep.linkedTaskId !== input.deterministicTaskId
+      ) {
+        const linkedTaskSnap = await tx.get(
+          doc(db, 'users', uid, 'tasks', serverStep.linkedTaskId)
+        );
+        serverLinkedTask = linkedTaskSnap.exists()
+          ? decodeTaskTimeBlockFromFirestore(linkedTaskSnap.data() as Record<string, any>)
+          : undefined;
+      }
+
+      const outcome = applyAtomicStepToTaskInTransactionState({
+        input,
+        serverRun,
+        serverTaskByDeterministicId,
+        serverLinkedTask,
+      });
+
+      if (!outcome.ok) {
+        return outcome;
+      }
+
+      if (outcome.nextTaskToCreate) {
+        const cleanTask = sanitizeFirestorePayload(
+          sanitizeTaskForFirestoreSave({
+            ...outcome.nextTaskToCreate,
+            userId: uid,
+          })
+        );
+        tx.set(detTaskRef, cleanTask);
+      }
+
+      if (outcome.nextRunToSave) {
+        const cleanRun = sanitizeFirestorePayload(
+          sanitizePlaybookRunForSave(outcome.nextRunToSave, uid)
+        );
+        tx.set(runRef, cleanRun);
+      }
+
+      return {
+        ok: true,
+        alreadyExisted: outcome.alreadyExisted,
+        task: outcome.task,
+        run: outcome.run,
+      };
+    });
+  } catch (error) {
+    logFirestoreError(error, OperationType.WRITE, `users/${uid}/playbookRuns/${input.runId}`);
+    return {
+      ok: false,
+      code: 'TRANSACTION_FAILED',
+      errorAr:
+        'تعذر إتمام التحويل الذري للمهمة عبر الخادم حاليًا. لم تُنشأ أي نسخة مكررة، يرجى التحقق من الاتصال والمحاولة مرة أخرى.',
+    };
+  }
+}
+
+export const firestorePlaybookAtomicAdapter: PlaybookAtomicPersistencePort = {
+  runAtomicStepToTask: createTaskFromPlaybookStepAtomic,
+};
+
 
 

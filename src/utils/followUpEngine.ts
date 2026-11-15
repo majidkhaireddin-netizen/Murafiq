@@ -8,6 +8,8 @@ import type {
   Meeting,
   MeetingLeadMinutesOption,
   Opportunity,
+  PlaybookRun,
+  PlaybookRunStep,
   ProvenanceType,
   ReminderItem,
   ReminderReason,
@@ -830,6 +832,17 @@ export function computeInteractionFingerprint(comm: CommunicationInteraction): s
   return raw.slice(0, 190);
 }
 
+export function buildPlaybookStepReminderSourceId(runId: string, stepId: string): string {
+  return `${runId}__${stepId}`;
+}
+
+export function computePlaybookStepFingerprint(
+  run: PlaybookRun,
+  step: PlaybookRunStep
+): string {
+  return `pb|${run.status}|${step.status}|${step.dueDate || ''}|${step.linkedTaskId || ''}|${step.title.trim()}`;
+}
+
 export interface SnoozeCalculationResult {
   ok: boolean;
   snoozedUntilIso?: string;
@@ -938,6 +951,28 @@ export function buildResolvedStateRecord(params: {
   };
 }
 
+function resolvePlaybookAndStepFromSourceId(
+  sourceId: string,
+  playbookRunsById: Map<string, PlaybookRun>
+): { run?: PlaybookRun; step?: PlaybookRunStep; runId?: string; stepId?: string } {
+  for (const run of playbookRunsById.values()) {
+    const prefix = `${run.id}__`;
+    if (sourceId.startsWith(prefix)) {
+      const stepId = sourceId.slice(prefix.length);
+      const step = (run.steps || []).find((s) => s.id === stepId);
+      return { run, step, runId: run.id, stepId };
+    }
+  }
+  const sepIdx = sourceId.lastIndexOf('__');
+  if (sepIdx > 0) {
+    return {
+      runId: sourceId.slice(0, sepIdx),
+      stepId: sourceId.slice(sepIdx + 2),
+    };
+  }
+  return {};
+}
+
 function inferInvalidationDetails(params: {
   persisted: ReminderStateRecord;
   tasksById: Map<string, ActionItem>;
@@ -945,8 +980,17 @@ function inferInvalidationDetails(params: {
   clientsById: Map<string, Client>;
   opportunitiesById: Map<string, Opportunity>;
   interactionsById: Map<string, CommunicationInteraction>;
+  playbookRunsById: Map<string, PlaybookRun>;
+  openTaskCoveredPlaybookKeys: Set<string>;
   preferences: FollowUpPreferences;
-}): { titleArabic: string; titleEnglish: string; reasonArabic: string; clientId?: string } {
+}): {
+  titleArabic: string;
+  titleEnglish: string;
+  reasonArabic: string;
+  clientId?: string;
+  playbookRunId?: string;
+  playbookStepId?: string;
+} {
   const {
     persisted,
     tasksById,
@@ -954,8 +998,111 @@ function inferInvalidationDetails(params: {
     clientsById,
     opportunitiesById,
     interactionsById,
+    playbookRunsById,
+    openTaskCoveredPlaybookKeys,
     preferences,
   } = params;
+
+  if (persisted.sourceType === 'playbook_step') {
+    const resolved = resolvePlaybookAndStepFromSourceId(persisted.sourceId, playbookRunsById);
+    const run = resolved.run;
+    const step = resolved.step;
+    if (!run || !step) {
+      return {
+        titleArabic: 'تذكير خطوة خطة متابعة محذوفة',
+        titleEnglish: 'Deleted playbook step reminder',
+        reasonArabic: 'لم يعد صالحًا: تم حذف خطة المتابعة أو الخطوة المرتبطة',
+        clientId: persisted.clientId,
+        playbookRunId: resolved.runId,
+        playbookStepId: resolved.stepId,
+      };
+    }
+    if (run.status === 'paused') {
+      return {
+        titleArabic: step.title,
+        titleEnglish: step.title,
+        reasonArabic: 'لم يعد صالحًا: تم إيقاف خطة المتابعة مؤقتًا',
+        clientId: run.clientId,
+        playbookRunId: run.id,
+        playbookStepId: step.id,
+      };
+    }
+    if (run.status === 'completed') {
+      return {
+        titleArabic: step.title,
+        titleEnglish: step.title,
+        reasonArabic: 'لم يعد صالحًا: اكتملت خطة المتابعة',
+        clientId: run.clientId,
+        playbookRunId: run.id,
+        playbookStepId: step.id,
+      };
+    }
+    if (run.status === 'cancelled') {
+      return {
+        titleArabic: step.title,
+        titleEnglish: step.title,
+        reasonArabic: 'لم يعد صالحًا: أُلغيت خطة المتابعة',
+        clientId: run.clientId,
+        playbookRunId: run.id,
+        playbookStepId: step.id,
+      };
+    }
+    if (step.status === 'completed') {
+      return {
+        titleArabic: step.title,
+        titleEnglish: step.title,
+        reasonArabic: 'لم يعد صالحًا: أُنجزت خطوة الخطة المرتبطة',
+        clientId: run.clientId,
+        playbookRunId: run.id,
+        playbookStepId: step.id,
+      };
+    }
+    if (step.status === 'skipped') {
+      return {
+        titleArabic: step.title,
+        titleEnglish: step.title,
+        reasonArabic: 'لم يعد صالحًا: تم تجاوز خطوة الخطة',
+        clientId: run.clientId,
+        playbookRunId: run.id,
+        playbookStepId: step.id,
+      };
+    }
+    const linkedOpenTask =
+      (step.linkedTaskId &&
+        (() => {
+          const t = tasksById.get(step.linkedTaskId!);
+          return Boolean(t && t.status !== 'completed' && t.status !== 'cancelled');
+        })()) ||
+      openTaskCoveredPlaybookKeys.has(`${run.id}__${step.id}`);
+    if (linkedOpenTask) {
+      return {
+        titleArabic: step.title,
+        titleEnglish: step.title,
+        reasonArabic: 'لم يعد صالحًا: تم تحويل الخطوة إلى مهمة مفتوحة مستقلة',
+        clientId: run.clientId,
+        playbookRunId: run.id,
+        playbookStepId: step.id,
+      };
+    }
+    if (!preferences.showOverdueTasks && persisted.reason === 'playbook_step_overdue') {
+      return {
+        titleArabic: step.title,
+        titleEnglish: step.title,
+        reasonArabic: 'متوقف حسب تفضيلات التذكير',
+        clientId: run.clientId,
+        playbookRunId: run.id,
+        playbookStepId: step.id,
+      };
+    }
+    return {
+      titleArabic: step.title,
+      titleEnglish: step.title,
+      reasonArabic: 'لم يعد صالحًا نتيجة تحديث موعد أو حالة خطوة المتابعة',
+      clientId: run.clientId,
+      playbookRunId: run.id,
+      playbookStepId: step.id,
+    };
+  }
 
   if (persisted.sourceType === 'interaction') {
     const comm = interactionsById.get(persisted.sourceId);
@@ -1117,6 +1264,7 @@ export function evaluateReminders(params: {
   tasks: ActionItem[];
   opportunities?: Opportunity[];
   interactions?: CommunicationInteraction[];
+  playbookRuns?: PlaybookRun[];
   persistedStates?: ReminderStateRecord[];
   preferences?: FollowUpPreferences;
   referenceDate?: Date;
@@ -1128,6 +1276,7 @@ export function evaluateReminders(params: {
     tasks,
     opportunities = [],
     interactions = [],
+    playbookRuns = [],
     persistedStates = [],
     preferences = DEFAULT_FOLLOW_UP_PREFERENCES,
     referenceDate = new Date(),
@@ -1144,6 +1293,15 @@ export function evaluateReminders(params: {
   const interactionsById = new Map<string, CommunicationInteraction>(
     interactions.map((i) => [i.id, i])
   );
+  const playbookRunsById = new Map<string, PlaybookRun>(
+    playbookRuns.map((r) => [r.id, r])
+  );
+  const openTaskCoveredPlaybookKeys = new Set<string>();
+  for (const t of tasks) {
+    if (t.status !== 'completed' && t.status !== 'cancelled' && t.playbookRunId && t.playbookStepId) {
+      openTaskCoveredPlaybookKeys.add(`${t.playbookRunId}__${t.playbookStepId}`);
+    }
+  }
   const persistedById = new Map<string, ReminderStateRecord>(
     persistedStates.map((s) => [s.id, s])
   );
@@ -1475,6 +1633,90 @@ export function evaluateReminders(params: {
     }
   }
 
+  // 6. Playbook Step Candidates (active runs only; deduplicated against open linked tasks)
+  for (const run of playbookRuns) {
+    if (run.status !== 'active') continue;
+    const clientName = clientsById.get(run.clientId)?.name;
+
+    for (const step of run.steps || []) {
+      if (step.status !== 'pending' && step.status !== 'in_progress') continue;
+      if (!step.dueDate) continue;
+
+      if (step.linkedTaskId) {
+        const linkedTask = tasksById.get(step.linkedTaskId);
+        if (linkedTask && linkedTask.status !== 'completed' && linkedTask.status !== 'cancelled') {
+          continue;
+        }
+      }
+      if (openTaskCoveredPlaybookKeys.has(`${run.id}__${step.id}`)) {
+        continue;
+      }
+
+      const dueParts = resolveCalendarParts(step.dueDate, timeZone);
+      if (!dueParts) continue;
+
+      const diff = calendarDaysDiff(dueParts, refParts);
+      let reason: ReminderReason | null = null;
+      let subtitleArabic = '';
+      let subtitleEnglish = '';
+      let severity: 'high' | 'medium' | 'info' = 'medium';
+
+      if (diff < 0) {
+        if (preferences.showOverdueTasks) {
+          reason = 'playbook_step_overdue';
+          severity = 'high';
+          const lateDays = Math.abs(diff);
+          subtitleArabic =
+            lateDays === 1
+              ? `خطوة من خطة «${run.templateName}» متأخرة بيوم واحد`
+              : `خطوة من خطة «${run.templateName}» متأخرة منذ ${lateDays} أيام`;
+          subtitleEnglish = `Playbook "${run.templateName}" step overdue by ${lateDays} day(s)`;
+        }
+      } else if (diff === 0) {
+        reason = 'playbook_step_due_today';
+        severity = 'high';
+        subtitleArabic = `خطوة من خطة «${run.templateName}» مستحقة اليوم`;
+        subtitleEnglish = `Playbook "${run.templateName}" step due today`;
+      } else if (diff <= preferences.upcomingTaskWindowDays) {
+        reason = 'playbook_step_due_soon';
+        severity = 'medium';
+        subtitleArabic =
+          diff === 1
+            ? `خطوة من خطة «${run.templateName}» مستحقة غداً`
+            : `خطوة من خطة «${run.templateName}» مستحقة خلال ${diff} أيام`;
+        subtitleEnglish =
+          diff === 1
+            ? `Playbook "${run.templateName}" step due tomorrow`
+            : `Playbook "${run.templateName}" step due in ${diff} days`;
+      }
+
+      if (!reason) continue;
+
+      const sourceId = buildPlaybookStepReminderSourceId(run.id, step.id);
+      const id = buildDeterministicReminderId('playbook_step', sourceId, reason);
+      if (!candidateMap.has(id)) {
+        candidateMap.set(id, {
+          id,
+          sourceType: 'playbook_step',
+          sourceId,
+          reason,
+          clientId: run.clientId,
+          clientName,
+          playbookRunId: run.id,
+          playbookStepId: step.id,
+          titleArabic: step.title,
+          titleEnglish: step.title,
+          subtitleArabic,
+          subtitleEnglish,
+          dueAt: step.dueDate,
+          severity,
+          sourceFingerprint: computePlaybookStepFingerprint(run, step),
+          provenance: 'approved',
+        });
+      }
+    }
+  }
+
   const active: ReminderItem[] = [];
   const snoozed: ReminderItem[] = [];
   const resolved: ReminderItem[] = [];
@@ -1530,6 +1772,8 @@ export function evaluateReminders(params: {
       clientsById,
       opportunitiesById,
       interactionsById,
+      playbookRunsById,
+      openTaskCoveredPlaybookKeys,
       preferences,
     });
     const clientName = details.clientId
@@ -1546,6 +1790,8 @@ export function evaluateReminders(params: {
       meetingId: persisted.sourceType === 'meeting' ? persisted.sourceId : undefined,
       taskId: persisted.sourceType === 'task' ? persisted.sourceId : undefined,
       interactionId: persisted.sourceType === 'interaction' ? persisted.sourceId : undefined,
+      playbookRunId: details.playbookRunId,
+      playbookStepId: details.playbookStepId,
       titleArabic: details.titleArabic,
       titleEnglish: details.titleEnglish,
       subtitleArabic: details.reasonArabic,

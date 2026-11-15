@@ -10,6 +10,7 @@ import {
   Meeting,
   Note,
   Opportunity,
+  PlaybookRun,
 } from '../../types';
 import { getRelativeTimeArabic } from '../../utils/logic';
 import {
@@ -54,6 +55,7 @@ interface ClientsViewProps {
   notes: Note[];
   opportunities?: Opportunity[];
   interactions?: CommunicationInteraction[];
+  playbookRuns?: PlaybookRun[];
   onSelectMeeting: (meeting: Meeting) => void;
   onPrepareMeeting?: (meeting: Meeting) => void;
   onPrepareClientMeeting?: (clientId: string) => void;
@@ -68,6 +70,8 @@ interface ClientsViewProps {
   onNewOpportunity?: (clientId: string) => void;
   onSelectOpportunity?: (opportunity: Opportunity) => void;
   onOpenClientCalendar?: (clientId: string) => void;
+  onOpenPlaybookRun?: (runId: string) => void;
+  onStartPlaybookForClient?: (clientId: string) => void;
   onLogInteraction?: (defaults?: {
     clientId?: string;
     contactId?: string;
@@ -107,6 +111,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
   notes,
   opportunities = [],
   interactions = [],
+  playbookRuns = [],
   onSelectMeeting,
   onPrepareMeeting,
   onPrepareClientMeeting,
@@ -121,6 +126,8 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
   onNewOpportunity,
   onSelectOpportunity,
   onOpenClientCalendar,
+  onOpenPlaybookRun,
+  onStartPlaybookForClient,
   onLogInteraction,
   onEditInteraction,
   onDeleteInteraction,
@@ -365,6 +372,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
           notes={notes}
           opportunities={opportunities}
           interactions={interactions}
+          playbookRuns={playbookRuns}
           syncDisplay={activeClientSyncDisplay}
           collectionsLoaded={allCollectionsLoaded}
           onBack={() => selectClient(null)}
@@ -385,6 +393,8 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
           onNewOpportunity={onNewOpportunity}
           onSelectOpportunity={onSelectOpportunity}
           onOpenClientCalendar={onOpenClientCalendar}
+          onOpenPlaybookRun={onOpenPlaybookRun}
+          onStartPlaybookForClient={onStartPlaybookForClient}
           onLogInteraction={onLogInteraction}
           onEditInteraction={onEditInteraction}
           onDeleteInteraction={onDeleteInteraction}

@@ -15,6 +15,7 @@ import type {
   DayAvailableGap,
   Meeting,
   Opportunity,
+  PlaybookRun,
   WeeklyPlanSummary,
 } from '../types/index.ts';
 import {
@@ -52,6 +53,7 @@ export const DEFAULT_CALENDAR_SETTINGS: CalendarSettings = {
   showTasks: true,
   showFollowUps: true,
   showOpportunities: true,
+  showPlaybooks: true,
   showCancelledMeetings: false,
   workingDayStartHour: 8,
   workingDayEndHour: 18,
@@ -148,6 +150,13 @@ export const ACTIVITY_TYPE_META: Record<
     borderClass: 'border-r-4 border-r-stone-500',
     dotClass: 'bg-stone-500',
   },
+  playbook_step: {
+    labelAr: 'خطوة خطة متابعة',
+    labelEn: 'Playbook Step',
+    badgeClass: 'bg-indigo-50 text-indigo-900 border-indigo-300',
+    borderClass: 'border-r-4 border-r-indigo-600',
+    dotClass: 'bg-indigo-600',
+  },
 };
 
 export function normalizeCalendarSettings(
@@ -201,6 +210,10 @@ export function normalizeCalendarSettings(
       typeof raw?.showOpportunities === 'boolean'
         ? raw.showOpportunities
         : DEFAULT_CALENDAR_SETTINGS.showOpportunities,
+    showPlaybooks:
+      typeof raw?.showPlaybooks === 'boolean'
+        ? raw.showPlaybooks
+        : DEFAULT_CALENDAR_SETTINGS.showPlaybooks,
     showCancelledMeetings:
       typeof raw?.showCancelledMeetings === 'boolean'
         ? raw.showCancelledMeetings
@@ -647,6 +660,18 @@ export function sanitizeTaskForFirestoreSave(task: ActionItem): ActionItem {
     delete clone.scheduledEndAt;
   }
 
+  if (typeof clone.playbookRunId === 'string' && clone.playbookRunId.trim()) {
+    clone.playbookRunId = clone.playbookRunId.trim().slice(0, 128);
+  } else {
+    delete clone.playbookRunId;
+  }
+
+  if (typeof clone.playbookStepId === 'string' && clone.playbookStepId.trim()) {
+    clone.playbookStepId = clone.playbookStepId.trim().slice(0, 128);
+  } else {
+    delete clone.playbookStepId;
+  }
+
   return clone;
 }
 
@@ -811,6 +836,7 @@ export interface BuildCalendarEventsParams {
   tasks: ActionItem[];
   opportunities?: Opportunity[];
   interactions?: CommunicationInteraction[];
+  playbookRuns?: PlaybookRun[];
   currentUserId?: string;
   referenceDate?: Date;
   timeZone?: string;
@@ -832,6 +858,7 @@ export function buildCalendarEvents(params: BuildCalendarEventsParams): Calendar
     tasks,
     opportunities = [],
     interactions = [],
+    playbookRuns = [],
     currentUserId,
     referenceDate = new Date(),
     timeZone,
@@ -1191,6 +1218,72 @@ export function buildCalendarEvents(params: BuildCalendarEventsParams): Calendar
     }
   }
 
+  // 5. Playbook Run Steps (active runs only, date-only dueDates, deduplicated against linked tasks)
+  const allowPlaybooksInFilter = filterScope === 'all' || filterScope === 'follow_ups';
+  if (settings.showPlaybooks !== false && allowPlaybooksInFilter && playbookRuns.length > 0) {
+    const nonCancelledTaskIds = new Set<string>();
+    const nonCancelledPlaybookStepKeys = new Set<string>();
+    for (const rawTask of tasks) {
+      if (!isOwnedByCurrentUser(rawTask.userId, currentUserId)) continue;
+      if (rawTask.status === 'cancelled') continue;
+      nonCancelledTaskIds.add(rawTask.id);
+      if (rawTask.playbookRunId && rawTask.playbookStepId) {
+        nonCancelledPlaybookStepKeys.add(`${rawTask.playbookRunId}__${rawTask.playbookStepId}`);
+      }
+    }
+
+    for (const run of playbookRuns) {
+      if (!isOwnedByCurrentUser(run.userId, currentUserId)) continue;
+      if (run.status !== 'active') continue;
+      if (
+        clientIdFilter &&
+        clientIdFilter !== 'all' &&
+        run.clientId !== clientIdFilter
+      ) {
+        continue;
+      }
+
+      const clientName = clientsById.get(run.clientId)?.name || 'عميل غير محدد';
+
+      for (const step of run.steps || []) {
+        if (step.status !== 'pending' && step.status !== 'in_progress') continue;
+        if (!step.dueDate) continue;
+
+        // Avoid duplicate calendar entries when step is already backed by a non-cancelled task
+        if (step.linkedTaskId && nonCancelledTaskIds.has(step.linkedTaskId)) continue;
+        if (nonCancelledPlaybookStepKeys.has(`${run.id}__${step.id}`)) continue;
+
+        const dueParts = parseDateOnlyString(step.dueDate);
+        if (!dueParts) continue;
+        const dueKey = formatCalendarDateKey(dueParts);
+        const isOverdue = dueKey < todayKey;
+
+        events.push({
+          id: `cal-playbook-step-${run.id}-${step.id}`,
+          sourceId: step.id,
+          activityType: 'playbook_step',
+          activityTypeLabelAr: ACTIVITY_TYPE_META.playbook_step.labelAr,
+          activityTypeLabelEn: ACTIVITY_TYPE_META.playbook_step.labelEn,
+          title: step.title,
+          subtitle: `من خطة: ${run.templateName}`,
+          dateKey: dueKey,
+          isTimed: false,
+          hasKnownDuration: false,
+          clientId: run.clientId,
+          clientName,
+          statusLabelAr: isOverdue ? 'خطوة متابعة (متأخرة)' : 'خطوة متابعة مجدولة',
+          isCompletedOrClosed: false,
+          isCancelled: false,
+          isOverdue,
+          priority: step.priority,
+          provenance: 'approved',
+          playbookRunRef: run,
+          playbookStepId: step.id,
+        });
+      }
+    }
+  }
+
   // Sort events deterministically:
   // 1. By dateKey ascending
   // 2. Timed events before all-day events
@@ -1307,7 +1400,7 @@ function buildDayCell(params: {
     if (ev.activityType === 'meeting' && !ev.isCancelled) meetings += 1;
     else if (ev.activityType === 'task_block') taskBlocks += 1;
     else if (ev.activityType === 'task_due') tasksDue += 1;
-    else if (ev.activityType === 'follow_up') followUps += 1;
+    else if (ev.activityType === 'follow_up' || ev.activityType === 'playbook_step') followUps += 1;
     else if (
       ev.activityType === 'opportunity_action' ||
       ev.activityType === 'opportunity_close'
@@ -1616,12 +1709,14 @@ export function buildWeeklyPlanData(params: {
   const weekTimeBlocks = weekEvents.filter(
     (ev) => ev.activityType === 'task_block' && !ev.isCancelled
   );
-  const weekFollowUps = weekEvents.filter((ev) => ev.activityType === 'follow_up');
+  const weekFollowUps = weekEvents.filter(
+    (ev) => ev.activityType === 'follow_up' || ev.activityType === 'playbook_step'
+  );
   const weekOpportunityActions = weekEvents.filter(
     (ev) => ev.activityType === 'opportunity_action'
   );
 
-  // Overdue commitments: uncompleted tasks, follow-ups, or opportunity actions with dateKey < todayKey
+  // Overdue commitments: uncompleted tasks, follow-ups, playbook steps, or opportunity actions with dateKey < todayKey
   const overdueCommitments = events.filter(
     (ev) =>
       ev.isOverdue &&
@@ -1629,6 +1724,7 @@ export function buildWeeklyPlanData(params: {
       !ev.isCancelled &&
       (ev.activityType === 'task_due' ||
         ev.activityType === 'follow_up' ||
+        ev.activityType === 'playbook_step' ||
         ev.activityType === 'opportunity_action')
   );
 

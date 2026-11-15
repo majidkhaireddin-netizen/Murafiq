@@ -10,6 +10,8 @@ import type {
   MeetingLeadMinutesOption,
   Opportunity,
   OpportunityStageEvent,
+  PlaybookRun,
+  PlaybookTemplate,
   UpcomingTaskWindowDaysOption,
 } from '../types';
 import { DEFAULT_FOLLOW_UP_PREFERENCES } from '../utils/followUpEngine';
@@ -71,6 +73,8 @@ interface SettingsModalProps {
   opportunities?: Opportunity[];
   opportunityStageEvents?: OpportunityStageEvent[];
   interactions?: CommunicationInteraction[];
+  playbookTemplates?: PlaybookTemplate[];
+  playbookRuns?: PlaybookRun[];
   isOnline?: boolean;
   collectionsLoaded?: {
     clients?: boolean;
@@ -80,6 +84,8 @@ interface SettingsModalProps {
     opportunities?: boolean;
     opportunityStageEvents?: boolean;
     interactions?: boolean;
+    playbookTemplates?: boolean;
+    playbookRuns?: boolean;
   };
   importHandlers?: ImportPersistenceHandlers;
   initialTab?: 'general' | 'data' | 'assumptions';
@@ -100,6 +106,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   opportunities = [],
   opportunityStageEvents = [],
   interactions = [],
+  playbookTemplates = [],
+  playbookRuns = [],
   isOnline = true,
   collectionsLoaded,
   importHandlers,
@@ -157,7 +165,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     (collectionsLoaded?.notes ?? true) &&
     (collectionsLoaded?.opportunities ?? true) &&
     (collectionsLoaded?.opportunityStageEvents ?? true) &&
-    (collectionsLoaded?.interactions ?? true);
+    (collectionsLoaded?.interactions ?? true) &&
+    (collectionsLoaded?.playbookTemplates ?? true) &&
+    (collectionsLoaded?.playbookRuns ?? true);
 
   const isExportCompleteOnline =
     isOnline && allCollectionsLoaded && pendingOperationsCount === 0;
@@ -225,6 +235,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       opportunities,
       opportunityStageEvents,
       interactions,
+      playbookTemplates,
+      playbookRuns,
       isOnline,
       collectionsLoaded,
       hasPendingLocalWrites: pendingOperationsCount > 0,
@@ -289,6 +301,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           opportunities,
           opportunityStageEvents,
           interactions,
+          playbookTemplates,
+          playbookRuns,
         },
       });
       setImportPreview(preview);
@@ -979,7 +993,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </p>
 
                 {/* Live Counts Grid */}
-                <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 pt-1">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1">
                   <div className="p-2 bg-white border border-stone-200 rounded-lg text-center">
                     <span className="block font-bold text-stone-900 text-sm">
                       {appState.clients.length}
@@ -1015,6 +1029,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       {opportunityStageEvents.length}
                     </span>
                     <span className="text-[10px] text-stone-500">حدث مرحلة</span>
+                  </div>
+                  <div className="p-2 bg-white border border-stone-200 rounded-lg text-center">
+                    <span className="block font-bold text-stone-900 text-sm">
+                      {playbookTemplates.filter((t) => !t.isSystemTemplate).length}
+                    </span>
+                    <span className="text-[10px] text-stone-500">قالب خطة مخصص</span>
+                  </div>
+                  <div className="p-2 bg-white border border-stone-200 rounded-lg text-center">
+                    <span className="block font-bold text-stone-900 text-sm">
+                      {playbookRuns.length}
+                    </span>
+                    <span className="text-[10px] text-stone-500">خطة متابعة</span>
                   </div>
                 </div>
 
@@ -1240,10 +1266,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                               ['tasks', 'المهام'],
                               ['notes', 'الملاحظات'],
                               ['opportunityStageEvents', 'سجل مراحل الفرص'],
+                              ['interactions', 'سجل التواصل'],
+                              ['playbookTemplates', 'قوالب الخطط المخصصة'],
+                              ['playbookRuns', 'خطط المتابعة'],
                             ] as const
                           ).map(([colKey, labelAr]) => {
                             const row = importPreview.countsByCollection[colKey];
+                            if (!row) return null;
                             if (row.totalInFile === 0 && importPreview.format === 'clients_csv' && colKey !== 'clients') {
+                              return null;
+                            }
+                            if (
+                              row.totalInFile === 0 &&
+                              (colKey === 'interactions' ||
+                                colKey === 'playbookTemplates' ||
+                                colKey === 'playbookRuns')
+                            ) {
                               return null;
                             }
                             return (

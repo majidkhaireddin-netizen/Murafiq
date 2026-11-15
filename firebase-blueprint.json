@@ -88,6 +88,8 @@
         "meetingId": { "type": "string", "maxLength": 128 },
         "opportunityId": { "type": "string", "maxLength": 128 },
         "interactionId": { "type": "string", "maxLength": 128 },
+        "playbookRunId": { "type": "string", "maxLength": 128 },
+        "playbookStepId": { "type": "string", "maxLength": 128 },
         "title": { "type": "string", "maxLength": 250 },
         "description": { "type": "string", "maxLength": 2000 },
         "dueDate": { "type": "string", "maxLength": 50 },
@@ -182,7 +184,7 @@
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
         "userId": { "type": "string", "maxLength": 128 },
-        "sourceType": { "type": "string", "enum": ["task", "meeting", "client", "opportunity", "interaction"] },
+        "sourceType": { "type": "string", "enum": ["task", "meeting", "client", "opportunity", "interaction", "playbook_step"] },
         "sourceId": { "type": "string", "maxLength": 128 },
         "reason": {
           "type": "string",
@@ -199,7 +201,10 @@
             "opportunity_missing_next_action",
             "opportunity_stale",
             "interaction_follow_up_due",
-            "interaction_follow_up_overdue"
+            "interaction_follow_up_overdue",
+            "playbook_step_due_today",
+            "playbook_step_overdue",
+            "playbook_step_due_soon"
           ]
         },
         "clientId": { "type": "string", "maxLength": 128 },
@@ -343,6 +348,56 @@
         "updatedAt": { "type": "string", "maxLength": 50 }
       },
       "required": ["id", "clientId", "channel", "direction", "occurredAt", "outcome", "createdAt", "updatedAt"]
+    },
+    "PlaybookTemplate": {
+      "title": "PlaybookTemplate",
+      "description": "User-isolated custom relationship playbook template (<= 20 bounded sequential steps).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 160 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "category": {
+          "type": "string",
+          "enum": ["lead_engagement", "proposal_follow_up", "post_meeting", "relationship_reactivation", "custom"]
+        },
+        "steps": {
+          "type": "array",
+          "description": "Bounded ordered list (1..20) of PlaybookTemplateStep objects"
+        },
+        "isSystemTemplate": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "name", "category", "steps", "isSystemTemplate", "createdAt", "updatedAt"]
+    },
+    "PlaybookRun": {
+      "title": "PlaybookRun",
+      "description": "User-isolated relationship playbook run with deep-cloned step snapshots linked to a client and optional opportunity.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "templateId": { "type": "string", "maxLength": 128 },
+        "templateName": { "type": "string", "maxLength": 160 },
+        "clientId": { "type": "string", "maxLength": 128 },
+        "opportunityId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["active", "paused", "completed", "cancelled"] },
+        "steps": {
+          "type": "array",
+          "description": "Bounded ordered snapshot list (1..20) of PlaybookRunStep objects"
+        },
+        "startDateKey": { "type": "string", "maxLength": 10, "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "startedAt": { "type": "string", "maxLength": 50 },
+        "completedAt": { "type": "string", "maxLength": 50 },
+        "pausedAt": { "type": "string", "maxLength": 50 },
+        "cancelledAt": { "type": "string", "maxLength": 50 },
+        "cancelReason": { "type": "string", "maxLength": 500 },
+        "updatedAt": { "type": "string", "maxLength": 50 },
+        "revision": { "type": "number" }
+      },
+      "required": ["id", "templateName", "clientId", "status", "steps", "startedAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -389,6 +444,14 @@
     "/users/{userId}/interactions/{interactionId}": {
       "schema": { "$ref": "entities/Interaction" },
       "description": "Stores user-isolated client and contact communication interactions"
+    },
+    "/users/{userId}/playbookTemplates/{templateId}": {
+      "schema": { "$ref": "entities/PlaybookTemplate" },
+      "description": "Stores user-isolated custom relationship playbook templates"
+    },
+    "/users/{userId}/playbookRuns/{runId}": {
+      "schema": { "$ref": "entities/PlaybookRun" },
+      "description": "Stores user-isolated relationship playbook runs and progress snapshots"
     }
   }
 }

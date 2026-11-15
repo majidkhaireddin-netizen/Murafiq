@@ -22,6 +22,16 @@ import type {
   OpportunityStageEvent,
   OpportunityStageEventType,
   OpportunityType,
+  PlaybookCategory,
+  PlaybookDuePolicy,
+  PlaybookRun,
+  PlaybookRunStatus,
+  PlaybookRunStep,
+  PlaybookStepCompletionMethod,
+  PlaybookStepStatus,
+  PlaybookStepType,
+  PlaybookTemplate,
+  PlaybookTemplateStep,
   SanitizedImportBatch,
   TaskPriority,
   TaskStatus,
@@ -43,6 +53,13 @@ import {
   resolveInteractionContact,
 } from './communications.ts';
 import { sanitizeMeetingForSave } from './meetingMinutes.ts';
+import {
+  BUILTIN_PLAYBOOK_TEMPLATES,
+  MAX_PLAYBOOK_OFFSET_DAYS,
+  MAX_PLAYBOOK_STEPS,
+  sanitizePlaybookRunForSave,
+  sanitizePlaybookTemplateForSave,
+} from './playbookEngine.ts';
 
 export const MURAFIQ_EXPORT_SCHEMA_VERSION = 'murafiq-export-v1' as const;
 export const LEGACY_PROTOTYPE_SCHEMA_VERSION = '1.0.0-prototype' as const;
@@ -231,6 +248,38 @@ const INTERACTION_ALLOWED_KEYS = new Set([
   'updatedAt',
 ]);
 
+const PLAYBOOK_TEMPLATE_ALLOWED_KEYS = new Set([
+  'id',
+  'userId',
+  'name',
+  'description',
+  'category',
+  'steps',
+  'isSystemTemplate',
+  'createdAt',
+  'updatedAt',
+]);
+
+const PLAYBOOK_RUN_ALLOWED_KEYS = new Set([
+  'id',
+  'userId',
+  'templateId',
+  'templateName',
+  'category',
+  'clientId',
+  'opportunityId',
+  'status',
+  'startDateKey',
+  'steps',
+  'startedAt',
+  'completedAt',
+  'pausedAt',
+  'cancelledAt',
+  'cancelReason',
+  'updatedAt',
+  'revision',
+]);
+
 export function isValidFirestoreId(id: unknown): id is string {
   return typeof id === 'string' && VALID_ID_REGEX.test(id);
 }
@@ -264,6 +313,8 @@ export interface BuildExportBundleParams {
   opportunities: Opportunity[];
   opportunityStageEvents: OpportunityStageEvent[];
   interactions?: CommunicationInteraction[];
+  playbookTemplates?: PlaybookTemplate[];
+  playbookRuns?: PlaybookRun[];
   isOnline?: boolean;
   collectionsLoaded?: {
     clients?: boolean;
@@ -273,6 +324,8 @@ export interface BuildExportBundleParams {
     opportunities?: boolean;
     opportunityStageEvents?: boolean;
     interactions?: boolean;
+    playbookTemplates?: boolean;
+    playbookRuns?: boolean;
   };
   hasPendingLocalWrites?: boolean;
   exportedAt?: string;
@@ -286,6 +339,8 @@ const EXPORT_COLLECTION_LABELS_AR: Record<string, string> = {
   opportunities: 'فرص الأعمال',
   opportunityStageEvents: 'سجل مراحل الفرص',
   interactions: 'سجل التواصل',
+  playbookTemplates: 'قوالب خطط المتابعة',
+  playbookRuns: 'خطط المتابعة',
 };
 
 /**
@@ -310,6 +365,12 @@ export function buildUserDataExportBundle(
   };
   if (params.collectionsLoaded?.interactions !== undefined) {
     loadedFlags.interactions = params.collectionsLoaded.interactions;
+  }
+  if (params.collectionsLoaded?.playbookTemplates !== undefined) {
+    loadedFlags.playbookTemplates = params.collectionsLoaded.playbookTemplates;
+  }
+  if (params.collectionsLoaded?.playbookRuns !== undefined) {
+    loadedFlags.playbookRuns = params.collectionsLoaded.playbookRuns;
   }
 
   const unloadedCollections: string[] = [];
@@ -343,6 +404,10 @@ export function buildUserDataExportBundle(
   const rawOpportunities = filterOwned(params.opportunities);
   const rawStageEvents = filterOwned(params.opportunityStageEvents);
   const rawInteractions = filterOwned(params.interactions || []);
+  const rawCustomPlaybookTemplates = filterOwned(params.playbookTemplates || []).filter(
+    (t) => !t.isSystemTemplate
+  );
+  const rawPlaybookRuns = filterOwned(params.playbookRuns || []);
 
   let meetingsWithLegacyPhotoPathsCount = 0;
   let totalLegacyPhotoPathsCount = 0;
@@ -398,6 +463,14 @@ export function buildUserDataExportBundle(
     userId: uid,
   }));
 
+  const cleanPlaybookTemplates = rawCustomPlaybookTemplates.map((t) =>
+    sanitizePlaybookTemplateForSave(stripSecretsAndInternalFields(t), uid)
+  );
+
+  const cleanPlaybookRuns = rawPlaybookRuns.map((r) =>
+    sanitizePlaybookRunForSave(stripSecretsAndInternalFields(r), uid)
+  );
+
   return {
     schemaVersion: MURAFIQ_EXPORT_SCHEMA_VERSION,
     application: 'Murafiq',
@@ -424,6 +497,10 @@ export function buildUserDataExportBundle(
       opportunities: cleanOpportunities.length,
       opportunityStageEvents: cleanStageEvents.length,
       ...(params.interactions !== undefined ? { interactions: cleanInteractions.length } : {}),
+      ...(params.playbookTemplates !== undefined
+        ? { playbookTemplates: cleanPlaybookTemplates.length }
+        : {}),
+      ...(params.playbookRuns !== undefined ? { playbookRuns: cleanPlaybookRuns.length } : {}),
     },
     data: {
       clients: cleanClients,
@@ -433,6 +510,10 @@ export function buildUserDataExportBundle(
       opportunities: cleanOpportunities,
       opportunityStageEvents: cleanStageEvents,
       ...(params.interactions !== undefined ? { interactions: cleanInteractions } : {}),
+      ...(params.playbookTemplates !== undefined
+        ? { playbookTemplates: cleanPlaybookTemplates }
+        : {}),
+      ...(params.playbookRuns !== undefined ? { playbookRuns: cleanPlaybookRuns } : {}),
     },
   };
 }
@@ -913,6 +994,8 @@ export interface ExistingUserDataForImport {
   opportunities: Opportunity[];
   opportunityStageEvents: OpportunityStageEvent[];
   interactions?: CommunicationInteraction[];
+  playbookTemplates?: PlaybookTemplate[];
+  playbookRuns?: PlaybookRun[];
 }
 
 export interface ValidateImportInput {
@@ -933,6 +1016,8 @@ function createEmptyCountsByCollection(): ImportPreviewResult['countsByCollectio
     opportunities: { totalInFile: 0, validToImport: 0, duplicateSkipped: 0, rejected: 0 },
     opportunityStageEvents: { totalInFile: 0, validToImport: 0, duplicateSkipped: 0, rejected: 0 },
     interactions: { totalInFile: 0, validToImport: 0, duplicateSkipped: 0, rejected: 0 },
+    playbookTemplates: { totalInFile: 0, validToImport: 0, duplicateSkipped: 0, rejected: 0 },
+    playbookRuns: { totalInFile: 0, validToImport: 0, duplicateSkipped: 0, rejected: 0 },
   };
 }
 
@@ -945,6 +1030,8 @@ function createEmptyBatch(): SanitizedImportBatch {
     opportunities: [],
     opportunityStageEvents: [],
     interactions: [],
+    playbookTemplates: [],
+    playbookRuns: [],
   };
 }
 
@@ -1157,6 +1244,12 @@ export function validateAndPreviewImport(input: ValidateImportInput): ImportPrev
   const rawInteractions: unknown[] = Array.isArray(sourceContainer.interactions)
     ? sourceContainer.interactions
     : [];
+  const rawPlaybookTemplates: unknown[] = Array.isArray(sourceContainer.playbookTemplates)
+    ? sourceContainer.playbookTemplates
+    : [];
+  const rawPlaybookRuns: unknown[] = Array.isArray(sourceContainer.playbookRuns)
+    ? sourceContainer.playbookRuns
+    : [];
 
   // Existing IDs in current user's account
   const existingClientIds = new Set(input.existingData.clients.map((c) => c.id));
@@ -1169,6 +1262,15 @@ export function validateAndPreviewImport(input: ValidateImportInput): ImportPrev
   );
   const existingInteractionIds = new Set(
     (input.existingData.interactions || []).map((i) => i.id)
+  );
+  const systemTemplateIds = new Set(BUILTIN_PLAYBOOK_TEMPLATES.map((t) => t.id));
+  const existingPlaybookTemplateIds = new Set(
+    (input.existingData.playbookTemplates || [])
+      .filter((t) => !t.isSystemTemplate)
+      .map((t) => t.id)
+  );
+  const existingPlaybookRunIds = new Set(
+    (input.existingData.playbookRuns || []).map((r) => r.id)
   );
 
   // Track valid target IDs (existing + newly validated in this batch) for relational integrity
@@ -1183,6 +1285,8 @@ export function validateAndPreviewImport(input: ValidateImportInput): ImportPrev
   const seenNoteIdsInFile = new Set<string>();
   const seenEventIdsInFile = new Set<string>();
   const seenInteractionIdsInFile = new Set<string>();
+  const seenPlaybookTemplateIdsInFile = new Set<string>();
+  const seenPlaybookRunIdsInFile = new Set<string>();
 
   let brokenRelationshipsCount = 0;
 
@@ -2223,6 +2327,444 @@ export function validateAndPreviewImport(input: ValidateImportInput): ImportPrev
     interactionCounts.validToImport++;
   }
 
+  // 8. Validate Custom Playbook Templates (strictly block isSystemTemplate overrides)
+  const playbookTemplateCounts = countsByCollection.playbookTemplates!;
+  playbookTemplateCounts.totalInFile = rawPlaybookTemplates.length;
+  const validCategories: PlaybookCategory[] = [
+    'lead_engagement',
+    'proposal_follow_up',
+    'post_meeting',
+    'relationship_reactivation',
+    'custom',
+  ];
+  const validStepTypes: PlaybookStepType[] = ['task', 'communication', 'manual'];
+
+  for (let i = 0; i < rawPlaybookTemplates.length; i++) {
+    const raw = rawPlaybookTemplates[i];
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      playbookTemplateCounts.rejected++;
+      continue;
+    }
+    const obj = raw as Record<string, any>;
+    const id = obj.id;
+    const name = clampStr(obj.name, 160);
+
+    if (!isValidFirestoreId(id)) {
+      playbookTemplateCounts.rejected++;
+      issues.push({
+        id: `pb_tpl_bad_id_${i}`,
+        collection: 'playbookTemplates',
+        recordId: String(id || ''),
+        recordTitle: name || `قالب #${i + 1}`,
+        severity: 'error',
+        code: 'INVALID_ID',
+        messageAr: `تم رفض قالب الخطة «${name || i + 1}» لأن المعرف (${String(id)}) غير صالح.`,
+      });
+      continue;
+    }
+
+    // Never allow importing or overwriting built-in system templates
+    if (obj.isSystemTemplate === true || systemTemplateIds.has(id) || id.startsWith('sys_')) {
+      playbookTemplateCounts.rejected++;
+      issues.push({
+        id: `pb_tpl_system_blocked_${id}_${i}`,
+        collection: 'playbookTemplates',
+        recordId: id,
+        recordTitle: name || id,
+        severity: 'error',
+        code: 'INVALID_FIELD_VALUE',
+        messageAr: `تم رفض القالب «${name || id}»: لا يُسمح باستيراد أو استبدال القوالب الافتراضية للنظام.`,
+      });
+      continue;
+    }
+
+    if (!name || !Array.isArray(obj.steps) || obj.steps.length === 0) {
+      playbookTemplateCounts.rejected++;
+      issues.push({
+        id: `pb_tpl_missing_req_${id}`,
+        collection: 'playbookTemplates',
+        recordId: id,
+        recordTitle: name || id,
+        severity: 'error',
+        code: 'MISSING_REQUIRED_FIELD',
+        messageAr: `تم رفض القالب «${name || id}» لعدم وجود الاسم أو لخلوه من الخطوات.`,
+      });
+      continue;
+    }
+
+    if (obj.steps.length > MAX_PLAYBOOK_STEPS) {
+      playbookTemplateCounts.rejected++;
+      issues.push({
+        id: `pb_tpl_too_many_steps_${id}`,
+        collection: 'playbookTemplates',
+        recordId: id,
+        recordTitle: name,
+        severity: 'error',
+        code: 'INVALID_FIELD_VALUE',
+        messageAr: `تم رفض القالب «${name}» لتجاوز عدد الخطوات الحد الأقصى (${MAX_PLAYBOOK_STEPS}).`,
+      });
+      continue;
+    }
+
+    if (existingPlaybookTemplateIds.has(id) || seenPlaybookTemplateIdsInFile.has(id)) {
+      playbookTemplateCounts.duplicateSkipped++;
+      issues.push({
+        id: `pb_tpl_dup_${id}_${i}`,
+        collection: 'playbookTemplates',
+        recordId: id,
+        recordTitle: name,
+        severity: 'warning',
+        code: 'DUPLICATE_SKIPPED',
+        messageAr: `تم تخطي قالب الخطة «${name}» (${id}) لأنه موجود مسبقاً.`,
+      });
+      continue;
+    }
+
+    if (obj.userId && obj.userId !== uid) {
+      issues.push({
+        id: `pb_tpl_rebind_${id}`,
+        collection: 'playbookTemplates',
+        recordId: id,
+        recordTitle: name,
+        severity: 'warning',
+        code: 'FOREIGN_USER_ID_REBOUND',
+        messageAr: `تم ربط قالب الخطة «${name}» بمعرف حسابك الحالي.`,
+      });
+    }
+
+    checkUnknownAndForbiddenKeys(
+      obj,
+      PLAYBOOK_TEMPLATE_ALLOWED_KEYS,
+      'playbookTemplates',
+      id,
+      name,
+      issues
+    );
+
+    const steps: PlaybookTemplateStep[] = [];
+    let stepsValid = true;
+    for (let sIdx = 0; sIdx < obj.steps.length; sIdx++) {
+      const sRaw = obj.steps[sIdx];
+      if (!sRaw || typeof sRaw !== 'object') {
+        stepsValid = false;
+        break;
+      }
+      const sTitle = clampStr(sRaw.title, 200);
+      if (!sTitle) {
+        stepsValid = false;
+        break;
+      }
+      const rawPolicy = sRaw.duePolicy;
+      const policyType: PlaybookDuePolicy['type'] =
+        rawPolicy?.type === 'after_previous_completion'
+          ? 'after_previous_completion'
+          : 'from_start';
+      const offsetRaw = Number(rawPolicy?.offsetDays ?? 0);
+      const offsetDays =
+        Number.isFinite(offsetRaw) && offsetRaw >= 0 && offsetRaw <= MAX_PLAYBOOK_OFFSET_DAYS
+          ? Math.round(offsetRaw)
+          : 0;
+      const stepId = isValidFirestoreId(sRaw.id)
+        ? sRaw.id
+        : `step_${sIdx + 1}_${deterministicHash(sTitle)}`;
+
+      const cleanStep: PlaybookTemplateStep = {
+        id: stepId,
+        title: sTitle,
+        stepType: validStepTypes.includes(sRaw.stepType) ? sRaw.stepType : 'task',
+        order: sIdx + 1,
+        duePolicy: { type: policyType, offsetDays },
+      };
+      const sDesc = clampStr(sRaw.description, 1500);
+      if (sDesc) cleanStep.description = sDesc;
+      if (['urgent', 'high', 'medium', 'low'].includes(sRaw.priority)) {
+        cleanStep.priority = sRaw.priority;
+      }
+      if (isValidCommunicationChannel(sRaw.suggestedChannel)) {
+        cleanStep.suggestedChannel = sRaw.suggestedChannel;
+      }
+      steps.push(cleanStep);
+    }
+
+    if (!stepsValid || steps.length === 0) {
+      playbookTemplateCounts.rejected++;
+      issues.push({
+        id: `pb_tpl_invalid_steps_${id}`,
+        collection: 'playbookTemplates',
+        recordId: id,
+        recordTitle: name,
+        severity: 'error',
+        code: 'INVALID_FIELD_VALUE',
+        messageAr: `تم رفض القالب «${name}» لاحتوائه على خطوات غير مكتملة أو غير صالحة.`,
+      });
+      continue;
+    }
+
+    const templateObj = sanitizePlaybookTemplateForSave(
+      {
+        id,
+        userId: uid,
+        name,
+        description: clampStr(obj.description, 2000),
+        category: validCategories.includes(obj.category) ? obj.category : 'custom',
+        steps,
+        isSystemTemplate: false,
+        createdAt: clampStr(obj.createdAt, 50) || nowIso,
+        updatedAt: clampStr(obj.updatedAt, 50) || nowIso,
+      },
+      uid
+    );
+
+    seenPlaybookTemplateIdsInFile.add(id);
+    sanitizedBatch.playbookTemplates!.push(templateObj);
+    playbookTemplateCounts.validToImport++;
+  }
+
+  // 9. Validate Playbook Runs (depends on validClientIds & optional validOpportunityIds)
+  const playbookRunCounts = countsByCollection.playbookRuns!;
+  playbookRunCounts.totalInFile = rawPlaybookRuns.length;
+  const validRunStatuses: PlaybookRunStatus[] = ['active', 'paused', 'completed', 'cancelled'];
+  const validStepStatuses: PlaybookStepStatus[] = [
+    'pending',
+    'in_progress',
+    'completed',
+    'skipped',
+  ];
+  const validCompletionMethods: PlaybookStepCompletionMethod[] = [
+    'manual',
+    'linked_task',
+    'linked_communication',
+  ];
+
+  for (let i = 0; i < rawPlaybookRuns.length; i++) {
+    const raw = rawPlaybookRuns[i];
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      playbookRunCounts.rejected++;
+      continue;
+    }
+    const obj = raw as Record<string, any>;
+    const id = obj.id;
+    const templateName = clampStr(obj.templateName, 160);
+    const clientId = clampStr(obj.clientId, 128);
+
+    if (!isValidFirestoreId(id)) {
+      playbookRunCounts.rejected++;
+      issues.push({
+        id: `pb_run_bad_id_${i}`,
+        collection: 'playbookRuns',
+        recordId: String(id || ''),
+        recordTitle: templateName || `خطة #${i + 1}`,
+        severity: 'error',
+        code: 'INVALID_ID',
+        messageAr: `تم رفض خطة المتابعة «${templateName || i + 1}» لأن المعرف (${String(id)}) غير صالح.`,
+      });
+      continue;
+    }
+
+    if (
+      !templateName ||
+      !clientId ||
+      !isValidFirestoreId(clientId) ||
+      !Array.isArray(obj.steps) ||
+      obj.steps.length === 0
+    ) {
+      playbookRunCounts.rejected++;
+      issues.push({
+        id: `pb_run_missing_req_${id}`,
+        collection: 'playbookRuns',
+        recordId: id,
+        recordTitle: templateName || id,
+        severity: 'error',
+        code: 'MISSING_REQUIRED_FIELD',
+        messageAr: `تم رفض خطة المتابعة «${templateName || id}» لعدم اكتمال الحقول الإلزامية (اسم الخطة أو العميل أو الخطوات).`,
+      });
+      continue;
+    }
+
+    if (existingPlaybookRunIds.has(id) || seenPlaybookRunIdsInFile.has(id)) {
+      playbookRunCounts.duplicateSkipped++;
+      issues.push({
+        id: `pb_run_dup_${id}_${i}`,
+        collection: 'playbookRuns',
+        recordId: id,
+        recordTitle: templateName,
+        severity: 'warning',
+        code: 'DUPLICATE_SKIPPED',
+        messageAr: `تم تخطي خطة المتابعة «${templateName}» (${id}) لوجودها مسبقاً.`,
+      });
+      continue;
+    }
+
+    if (!validClientIds.has(clientId)) {
+      playbookRunCounts.rejected++;
+      brokenRelationshipsCount++;
+      issues.push({
+        id: `pb_run_missing_client_${id}`,
+        collection: 'playbookRuns',
+        recordId: id,
+        recordTitle: templateName,
+        severity: 'error',
+        code: 'MISSING_CLIENT_SKIPPED',
+        messageAr: `تم استبعاد خطة المتابعة «${templateName}» لأن العميل المرتبط بها (${clientId}) غير موجود.`,
+      });
+      continue;
+    }
+
+    if (obj.userId && obj.userId !== uid) {
+      issues.push({
+        id: `pb_run_rebind_${id}`,
+        collection: 'playbookRuns',
+        recordId: id,
+        recordTitle: templateName,
+        severity: 'warning',
+        code: 'FOREIGN_USER_ID_REBOUND',
+        messageAr: `تم ربط خطة المتابعة «${templateName}» بمعرف حسابك الحالي.`,
+      });
+    }
+
+    checkUnknownAndForbiddenKeys(
+      obj,
+      PLAYBOOK_RUN_ALLOWED_KEYS,
+      'playbookRuns',
+      id,
+      templateName,
+      issues
+    );
+
+    let resolvedOppId: string | undefined = undefined;
+    if (obj.opportunityId !== undefined && obj.opportunityId !== null && obj.opportunityId !== '') {
+      if (
+        isValidFirestoreId(obj.opportunityId) &&
+        validOpportunityIds.has(obj.opportunityId)
+      ) {
+        resolvedOppId = obj.opportunityId;
+      } else {
+        brokenRelationshipsCount++;
+        issues.push({
+          id: `pb_run_broken_opp_${id}`,
+          collection: 'playbookRuns',
+          recordId: id,
+          recordTitle: templateName,
+          severity: 'warning',
+          code: 'BROKEN_OPTIONAL_LINK_UNLINKED',
+          messageAr: `تم استيراد خطة المتابعة «${templateName}» مع فك ارتباطها بالفرصة (${String(
+            obj.opportunityId
+          )}) لعدم وجودها.`,
+        });
+      }
+    }
+
+    const cleanSteps: PlaybookRunStep[] = [];
+    let runStepsValid = true;
+    for (let sIdx = 0; sIdx < Math.min(MAX_PLAYBOOK_STEPS, obj.steps.length); sIdx++) {
+      const sRaw = obj.steps[sIdx];
+      if (!sRaw || typeof sRaw !== 'object') {
+        runStepsValid = false;
+        break;
+      }
+      const sTitle = clampStr(sRaw.title, 200);
+      if (!sTitle) {
+        runStepsValid = false;
+        break;
+      }
+      const rawPolicy = sRaw.duePolicy;
+      const policyType: PlaybookDuePolicy['type'] =
+        rawPolicy?.type === 'after_previous_completion'
+          ? 'after_previous_completion'
+          : 'from_start';
+      const offsetRaw = Number(rawPolicy?.offsetDays ?? 0);
+      const offsetDays =
+        Number.isFinite(offsetRaw) && offsetRaw >= 0 && offsetRaw <= MAX_PLAYBOOK_OFFSET_DAYS
+          ? Math.round(offsetRaw)
+          : 0;
+      const stepId = isValidFirestoreId(sRaw.id)
+        ? sRaw.id
+        : `step_${sIdx + 1}_${deterministicHash(sTitle)}`;
+
+      const cleanStep: PlaybookRunStep = {
+        id: stepId,
+        title: sTitle,
+        stepType: validStepTypes.includes(sRaw.stepType) ? sRaw.stepType : 'task',
+        order: sIdx + 1,
+        status: validStepStatuses.includes(sRaw.status) ? sRaw.status : 'pending',
+        duePolicy: { type: policyType, offsetDays },
+      };
+      const sDesc = clampStr(sRaw.description, 1500);
+      if (sDesc) cleanStep.description = sDesc;
+      if (typeof sRaw.dueDate === 'string' && DATE_ONLY_REGEX.test(sRaw.dueDate)) {
+        cleanStep.dueDate = sRaw.dueDate;
+      }
+      if (['urgent', 'high', 'medium', 'low'].includes(sRaw.priority)) {
+        cleanStep.priority = sRaw.priority;
+      }
+      if (isValidCommunicationChannel(sRaw.suggestedChannel)) {
+        cleanStep.suggestedChannel = sRaw.suggestedChannel;
+      }
+      const startedAt = clampStr(sRaw.startedAt, 50);
+      if (startedAt) cleanStep.startedAt = startedAt;
+      const completedAt = clampStr(sRaw.completedAt, 50);
+      if (completedAt) cleanStep.completedAt = completedAt;
+      const skippedAt = clampStr(sRaw.skippedAt, 50);
+      if (skippedAt) cleanStep.skippedAt = skippedAt;
+      if (isValidFirestoreId(sRaw.linkedTaskId)) cleanStep.linkedTaskId = sRaw.linkedTaskId;
+      if (isValidFirestoreId(sRaw.linkedInteractionId)) {
+        cleanStep.linkedInteractionId = sRaw.linkedInteractionId;
+      }
+      if (validCompletionMethods.includes(sRaw.completionMethod)) {
+        cleanStep.completionMethod = sRaw.completionMethod;
+      }
+      const sNote = clampStr(sRaw.note, 1000);
+      if (sNote) cleanStep.note = sNote;
+      cleanSteps.push(cleanStep);
+    }
+
+    if (!runStepsValid || cleanSteps.length === 0) {
+      playbookRunCounts.rejected++;
+      issues.push({
+        id: `pb_run_invalid_steps_${id}`,
+        collection: 'playbookRuns',
+        recordId: id,
+        recordTitle: templateName,
+        severity: 'error',
+        code: 'INVALID_FIELD_VALUE',
+        messageAr: `تم رفض خطة المتابعة «${templateName}» لاحتوائها على خطوات غير صالحة.`,
+      });
+      continue;
+    }
+
+    const sanitizedRun = sanitizePlaybookRunForSave(
+      {
+        id,
+        userId: uid,
+        templateId: isValidFirestoreId(obj.templateId) ? obj.templateId : undefined,
+        templateName,
+        clientId,
+        opportunityId: resolvedOppId,
+        status: validRunStatuses.includes(obj.status) ? obj.status : 'active',
+        startDateKey:
+          typeof obj.startDateKey === 'string' && DATE_ONLY_REGEX.test(obj.startDateKey)
+            ? obj.startDateKey
+            : undefined,
+        steps: cleanSteps,
+        startedAt: clampStr(obj.startedAt, 50) || nowIso,
+        completedAt: clampStr(obj.completedAt, 50),
+        pausedAt: clampStr(obj.pausedAt, 50),
+        cancelledAt: clampStr(obj.cancelledAt, 50),
+        cancelReason: clampStr(obj.cancelReason, 500),
+        updatedAt: clampStr(obj.updatedAt, 50) || nowIso,
+        revision:
+          typeof obj.revision === 'number' && Number.isFinite(obj.revision) && obj.revision >= 1
+            ? Math.floor(obj.revision)
+            : 1,
+      },
+      uid
+    );
+
+    seenPlaybookRunIdsInFile.add(id);
+    sanitizedBatch.playbookRuns!.push(sanitizedRun);
+    playbookRunCounts.validToImport++;
+  }
+
   const totalInFile =
     countsByCollection.clients.totalInFile +
     countsByCollection.meetings.totalInFile +
@@ -2230,7 +2772,9 @@ export function validateAndPreviewImport(input: ValidateImportInput): ImportPrev
     countsByCollection.notes.totalInFile +
     countsByCollection.opportunities.totalInFile +
     countsByCollection.opportunityStageEvents.totalInFile +
-    interactionCounts.totalInFile;
+    interactionCounts.totalInFile +
+    playbookTemplateCounts.totalInFile +
+    playbookRunCounts.totalInFile;
 
   const totalValidToImport =
     countsByCollection.clients.validToImport +
@@ -2239,7 +2783,9 @@ export function validateAndPreviewImport(input: ValidateImportInput): ImportPrev
     countsByCollection.notes.validToImport +
     countsByCollection.opportunities.validToImport +
     countsByCollection.opportunityStageEvents.validToImport +
-    interactionCounts.validToImport;
+    interactionCounts.validToImport +
+    playbookTemplateCounts.validToImport +
+    playbookRunCounts.validToImport;
 
   const totalDuplicatesSkipped =
     countsByCollection.clients.duplicateSkipped +
@@ -2248,7 +2794,9 @@ export function validateAndPreviewImport(input: ValidateImportInput): ImportPrev
     countsByCollection.notes.duplicateSkipped +
     countsByCollection.opportunities.duplicateSkipped +
     countsByCollection.opportunityStageEvents.duplicateSkipped +
-    interactionCounts.duplicateSkipped;
+    interactionCounts.duplicateSkipped +
+    playbookTemplateCounts.duplicateSkipped +
+    playbookRunCounts.duplicateSkipped;
 
   const totalRejected =
     countsByCollection.clients.rejected +
@@ -2257,7 +2805,9 @@ export function validateAndPreviewImport(input: ValidateImportInput): ImportPrev
     countsByCollection.notes.rejected +
     countsByCollection.opportunities.rejected +
     countsByCollection.opportunityStageEvents.rejected +
-    interactionCounts.rejected;
+    interactionCounts.rejected +
+    playbookTemplateCounts.rejected +
+    playbookRunCounts.rejected;
 
   return {
     canProceed: totalValidToImport > 0,
@@ -2530,6 +3080,8 @@ export interface ImportPersistenceHandlers {
   saveNote: (note: Note) => Promise<void>;
   saveOpportunityStageEvent: (event: OpportunityStageEvent) => Promise<void>;
   saveInteraction?: (interaction: CommunicationInteraction) => Promise<void>;
+  savePlaybookTemplate?: (template: PlaybookTemplate) => Promise<void>;
+  savePlaybookRun?: (run: PlaybookRun) => Promise<void>;
 }
 
 export interface ExecuteSafeImportParams {
@@ -2556,7 +3108,7 @@ function createEmptyCollectionExecutionReport(
  * Executes a validated import preview only after explicit user confirmation (`confirmed === true`)
  * and while online (`isOnline === true`).
  * Writes records in topological order:
- * 1. clients -> 2. opportunities -> 3. meetings -> 4. tasks -> 5. notes -> 6. opportunityStageEvents -> 7. interactions.
+ * 1. clients -> 2. opportunities -> 3. meetings -> 4. tasks -> 5. notes -> 6. opportunityStageEvents -> 7. interactions -> 8. playbookTemplates -> 9. playbookRuns.
  * Supports safe retry without duplicating already-succeeded records via `previousSucceededKeys`.
  */
 export async function executeSafeImportPlan(
@@ -2586,6 +3138,12 @@ export async function executeSafeImportPlan(
     ),
     interactions: createEmptyCollectionExecutionReport(
       params.preview.countsByCollection.interactions?.duplicateSkipped ?? 0
+    ),
+    playbookTemplates: createEmptyCollectionExecutionReport(
+      params.preview.countsByCollection.playbookTemplates?.duplicateSkipped ?? 0
+    ),
+    playbookRuns: createEmptyCollectionExecutionReport(
+      params.preview.countsByCollection.playbookRuns?.duplicateSkipped ?? 0
     ),
   };
 
@@ -2829,6 +3387,55 @@ export async function executeSafeImportPlan(
     }
   }
 
+  // 8. Import Custom Playbook Templates
+  for (const tpl of batch.playbookTemplates || []) {
+    const key = `playbookTemplates:${tpl.id}`;
+    if (succeededSet.has(key)) continue;
+    if (!params.handlers.savePlaybookTemplate) continue;
+    collections.playbookTemplates.attempted++;
+    try {
+      await params.handlers.savePlaybookTemplate(tpl);
+      collections.playbookTemplates.succeeded++;
+      succeededSet.add(key);
+    } catch (err: any) {
+      collections.playbookTemplates.failed++;
+      collections.playbookTemplates.failedItems.push({
+        id: tpl.id,
+        title: tpl.name,
+        errorAr: err?.message || 'تعذر حفظ قالب خطة المتابعة.',
+      });
+    }
+  }
+
+  // 9. Import Playbook Runs
+  for (const run of batch.playbookRuns || []) {
+    const key = `playbookRuns:${run.id}`;
+    if (succeededSet.has(key)) continue;
+    if (!params.handlers.savePlaybookRun) continue;
+    collections.playbookRuns.attempted++;
+    if (failedClientIds.has(run.clientId)) {
+      collections.playbookRuns.failed++;
+      collections.playbookRuns.failedItems.push({
+        id: run.id,
+        title: run.templateName,
+        errorAr: 'تعذر حفظ خطة المتابعة بسبب فشل حفظ العميل المرتبط بها.',
+      });
+      continue;
+    }
+    try {
+      await params.handlers.savePlaybookRun(run);
+      collections.playbookRuns.succeeded++;
+      succeededSet.add(key);
+    } catch (err: any) {
+      collections.playbookRuns.failed++;
+      collections.playbookRuns.failedItems.push({
+        id: run.id,
+        title: run.templateName,
+        errorAr: err?.message || 'تعذر حفظ سجل خطة المتابعة.',
+      });
+    }
+  }
+
   const totalSucceeded =
     collections.clients.succeeded +
     collections.opportunities.succeeded +
@@ -2836,7 +3443,9 @@ export async function executeSafeImportPlan(
     collections.tasks.succeeded +
     collections.notes.succeeded +
     collections.opportunityStageEvents.succeeded +
-    collections.interactions.succeeded;
+    collections.interactions.succeeded +
+    collections.playbookTemplates.succeeded +
+    collections.playbookRuns.succeeded;
 
   const totalFailed =
     collections.clients.failed +
@@ -2845,7 +3454,9 @@ export async function executeSafeImportPlan(
     collections.tasks.failed +
     collections.notes.failed +
     collections.opportunityStageEvents.failed +
-    collections.interactions.failed;
+    collections.interactions.failed +
+    collections.playbookTemplates.failed +
+    collections.playbookRuns.failed;
 
   const status: ImportExecutionReport['status'] =
     totalFailed === 0

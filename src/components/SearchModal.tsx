@@ -6,6 +6,7 @@ import type {
   Meeting,
   Note,
   Opportunity,
+  PlaybookRun,
   SearchCollectionsLoadedState,
   SearchDateRangePreset,
   SearchFilterState,
@@ -40,6 +41,7 @@ import {
   AlertCircle,
   Tag,
   Building2,
+  ListChecks,
 } from 'lucide-react';
 
 interface SearchModalProps {
@@ -52,6 +54,7 @@ interface SearchModalProps {
     notes: Note[];
     opportunities?: Opportunity[];
     interactions?: CommunicationInteraction[];
+    playbookRuns?: PlaybookRun[];
   };
   currentUserId?: string;
   collectionsLoaded?: Partial<SearchCollectionsLoadedState>;
@@ -61,6 +64,7 @@ interface SearchModalProps {
   onSelectNote?: (note: Note) => void;
   onSelectOpportunity?: (opportunity: Opportunity) => void;
   onSelectInteraction?: (interaction: CommunicationInteraction) => void;
+  onSelectPlaybookRun?: (run: PlaybookRun) => void;
   language: 'ar' | 'en';
 }
 
@@ -139,6 +143,12 @@ const RECORD_TYPE_META: Record<
     badgeClass: 'bg-amber-50 text-amber-800 border-amber-200',
     icon: StickyNote,
   },
+  playbook: {
+    labelAr: 'خطة متابعة',
+    labelEn: 'Playbook',
+    badgeClass: 'bg-indigo-50 text-indigo-900 border-indigo-200',
+    icon: ListChecks,
+  },
 };
 
 const DATE_PRESET_LABELS_AR: Record<SearchDateRangePreset, string> = {
@@ -181,6 +191,8 @@ const STATUS_OPTIONS_AR: Array<{ value: string; labelAr: string }> = [
   { value: 'negotiation', labelAr: 'فرصة: تفاوض' },
   { value: 'won', labelAr: 'فرصة: مكسوبة' },
   { value: 'lost', labelAr: 'فرصة: خاسرة' },
+  // Playbooks
+  { value: 'paused', labelAr: 'خطة متابعة: متوقفة مؤقتاً' },
 ];
 
 export const SearchModal: React.FC<SearchModalProps> = ({
@@ -195,6 +207,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
   onSelectNote,
   onSelectOpportunity,
   onSelectInteraction,
+  onSelectPlaybookRun,
   language,
 }) => {
   const [rawQuery, setRawQuery] = useState('');
@@ -220,6 +233,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
         notes: data.notes,
         opportunities: data.opportunities || [],
         interactions: data.interactions || [],
+        playbookRuns: data.playbookRuns || [],
         currentUserId,
       }),
     [
@@ -229,6 +243,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
       data.notes,
       data.opportunities,
       data.interactions,
+      data.playbookRuns,
       currentUserId,
     ]
   );
@@ -317,6 +332,15 @@ export const SearchModal: React.FC<SearchModalProps> = ({
     if (item.recordType === 'interaction') {
       if (item.interactionRef && onSelectInteraction) {
         onSelectInteraction(item.interactionRef);
+      } else if (item.clientRef) {
+        onSelectClient(item.clientRef);
+      }
+      onClose();
+      return;
+    }
+    if (item.recordType === 'playbook') {
+      if (item.playbookRunRef && onSelectPlaybookRun) {
+        onSelectPlaybookRun(item.playbookRunRef);
       } else if (item.clientRef) {
         onSelectClient(item.clientRef);
       }
@@ -452,6 +476,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
                 'client',
                 'contact',
                 'interaction',
+                'playbook',
                 'opportunity',
                 'meeting',
                 'task',

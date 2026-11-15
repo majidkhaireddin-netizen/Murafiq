@@ -7,6 +7,7 @@ import {
   Opportunity,
   OpportunityStage,
   OpportunityStageEvent,
+  PlaybookRun,
 } from '../types';
 import {
   OPPORTUNITY_ALL_STAGES,
@@ -23,6 +24,11 @@ import {
   resolveInteractionContact,
 } from '../utils/communications';
 import { formatArabicDate, getPriorityBadge } from '../utils/logic';
+import {
+  PLAYBOOK_RUN_STATUS_META,
+  computePlaybookRunProgress,
+  getPlaybookRunStepPointers,
+} from '../utils/playbookEngine';
 import {
   ArrowRight,
   AlertTriangle,
@@ -50,6 +56,7 @@ interface OpportunityDetailWorkspaceProps {
   meetings: Meeting[];
   tasks: ActionItem[];
   interactions?: CommunicationInteraction[];
+  playbookRuns?: PlaybookRun[];
   stageEvents: OpportunityStageEvent[];
   onBack: () => void;
   onEdit: (opportunity: Opportunity) => void;
@@ -69,6 +76,8 @@ interface OpportunityDetailWorkspaceProps {
   onOpenClient: (clientId: string) => void;
   onOpenMeeting: (meetingId: string) => void;
   onOpenTask: (taskId: string) => void;
+  onOpenPlaybookRun?: (runId: string) => void;
+  onStartPlaybookForOpportunity?: (opportunity: Opportunity) => void;
   language: 'ar' | 'en';
 }
 
@@ -78,6 +87,7 @@ export const OpportunityDetailWorkspace: React.FC<OpportunityDetailWorkspaceProp
   meetings,
   tasks,
   interactions = [],
+  playbookRuns = [],
   stageEvents,
   onBack,
   onEdit,
@@ -97,6 +107,8 @@ export const OpportunityDetailWorkspace: React.FC<OpportunityDetailWorkspaceProp
   onOpenClient,
   onOpenMeeting,
   onOpenTask,
+  onOpenPlaybookRun,
+  onStartPlaybookForOpportunity,
   language,
 }) => {
   const [isEditingNextAction, setIsEditingNextAction] = useState(false);
@@ -181,6 +193,19 @@ export const OpportunityDetailWorkspace: React.FC<OpportunityDetailWorkspaceProp
         .filter((e) => e.opportunityId === opportunity.id)
         .sort((a, b) => (b.occurredAt || '').localeCompare(a.occurredAt || '')),
     [stageEvents, opportunity.id]
+  );
+
+  const linkedPlaybookRuns = useMemo(
+    () =>
+      playbookRuns
+        .filter((r) => r.opportunityId === opportunity.id)
+        .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')),
+    [playbookRuns, opportunity.id]
+  );
+
+  const hasActiveLinkedPlaybooks = useMemo(
+    () => linkedPlaybookRuns.some((r) => r.status === 'active'),
+    [linkedPlaybookRuns]
   );
 
   const handleSaveNextAction = async (e: React.FormEvent) => {
@@ -390,6 +415,28 @@ export const OpportunityDetailWorkspace: React.FC<OpportunityDetailWorkspaceProp
             })}
           </div>
         </div>
+
+        {/* Non-blocking Advisory when Closed Opportunity Still Has Active Playbooks */}
+        {closed && hasActiveLinkedPlaybooks && (
+          <div
+            data-testid="opp-closed-active-playbook-advisory"
+            className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-amber-950 text-xs flex items-start gap-2"
+          >
+            <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+            <div className="space-y-0.5">
+              <p className="font-bold">
+                {language === 'ar'
+                  ? 'تنبيه استرشادي: توجد خطط متابعة ما زالت نشطة لهذه الفرصة المغلقة'
+                  : 'Advisory: Active playbooks remain linked to this closed opportunity'}
+              </p>
+              <p className="text-[11px] text-amber-900">
+                {language === 'ar'
+                  ? 'لا يتم إيقاف الخطط أو إلغاؤها تلقائيًا عند إغلاق الفرصة. راجع الخطط النشطة أدناه لتحديد ما إذا كنت ترغب في إكمالها أو إيقافها مؤقتًا أو إلغائها يدويًا.'
+                  : 'Playbooks are never auto-cancelled when closing an opportunity. Review active playbooks below to pause, complete, or cancel manually.'}
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Closed / Lost / Reopened Metadata Banner */}
         {(closed || opportunity.reopenedAt || opportunity.lostReason) && (
@@ -951,6 +998,96 @@ export const OpportunityDetailWorkspace: React.FC<OpportunityDetailWorkspaceProp
           </div>
         </div>
       )}
+
+      {/* Linked Relationship Playbook Runs */}
+      <div
+        className="bg-white rounded-2xl border border-stone-200 p-4 space-y-3"
+        data-testid="opp-linked-playbooks-section"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <ListChecks className="w-4 h-4 text-indigo-700" />
+            <h3 className="text-sm font-bold text-stone-900">
+              {language === 'ar'
+                ? `خطط العلاقات والمتابعات المرتبطة (${linkedPlaybookRuns.length})`
+                : `Linked Playbook Runs (${linkedPlaybookRuns.length})`}
+            </h3>
+          </div>
+          {onStartPlaybookForOpportunity && !closed && (
+            <button
+              type="button"
+              data-testid="opp-start-playbook-btn"
+              onClick={() => onStartPlaybookForOpportunity(opportunity)}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-indigo-50 text-indigo-800 border border-indigo-200 text-xs font-bold hover:bg-indigo-100 transition-colors"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>{language === 'ar' ? 'بدء خطة متابعة للفرصة' : 'Start Playbook'}</span>
+            </button>
+          )}
+        </div>
+
+        {linkedPlaybookRuns.length === 0 ? (
+          <p className="text-xs text-stone-400 py-3 text-center">
+            {language === 'ar'
+              ? 'لا توجد خطط متابعة متسلسلة مرتبطة بهذه الفرصة حتى الآن.'
+              : 'No playbook runs linked to this opportunity yet.'}
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {linkedPlaybookRuns.map((run) => {
+              const statusMeta = PLAYBOOK_RUN_STATUS_META[run.status];
+              const progress = computePlaybookRunProgress(run);
+              const pointers = getPlaybookRunStepPointers(run);
+              const activeStep = pointers.currentStep;
+              return (
+                <div
+                  key={run.id}
+                  className="p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-2 text-xs"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-bold text-stone-900">{run.templateName}</span>
+                      <span
+                        className={`inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold border ${statusMeta.badgeClass}`}
+                      >
+                        {language === 'ar' ? statusMeta.labelAr : statusMeta.labelEn}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] font-semibold text-stone-600 tabular-nums">
+                        {progress.completedStepsCount}/{progress.totalStepsCount}
+                      </span>
+                      {onOpenPlaybookRun && (
+                        <button
+                          type="button"
+                          data-testid={`opp-open-playbook-${run.id}`}
+                          onClick={() => onOpenPlaybookRun(run.id)}
+                          className="px-2.5 py-1 rounded-lg bg-indigo-700 text-white text-[11px] font-bold hover:bg-indigo-800 transition-colors"
+                        >
+                          {language === 'ar' ? 'فتح الخطة' : 'Open Playbook'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <div className="w-full h-1.5 rounded-full bg-stone-200 overflow-hidden">
+                    <div
+                      className="h-full bg-indigo-600 rounded-full transition-all"
+                      style={{ width: `${progress.completionPercent}%` }}
+                    />
+                  </div>
+                  {activeStep && (
+                    <p className="text-[11px] text-stone-600">
+                      {language === 'ar' ? 'الخطوة النشطة:' : 'Current step:'}{' '}
+                      <span className="font-semibold text-stone-800">{activeStep.title}</span>
+                      {activeStep.dueDate ? ` — (${activeStep.dueDate})` : ''}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
 
       {/* Stage Evolution History */}
       <div className="bg-white rounded-2xl border border-stone-200 p-4 space-y-3">

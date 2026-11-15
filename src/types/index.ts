@@ -160,6 +160,8 @@ export interface ActionItem {
   clientId: string;
   opportunityId?: string;
   interactionId?: string;
+  playbookRunId?: string;
+  playbookStepId?: string;
   title: string;
   description?: string;
   dueDate?: string; // YYYY-MM-DD (موعد الاستحقاق)
@@ -195,7 +197,9 @@ export type EntityType =
   | 'preference'
   | 'opportunity'
   | 'opportunityStageEvent'
-  | 'interaction';
+  | 'interaction'
+  | 'playbookTemplate'
+  | 'playbookRun';
 
 export type ResolutionChoice = 'keep_local' | 'keep_remote' | 'merge';
 
@@ -205,8 +209,8 @@ export interface ConflictItem {
   id: string;
   entityType: EntityType;
   entityTitle: string;
-  localVersion: Client | Meeting | ActionItem | Note;
-  remoteVersion: Client | Meeting | ActionItem | Note;
+  localVersion: Client | Meeting | ActionItem | Note | Opportunity | PlaybookTemplate | PlaybookRun;
+  remoteVersion: Client | Meeting | ActionItem | Note | Opportunity | PlaybookTemplate | PlaybookRun;
   differingFields: {
     field: string;
     fieldLabelArabic: string;
@@ -260,7 +264,9 @@ export interface RejectedWriteRecord {
     | FollowUpPreferences
     | Opportunity
     | OpportunityStageEvent
-    | CommunicationInteraction;
+    | CommunicationInteraction
+    | PlaybookTemplate
+    | PlaybookRun;
   occurredAt: string;
 }
 
@@ -459,7 +465,13 @@ export type DailyTaskBucketKey =
   | 'later'
   | 'no_due_date';
 
-export type ReminderSourceType = 'task' | 'meeting' | 'client' | 'opportunity' | 'interaction';
+export type ReminderSourceType =
+  | 'task'
+  | 'meeting'
+  | 'client'
+  | 'opportunity'
+  | 'interaction'
+  | 'playbook_step';
 
 export type ReminderReason =
   | 'task_overdue'
@@ -474,7 +486,10 @@ export type ReminderReason =
   | 'opportunity_missing_next_action'
   | 'opportunity_stale'
   | 'interaction_follow_up_due'
-  | 'interaction_follow_up_overdue';
+  | 'interaction_follow_up_overdue'
+  | 'playbook_step_due_today'
+  | 'playbook_step_overdue'
+  | 'playbook_step_due_soon';
 
 export type ReminderStatus = 'active' | 'snoozed' | 'resolved' | 'invalidated';
 
@@ -523,6 +538,8 @@ export interface ReminderItem {
   meetingId?: string;
   taskId?: string;
   interactionId?: string;
+  playbookRunId?: string;
+  playbookStepId?: string;
   titleArabic: string;
   titleEnglish: string;
   subtitleArabic: string;
@@ -621,7 +638,8 @@ export type SearchRecordType =
   | 'task'
   | 'note'
   | 'opportunity'
-  | 'interaction';
+  | 'interaction'
+  | 'playbook';
 
 export type SearchMatchTier =
   | 'exact'
@@ -677,6 +695,7 @@ export interface SearchResultItem {
   noteRef?: Note;
   opportunityRef?: Opportunity;
   interactionRef?: CommunicationInteraction;
+  playbookRunRef?: PlaybookRun;
 }
 
 export interface SearchCollectionsLoadedState {
@@ -686,6 +705,7 @@ export interface SearchCollectionsLoadedState {
   notes: boolean;
   opportunities: boolean;
   interactions?: boolean;
+  playbookRuns?: boolean;
 }
 
 export interface SearchExecutionResult {
@@ -735,6 +755,8 @@ export interface MurafiqExportBundleV1 {
     opportunities: number;
     opportunityStageEvents: number;
     interactions?: number;
+    playbookTemplates?: number;
+    playbookRuns?: number;
   };
   data: {
     clients: Client[];
@@ -744,6 +766,8 @@ export interface MurafiqExportBundleV1 {
     opportunities: Opportunity[];
     opportunityStageEvents: OpportunityStageEvent[];
     interactions?: CommunicationInteraction[];
+    playbookTemplates?: PlaybookTemplate[];
+    playbookRuns?: PlaybookRun[];
   };
 }
 
@@ -761,7 +785,9 @@ export interface ImportValidationIssue {
     | 'notes'
     | 'opportunities'
     | 'opportunityStageEvents'
-    | 'interactions';
+    | 'interactions'
+    | 'playbookTemplates'
+    | 'playbookRuns';
   recordId?: string;
   recordTitle?: string;
   severity: ImportIssueSeverity;
@@ -791,6 +817,8 @@ export interface SanitizedImportBatch {
   opportunities: Opportunity[];
   opportunityStageEvents: OpportunityStageEvent[];
   interactions?: CommunicationInteraction[];
+  playbookTemplates?: PlaybookTemplate[];
+  playbookRuns?: PlaybookRun[];
 }
 
 export interface ImportPreviewResult {
@@ -806,6 +834,8 @@ export interface ImportPreviewResult {
     opportunities: { totalInFile: number; validToImport: number; duplicateSkipped: number; rejected: number };
     opportunityStageEvents: { totalInFile: number; validToImport: number; duplicateSkipped: number; rejected: number };
     interactions?: { totalInFile: number; validToImport: number; duplicateSkipped: number; rejected: number };
+    playbookTemplates?: { totalInFile: number; validToImport: number; duplicateSkipped: number; rejected: number };
+    playbookRuns?: { totalInFile: number; validToImport: number; duplicateSkipped: number; rejected: number };
   };
   totalInFile: number;
   totalValidToImport: number;
@@ -837,6 +867,8 @@ export interface ImportExecutionReport {
     notes: ImportCollectionExecutionReport;
     opportunityStageEvents: ImportCollectionExecutionReport;
     interactions?: ImportCollectionExecutionReport;
+    playbookTemplates?: ImportCollectionExecutionReport;
+    playbookRuns?: ImportCollectionExecutionReport;
   };
   totalSucceeded: number;
   totalSkippedDuplicates: number;
@@ -862,7 +894,8 @@ export type CalendarActivityType =
   | 'task_due'
   | 'follow_up'
   | 'opportunity_action'
-  | 'opportunity_close';
+  | 'opportunity_close'
+  | 'playbook_step';
 
 export type CalendarFilterScope =
   | 'all'
@@ -879,6 +912,7 @@ export interface CalendarSettings {
   showTasks: boolean;
   showFollowUps: boolean;
   showOpportunities: boolean;
+  showPlaybooks?: boolean;
   showCancelledMeetings: boolean;
   workingDayStartHour: number; // e.g. 8
   workingDayEndHour: number; // e.g. 18
@@ -914,6 +948,8 @@ export interface CalendarEventItem {
   taskRef?: ActionItem;
   opportunityRef?: Opportunity;
   interactionRef?: CommunicationInteraction;
+  playbookRunRef?: PlaybookRun;
+  playbookStepId?: string;
 }
 
 export interface CalendarDayCell {
@@ -1271,4 +1307,115 @@ export interface MeetingAiBriefingResult {
   generatedAt: string;
   modelUsed: string;
 }
+
+// =========================================================================
+// Task 013: Relationship Playbooks & Follow-Up Sequences Types
+// =========================================================================
+
+export type PlaybookCategory =
+  | 'lead_engagement'
+  | 'proposal_follow_up'
+  | 'post_meeting'
+  | 'relationship_reactivation'
+  | 'custom';
+
+export type PlaybookStepType = 'task' | 'communication' | 'manual';
+
+export type PlaybookDuePolicyType = 'from_start' | 'after_previous_completion';
+
+export interface PlaybookDuePolicy {
+  type: PlaybookDuePolicyType;
+  offsetDays: number;
+}
+
+export interface PlaybookTemplateStep {
+  id: string;
+  title: string;
+  description?: string;
+  stepType: PlaybookStepType;
+  order: number;
+  duePolicy: PlaybookDuePolicy;
+  priority?: TaskPriority;
+  suggestedChannel?: CommunicationChannel;
+}
+
+export interface PlaybookTemplate {
+  id: string;
+  userId?: string;
+  name: string;
+  description?: string;
+  category: PlaybookCategory;
+  steps: PlaybookTemplateStep[];
+  isSystemTemplate: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type PlaybookRunStatus = 'active' | 'paused' | 'completed' | 'cancelled';
+
+export type PlaybookStepStatus = 'pending' | 'in_progress' | 'completed' | 'skipped';
+
+export type PlaybookStepCompletionMethod = 'manual' | 'linked_task' | 'linked_communication';
+
+export interface PlaybookRunStep {
+  id: string;
+  title: string;
+  description?: string;
+  stepType: PlaybookStepType;
+  order: number;
+  status: PlaybookStepStatus;
+  duePolicy: PlaybookDuePolicy;
+  dueDate?: string; // Strict YYYY-MM-DD when resolved; undefined when awaiting prerequisite completion
+  priority?: TaskPriority;
+  suggestedChannel?: CommunicationChannel;
+  startedAt?: string;
+  completedAt?: string;
+  skippedAt?: string;
+  linkedTaskId?: string;
+  linkedInteractionId?: string;
+  completionMethod?: PlaybookStepCompletionMethod;
+  note?: string;
+}
+
+export interface PlaybookRun {
+  id: string;
+  userId?: string;
+  templateId?: string;
+  templateName: string;
+  clientId: string;
+  opportunityId?: string;
+  status: PlaybookRunStatus;
+  steps: PlaybookRunStep[];
+  startDateKey?: string; // Strict YYYY-MM-DD calendar date on which the playbook starts
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  pausedAt?: string;
+  cancelledAt?: string;
+  cancelReason?: string;
+  revision?: number;
+}
+
+export interface PlaybookProgressMetrics {
+  totalStepsCount: number;
+  completedStepsCount: number;
+  skippedStepsCount: number;
+  inProgressStepsCount: number;
+  pendingStepsCount: number;
+  actionableRemainingCount: number;
+  completionRatio: number;
+  completionPercent: number;
+  isReadyToFinish: boolean;
+}
+
+export interface PlaybookRescheduleSuggestion {
+  runId: string;
+  stepId: string;
+  stepTitle: string;
+  linkedTaskId: string;
+  currentTaskDueDate: string;
+  suggestedDueDate: string;
+  reasonAr: string;
+}
+
 

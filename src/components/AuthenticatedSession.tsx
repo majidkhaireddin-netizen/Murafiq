@@ -18,6 +18,10 @@ import {
   FollowUpPreferences,
   ReminderItem,
   SnoozePreset,
+  PlaybookTemplate,
+  PlaybookRun,
+  PlaybookRunStep,
+  PlaybookRescheduleSuggestion,
 } from '../types';
 import { categorizeTasks } from '../utils/logic';
 import {
@@ -36,7 +40,7 @@ import { BottomNav, NavTab } from './BottomNav';
 import { DashboardView } from './views/DashboardView';
 import { TodayView } from './views/TodayView';
 import { ClientsView, ClientsFilterTrigger } from './views/ClientsView';
-import { CommunicationsView } from './views/CommunicationsView';
+import { CommunicationsView, CommunicationsSubTab } from './views/CommunicationsView';
 import { OpportunitiesView } from './views/OpportunitiesView';
 import { MeetingsView, MeetingsFilterTrigger } from './views/MeetingsView';
 import { TasksView, TasksFilterTrigger } from './views/TasksView';
@@ -58,6 +62,16 @@ import { BiometricLockModal } from './BiometricLockModal';
 import { SearchModal } from './SearchModal';
 import { SettingsModal } from './SettingsModal';
 import { ConflictResolutionModal } from './ConflictResolutionModal';
+import { PlaybookStartModal } from './PlaybookStartModal';
+import { PlaybookTemplateEditorModal } from './PlaybookTemplateEditorModal';
+import {
+  AtomicStepTaskCreationOutcome,
+  checkPlaybookRunRevisionConflict,
+  executeAtomicStepTaskConversion,
+  linkCommunicationToPlaybookStep,
+  sanitizePlaybookRunForSave,
+  sanitizePlaybookTemplateForSave,
+} from '../utils/playbookEngine';
 import {
   computeCommunicationCenterSummary,
   unlinkInteractionReferencesOnDelete,
@@ -110,6 +124,13 @@ import {
   saveReminderState as fbSaveReminderState,
   deleteReminderState as fbDeleteReminderState,
   saveFollowUpPreferences as fbSaveFollowUpPreferences,
+  subscribePlaybookTemplates,
+  subscribePlaybookRuns,
+  savePlaybookTemplate as fbSavePlaybookTemplate,
+  deletePlaybookTemplate as fbDeletePlaybookTemplate,
+  savePlaybookRun as fbSavePlaybookRun,
+  deletePlaybookRun as fbDeletePlaybookRun,
+  firestorePlaybookAtomicAdapter,
 } from '../services/firebase';
 import { AlertTriangle, WifiOff, RefreshCw, X, Download, Copy, Check } from 'lucide-react';
 import {
@@ -149,6 +170,8 @@ export function AuthenticatedSession({
     ...DEFAULT_FOLLOW_UP_PREFERENCES,
     userId: user.uid,
   }));
+  const [playbookTemplates, setPlaybookTemplates] = useState<PlaybookTemplate[]>([]);
+  const [playbookRuns, setPlaybookRuns] = useState<PlaybookRun[]>([]);
 
   // Live clock referenceDate so day rollovers, overdue transitions, imminent meetings, and snooze wake-ups update dynamically
   const [referenceDate, setReferenceDate] = useState<Date>(() => new Date());
@@ -163,6 +186,9 @@ export function AuthenticatedSession({
   const interactionsRef = useRef<CommunicationInteraction[]>(interactions);
   const remindersRef = useRef<ReminderStateRecord[]>(reminders);
   const followUpPrefsRef = useRef<FollowUpPreferences>(followUpPreferences);
+  const playbookTemplatesRef = useRef<PlaybookTemplate[]>(playbookTemplates);
+  const playbookRunsRef = useRef<PlaybookRun[]>(playbookRuns);
+  const knownPlaybookRunRevisionRef = useRef<Map<string, number>>(new Map());
   clientsRef.current = clients;
   meetingsRef.current = meetings;
   tasksRef.current = tasks;
@@ -172,6 +198,8 @@ export function AuthenticatedSession({
   interactionsRef.current = interactions;
   remindersRef.current = reminders;
   followUpPrefsRef.current = followUpPreferences;
+  playbookTemplatesRef.current = playbookTemplates;
+  playbookRunsRef.current = playbookRuns;
 
   // Operation-scoped coordinators (prevent cross-entity or out-of-order array clobbering)
   const clientOpsRef = useRef(new OperationCoordinator<Client>());
@@ -183,6 +211,8 @@ export function AuthenticatedSession({
   const interactionOpsRef = useRef(new OperationCoordinator<CommunicationInteraction>());
   const reminderOpsRef = useRef(new OperationCoordinator<ReminderStateRecord>());
   const followUpPrefOpsRef = useRef(new OperationCoordinator<FollowUpPreferences>());
+  const playbookTemplateOpsRef = useRef(new OperationCoordinator<PlaybookTemplate>());
+  const playbookRunOpsRef = useRef(new OperationCoordinator<PlaybookRun>());
 
   // Track active in-flight deletes per collection so pending counts stay accurate when docs leave local snapshots
   const pendingDeleteIdsRef = useRef<Record<CollectionKey, Set<string>>>({
@@ -195,6 +225,8 @@ export function AuthenticatedSession({
     interactions: new Set(),
     reminders: new Set(),
     preferences: new Set(),
+    playbookTemplates: new Set(),
+    playbookRuns: new Set(),
   });
 
   // Connectivity & Cache Runtime Status
@@ -215,6 +247,8 @@ export function AuthenticatedSession({
     interactions: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
     reminders: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
     preferences: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
+    playbookTemplates: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
+    playbookRuns: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
   });
 
   // Preserved rejected writes (stored ONLY in React session memory — never auto-saved to localStorage)
@@ -292,6 +326,23 @@ export function AuthenticatedSession({
     defaultOpportunityId?: string;
     defaultChannel?: CommunicationChannel;
   }>({ isOpen: false });
+  const [communicationsSubTab, setCommunicationsSubTab] =
+    useState<CommunicationsSubTab>('interactions');
+  const [selectedPlaybookRunId, setSelectedPlaybookRunId] = useState<string | null>(null);
+  const [playbookStartModalState, setPlaybookStartModalState] = useState<{
+    isOpen: boolean;
+    defaultTemplateId?: string;
+    defaultClientId?: string;
+    defaultOpportunityId?: string;
+  }>({ isOpen: false });
+  const [playbookTemplateEditorState, setPlaybookTemplateEditorState] = useState<{
+    isOpen: boolean;
+    initialTemplate?: PlaybookTemplate | null;
+  }>({ isOpen: false });
+  const [pendingInteractionStepContext, setPendingInteractionStepContext] = useState<{
+    runId: string;
+    stepId: string;
+  } | null>(null);
 
   // Listen to browser online/offline transitions + live 60s / visibility clock refresh
   useEffect(() => {
@@ -608,6 +659,95 @@ export function AuthenticatedSession({
       }
     );
 
+    const unsubPlaybookTemplates = subscribePlaybookTemplates(
+      (data, meta) => {
+        if (!isSubscribed) return;
+        playbookTemplatesRef.current = data;
+        setPlaybookTemplates(data);
+        setCollectionSync((prev) => ({
+          ...prev,
+          playbookTemplates: {
+            loaded: true,
+            hasPendingWrites: meta.hasPendingWrites,
+            fromCache: meta.fromCache,
+            hasError: false,
+            pendingDocIds: meta.pendingDocIds,
+            pendingDeletesCount: pendingDeleteIdsRef.current.playbookTemplates.size,
+          },
+        }));
+      },
+      (err) => {
+        if (!isSubscribed) return;
+        console.warn(`[User ${sessionUid}] PlaybookTemplates subscription warning:`, err);
+        setCollectionSync((prev) => ({
+          ...prev,
+          playbookTemplates: { ...prev.playbookTemplates, hasError: true },
+        }));
+      }
+    );
+
+    const unsubPlaybookRuns = subscribePlaybookRuns(
+      (data, meta) => {
+        if (!isSubscribed) return;
+        const pendingSet = new Set(meta.pendingDocIds);
+        if (!meta.fromCache) {
+          const detectedConflicts: ConflictItem[] = [];
+          for (const remoteRun of data) {
+            const localRun = playbookRunsRef.current.find((r) => r.id === remoteRun.id);
+            const expectedBase = knownPlaybookRunRevisionRef.current.get(remoteRun.id);
+            if (
+              localRun &&
+              pendingSet.has(remoteRun.id) &&
+              typeof expectedBase === 'number'
+            ) {
+              const conflict = checkPlaybookRunRevisionConflict({
+                localRun,
+                remoteRun,
+                expectedBaseRevision: expectedBase,
+              });
+              if (conflict) detectedConflicts.push(conflict);
+            } else if (!pendingSet.has(remoteRun.id)) {
+              knownPlaybookRunRevisionRef.current.set(
+                remoteRun.id,
+                remoteRun.revision ?? 1
+              );
+            }
+          }
+          if (detectedConflicts.length > 0) {
+            setConflicts((prev) => {
+              const existingIds = new Set(prev.map((c) => c.id));
+              const merged = [...prev];
+              for (const c of detectedConflicts) {
+                if (!existingIds.has(c.id)) merged.push(c);
+              }
+              return merged;
+            });
+          }
+        }
+        playbookRunsRef.current = data;
+        setPlaybookRuns(data);
+        setCollectionSync((prev) => ({
+          ...prev,
+          playbookRuns: {
+            loaded: true,
+            hasPendingWrites: meta.hasPendingWrites,
+            fromCache: meta.fromCache,
+            hasError: false,
+            pendingDocIds: meta.pendingDocIds,
+            pendingDeletesCount: pendingDeleteIdsRef.current.playbookRuns.size,
+          },
+        }));
+      },
+      (err) => {
+        if (!isSubscribed) return;
+        console.warn(`[User ${sessionUid}] PlaybookRuns subscription warning:`, err);
+        setCollectionSync((prev) => ({
+          ...prev,
+          playbookRuns: { ...prev.playbookRuns, hasError: true },
+        }));
+      }
+    );
+
     return () => {
       isSubscribed = false;
       clearAttachmentDownloadCache();
@@ -620,6 +760,8 @@ export function AuthenticatedSession({
       unsubInteractions();
       unsubReminders();
       unsubFollowUpPrefs();
+      unsubPlaybookTemplates();
+      unsubPlaybookRuns();
     };
   }, [user.uid]);
 
@@ -656,7 +798,9 @@ export function AuthenticatedSession({
       | OpportunityStageEvent
       | CommunicationInteraction
       | ReminderStateRecord
-      | FollowUpPreferences;
+      | FollowUpPreferences
+      | PlaybookTemplate
+      | PlaybookRun;
     wasSuperseded?: boolean;
   }) => {
     if (params.wasSuperseded) return;
@@ -793,11 +937,12 @@ export function AuthenticatedSession({
         tasks,
         opportunities,
         interactions,
+        playbookRuns,
         persistedStates: reminders,
         preferences: followUpPreferences,
         referenceDate,
       }),
-    [clients, meetings, tasks, opportunities, interactions, reminders, followUpPreferences, referenceDate]
+    [clients, meetings, tasks, opportunities, interactions, playbookRuns, reminders, followUpPreferences, referenceDate]
   );
 
   const commCenterSummary = useMemo(
@@ -820,6 +965,7 @@ export function AuthenticatedSession({
       tasks,
       opportunities,
       interactions,
+      playbookRuns,
       currentUserId: user.uid,
       referenceDate,
       timeZone: getLocalTimeZoneName(),
@@ -831,7 +977,7 @@ export function AuthenticatedSession({
       filterScope: 'all',
     });
     return detectCalendarConflicts(events).length;
-  }, [clients, meetings, tasks, opportunities, interactions, user.uid, referenceDate, calendarSettings]);
+  }, [clients, meetings, tasks, opportunities, interactions, playbookRuns, user.uid, referenceDate, calendarSettings]);
 
   const handleUpdateCalendarSettings = (patch: Partial<CalendarSettings>) => {
     setCalendarSettings((prev) => {
@@ -1603,6 +1749,23 @@ export function AuthenticatedSession({
         userId: user.uid,
       });
     }
+    if (pendingInteractionStepContext) {
+      const targetRun = playbookRunsRef.current.find(
+        (r) => r.id === pendingInteractionStepContext.runId
+      );
+      if (targetRun && targetRun.clientId === interaction.clientId) {
+        const linkedRes = linkCommunicationToPlaybookStep({
+          run: targetRun,
+          stepId: pendingInteractionStepContext.stepId,
+          interaction,
+          currentUserId: user.uid,
+        });
+        if (linkedRes.ok && linkedRes.run) {
+          void handleSavePlaybookRun(linkedRes.run);
+        }
+      }
+      setPendingInteractionStepContext(null);
+    }
   };
 
   const handleDeleteInteraction = async (interactionId: string): Promise<void> => {
@@ -1846,6 +2009,254 @@ export function AuthenticatedSession({
     });
   };
 
+  // Task 013: Playbook Templates & Runs Mutations
+  const handleSavePlaybookTemplate = (template: PlaybookTemplate): void => {
+    const clean = sanitizePlaybookTemplateForSave(
+      { ...template, userId: user.uid, isSystemTemplate: false },
+      user.uid
+    );
+    const prevEntity = playbookTemplatesRef.current.find((t) => t.id === clean.id);
+    const applyUpsert = (prev: PlaybookTemplate[]) => {
+      const idx = prev.findIndex((t) => t.id === clean.id);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = clean;
+        return next;
+      }
+      return [clean, ...prev];
+    };
+    playbookTemplatesRef.current = applyUpsert(playbookTemplatesRef.current);
+
+    playbookTemplateOpsRef.current.runScopedMutation({
+      entityId: clean.id,
+      entityType: 'playbookTemplate',
+      previousEntity: prevEntity,
+      setState: setPlaybookTemplates,
+      applyOptimistic: applyUpsert,
+      dispatchWrite: () => fbSavePlaybookTemplate(clean),
+      onServerConfirmed: ({ wasSuperseded }) => {
+        clearRejectedForEntity('playbookTemplate', clean.id, wasSuperseded);
+      },
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+        console.warn('Save playbookTemplate rejected by server:', error);
+        recordRejectedWrite({
+          opId,
+          entityType: 'playbookTemplate',
+          entityId: clean.id,
+          entityTitle: clean.name,
+          operation: 'save',
+          classification,
+          error,
+          payload: clean,
+          wasSuperseded,
+        });
+      },
+    });
+  };
+
+  const handleDeletePlaybookTemplate = (templateId: string): void => {
+    const prevEntity = playbookTemplatesRef.current.find((t) => t.id === templateId);
+    const applyDelete = (prev: PlaybookTemplate[]) => prev.filter((t) => t.id !== templateId);
+    playbookTemplatesRef.current = applyDelete(playbookTemplatesRef.current);
+    markDeleteInFlight('playbookTemplates', templateId, true);
+
+    playbookTemplateOpsRef.current.runScopedMutation({
+      entityId: templateId,
+      entityType: 'playbookTemplate',
+      isDelete: true,
+      previousEntity: prevEntity,
+      setState: setPlaybookTemplates,
+      applyOptimistic: applyDelete,
+      dispatchWrite: () => fbDeletePlaybookTemplate(templateId),
+      onServerConfirmed: ({ wasSuperseded }) => {
+        markDeleteInFlight('playbookTemplates', templateId, false);
+        clearRejectedForEntity('playbookTemplate', templateId, wasSuperseded);
+      },
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+        markDeleteInFlight('playbookTemplates', templateId, false);
+        console.warn('Delete playbookTemplate rejected by server:', error);
+        recordRejectedWrite({
+          opId,
+          entityType: 'playbookTemplate',
+          entityId: templateId,
+          entityTitle: prevEntity?.name || templateId,
+          operation: 'delete',
+          classification,
+          error,
+          payload: prevEntity,
+          wasSuperseded,
+        });
+      },
+    });
+  };
+
+  const handleSavePlaybookRun = (run: PlaybookRun): void => {
+    const clean = sanitizePlaybookRunForSave({ ...run, userId: user.uid }, user.uid);
+    const prevEntity = playbookRunsRef.current.find((r) => r.id === clean.id);
+    const applyUpsert = (prev: PlaybookRun[]) => {
+      const idx = prev.findIndex((r) => r.id === clean.id);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = clean;
+        return next;
+      }
+      return [clean, ...prev];
+    };
+    playbookRunsRef.current = applyUpsert(playbookRunsRef.current);
+
+    playbookRunOpsRef.current.runScopedMutation({
+      entityId: clean.id,
+      entityType: 'playbookRun',
+      previousEntity: prevEntity,
+      setState: setPlaybookRuns,
+      applyOptimistic: applyUpsert,
+      dispatchWrite: () => fbSavePlaybookRun(clean),
+      onServerConfirmed: ({ wasSuperseded }) => {
+        knownPlaybookRunRevisionRef.current.set(clean.id, clean.revision ?? 1);
+        clearRejectedForEntity('playbookRun', clean.id, wasSuperseded);
+      },
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+        console.warn('Save playbookRun rejected by server:', error);
+        recordRejectedWrite({
+          opId,
+          entityType: 'playbookRun',
+          entityId: clean.id,
+          entityTitle: clean.templateName,
+          operation: 'save',
+          classification,
+          error,
+          payload: clean,
+          wasSuperseded,
+        });
+      },
+    });
+  };
+
+  const handleDeletePlaybookRun = (runId: string): void => {
+    const prevEntity = playbookRunsRef.current.find((r) => r.id === runId);
+    const applyDelete = (prev: PlaybookRun[]) => prev.filter((r) => r.id !== runId);
+    playbookRunsRef.current = applyDelete(playbookRunsRef.current);
+    markDeleteInFlight('playbookRuns', runId, true);
+
+    playbookRunOpsRef.current.runScopedMutation({
+      entityId: runId,
+      entityType: 'playbookRun',
+      isDelete: true,
+      previousEntity: prevEntity,
+      setState: setPlaybookRuns,
+      applyOptimistic: applyDelete,
+      dispatchWrite: () => fbDeletePlaybookRun(runId),
+      onServerConfirmed: ({ wasSuperseded }) => {
+        markDeleteInFlight('playbookRuns', runId, false);
+        clearRejectedForEntity('playbookRun', runId, wasSuperseded);
+      },
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+        markDeleteInFlight('playbookRuns', runId, false);
+        console.warn('Delete playbookRun rejected by server:', error);
+        recordRejectedWrite({
+          opId,
+          entityType: 'playbookRun',
+          entityId: runId,
+          entityTitle: prevEntity?.templateName || runId,
+          operation: 'delete',
+          classification,
+          error,
+          payload: prevEntity,
+          wasSuperseded,
+        });
+      },
+    });
+  };
+
+  const handleAtomicConvertPlaybookStepToTask = async (
+    run: PlaybookRun,
+    stepId: string
+  ): Promise<AtomicStepTaskCreationOutcome> => {
+    const outcome = await executeAtomicStepTaskConversion(
+      {
+        userId: user.uid,
+        run,
+        stepId,
+        isOnline,
+      },
+      firestorePlaybookAtomicAdapter
+    );
+
+    if (outcome.ok) {
+      if (outcome.task) {
+        const syncedTask = outcome.task;
+        setTasks((prev) => {
+          const exists = prev.some((t) => t.id === syncedTask.id);
+          const next = exists
+            ? prev.map((t) => (t.id === syncedTask.id ? syncedTask : t))
+            : [syncedTask, ...prev];
+          tasksRef.current = next;
+          return next;
+        });
+      }
+      if (outcome.run) {
+        const syncedRun = outcome.run;
+        knownPlaybookRunRevisionRef.current.set(syncedRun.id, syncedRun.revision ?? 1);
+        setPlaybookRuns((prev) => {
+          const exists = prev.some((r) => r.id === syncedRun.id);
+          const next = exists
+            ? prev.map((r) => (r.id === syncedRun.id ? syncedRun : r))
+            : [syncedRun, ...prev];
+          playbookRunsRef.current = next;
+          return next;
+        });
+      }
+    }
+    return outcome;
+  };
+
+  const handleApprovePlaybookRescheduleSuggestion = (
+    suggestion: PlaybookRescheduleSuggestion,
+    applyToLinkedTask: boolean
+  ) => {
+    const targetRun = playbookRunsRef.current.find((r) => r.id === suggestion.runId);
+    if (targetRun) {
+      const nextSteps = targetRun.steps.map((s) =>
+        s.id === suggestion.stepId ? { ...s, dueDate: suggestion.suggestedDueDate } : s
+      );
+      handleSavePlaybookRun({
+        ...targetRun,
+        steps: nextSteps,
+        updatedAt: new Date().toISOString(),
+        revision: (targetRun.revision ?? 1) + 1,
+      });
+    }
+
+    if (applyToLinkedTask) {
+      const targetTask = tasksRef.current.find((t) => t.id === suggestion.linkedTaskId);
+      if (targetTask) {
+        void handleSaveTask({
+          ...targetTask,
+          dueDate: suggestion.suggestedDueDate,
+        });
+      }
+    }
+  };
+
+  const handleOpenStartPlaybook = (defaults?: {
+    templateId?: string;
+    clientId?: string;
+    opportunityId?: string;
+  }) => {
+    setPlaybookStartModalState({
+      isOpen: true,
+      defaultTemplateId: defaults?.templateId,
+      defaultClientId: defaults?.clientId,
+      defaultOpportunityId: defaults?.opportunityId,
+    });
+  };
+
+  const handleOpenPlaybookRun = (runId: string) => {
+    setSelectedPlaybookRunId(runId);
+    setCommunicationsSubTab('playbooks');
+    setActiveTab('communications');
+  };
+
   // Retry a rejected write using its preserved payload
   const handleRetryRejectedWrite = (rec: RejectedWriteRecord) => {
     clearRejectedForEntity(rec.entityType, rec.entityId);
@@ -1865,6 +2276,10 @@ export function AuthenticatedSession({
         void handleDeleteInteraction(rec.entityId);
       } else if (rec.entityType === 'reminder') {
         handleDeleteReminderState(rec.entityId);
+      } else if (rec.entityType === 'playbookTemplate') {
+        handleDeletePlaybookTemplate(rec.entityId);
+      } else if (rec.entityType === 'playbookRun') {
+        handleDeletePlaybookRun(rec.entityId);
       }
       return;
     }
@@ -1884,6 +2299,10 @@ export function AuthenticatedSession({
       handleSaveReminderState(rec.payload as ReminderStateRecord);
     } else if (rec.entityType === 'preference') {
       handleUpdateFollowUpPreferences(rec.payload as FollowUpPreferences);
+    } else if (rec.entityType === 'playbookTemplate') {
+      handleSavePlaybookTemplate(rec.payload as PlaybookTemplate);
+    } else if (rec.entityType === 'playbookRun') {
+      handleSavePlaybookRun(rec.payload as PlaybookRun);
     }
   };
 
@@ -1911,6 +2330,18 @@ export function AuthenticatedSession({
       } else if (conflict.entityType === 'note') {
         const resolved = resolveConflictRecord<Note>(conflict, choice, customMergedNotes);
         void handleSaveNote(resolved);
+      } else if (conflict.entityType === 'playbookTemplate') {
+        const resolved = resolveConflictRecord<PlaybookTemplate>(conflict, choice, customMergedNotes);
+        handleSavePlaybookTemplate(resolved);
+      } else if (conflict.entityType === 'playbookRun') {
+        const resolved = resolveConflictRecord<PlaybookRun>(conflict, choice, customMergedNotes);
+        const maxRev = Math.max(
+          (conflict.localVersion as PlaybookRun).revision ?? 1,
+          (conflict.remoteVersion as PlaybookRun).revision ?? 1
+        );
+        const withNextRev: PlaybookRun = { ...resolved, revision: maxRev + 1 };
+        knownPlaybookRunRevisionRef.current.set(withNextRev.id, withNextRev.revision!);
+        handleSavePlaybookRun(withNextRev);
       }
     }
 
@@ -2082,6 +2513,17 @@ export function AuthenticatedSession({
       const inter = interactionsRef.current.find((i) => i.id === reminder.sourceId);
       if (inter) {
         handleEditInteraction(inter);
+        return;
+      }
+    }
+    if (reminder.sourceType === 'playbook_step') {
+      const targetRunId =
+        reminder.playbookRunId ||
+        (reminder.sourceId.includes('__step__')
+          ? reminder.sourceId.split('__step__')[0]
+          : reminder.sourceId);
+      if (targetRunId && playbookRunsRef.current.some((r) => r.id === targetRunId)) {
+        handleOpenPlaybookRun(targetRunId);
         return;
       }
     }
@@ -2356,6 +2798,7 @@ export function AuthenticatedSession({
               meetings={meetings}
               tasks={tasks}
               opportunities={opportunities}
+              playbookRuns={playbookRuns}
               categorizedDaily={categorizedDaily}
               upcomingMeetings={upcomingMeetingsForToday}
               clientFollowUps={clientFollowUps}
@@ -2404,6 +2847,8 @@ export function AuthenticatedSession({
                 setSelectedOpportunityId(opp.id);
                 setActiveTab('opportunities');
               }}
+              onOpenPlaybookRun={handleOpenPlaybookRun}
+              onStartPlaybook={() => handleOpenStartPlaybook()}
               onNewTask={handleOpenNewTask}
               onNewMeeting={handleOpenNewMeeting}
               onNewNote={handleOpenNewNote}
@@ -2427,6 +2872,7 @@ export function AuthenticatedSession({
               tasks={tasks}
               opportunities={opportunities}
               interactions={interactions}
+              playbookRuns={playbookRuns}
               currentUserId={user.uid}
               referenceDate={referenceDate}
               isOnline={isOnline}
@@ -2436,13 +2882,15 @@ export function AuthenticatedSession({
                 tasks: collectionSync.tasks.loaded,
                 opportunities: collectionSync.opportunities.loaded,
                 interactions: collectionSync.interactions.loaded,
+                playbookRuns: collectionSync.playbookRuns.loaded,
               }}
               hasPendingWrites={
                 collectionSync.clients.hasPendingWrites ||
                 collectionSync.meetings.hasPendingWrites ||
                 collectionSync.tasks.hasPendingWrites ||
                 collectionSync.opportunities.hasPendingWrites ||
-                collectionSync.interactions.hasPendingWrites
+                collectionSync.interactions.hasPendingWrites ||
+                collectionSync.playbookRuns.hasPendingWrites
               }
               calendarSettings={calendarSettings}
               onUpdateCalendarSettings={handleUpdateCalendarSettings}
@@ -2464,6 +2912,7 @@ export function AuthenticatedSession({
                 setSelectedOpportunityId(opp.id);
                 setActiveTab('opportunities');
               }}
+              onOpenPlaybookRun={handleOpenPlaybookRun}
               onCreateNewMeeting={({ clientId, dateTimeIso }) =>
                 handleOpenNewMeeting(clientId, undefined, dateTimeIso)
               }
@@ -2489,6 +2938,7 @@ export function AuthenticatedSession({
               notes={notes}
               opportunities={opportunities}
               interactions={interactions}
+              playbookRuns={playbookRuns}
               onSelectMeeting={(m: Meeting) => {
                 setSelectedMeetingId(m.id);
                 setMeetingInitialTab('all');
@@ -2511,6 +2961,10 @@ export function AuthenticatedSession({
               }}
               onOpenClientCalendar={(clientId: string) =>
                 handleNavigateToCalendar({ mode: 'month', clientId })
+              }
+              onOpenPlaybookRun={handleOpenPlaybookRun}
+              onStartPlaybookForClient={(clientId: string) =>
+                handleOpenStartPlaybook({ clientId })
               }
               onLogInteraction={handleOpenNewInteraction}
               onEditInteraction={handleEditInteraction}
@@ -2556,6 +3010,18 @@ export function AuthenticatedSession({
               tasks={tasks}
               opportunities={opportunities}
               interactions={interactions}
+              playbookRuns={playbookRuns}
+              customPlaybookTemplates={playbookTemplates}
+              currentUserId={user.uid}
+              isOnline={isOnline}
+              playbooksLoading={
+                !collectionSync.playbookRuns.loaded ||
+                !collectionSync.playbookTemplates.loaded
+              }
+              playbookSubTab={communicationsSubTab}
+              onChangePlaybookSubTab={setCommunicationsSubTab}
+              selectedPlaybookRunId={selectedPlaybookRunId}
+              onSelectPlaybookRun={setSelectedPlaybookRunId}
               staleThresholdDays={followUpPreferences.staleClientDays}
               language={language}
               onOpenNewInteraction={handleOpenNewInteraction}
@@ -2575,6 +3041,30 @@ export function AuthenticatedSession({
                 setActiveTab('opportunities');
               }}
               onNavigateToTasks={() => setActiveTab('tasks')}
+              onOpenTask={handleOpenExistingTask}
+              onOpenStartPlaybook={handleOpenStartPlaybook}
+              onOpenCreatePlaybookTemplate={() =>
+                setPlaybookTemplateEditorState({ isOpen: true, initialTemplate: null })
+              }
+              onOpenEditPlaybookTemplate={(tpl) =>
+                setPlaybookTemplateEditorState({ isOpen: true, initialTemplate: tpl })
+              }
+              onSavePlaybookTemplate={handleSavePlaybookTemplate}
+              onDeletePlaybookTemplate={handleDeletePlaybookTemplate}
+              onSavePlaybookRun={handleSavePlaybookRun}
+              onSaveTask={(t) => {
+                void handleSaveTask(t);
+              }}
+              onAtomicConvertStepToTask={handleAtomicConvertPlaybookStepToTask}
+              onApprovePlaybookRescheduleSuggestion={handleApprovePlaybookRescheduleSuggestion}
+              onLogCommunicationForPlaybookStep={({ run, step, suggestedChannel }) => {
+                setPendingInteractionStepContext({ runId: run.id, stepId: step.id });
+                handleOpenNewInteraction({
+                  clientId: run.clientId,
+                  opportunityId: run.opportunityId,
+                  channel: suggestedChannel || step.suggestedChannel,
+                });
+              }}
             />
           )}
 
@@ -2586,6 +3076,7 @@ export function AuthenticatedSession({
               meetings={meetings}
               tasks={tasks}
               interactions={interactions}
+              playbookRuns={playbookRuns}
               selectedOpportunityId={selectedOpportunityId}
               onSelectOpportunity={setSelectedOpportunityId}
               onSaveOpportunity={handleSaveOpportunity}
@@ -2620,6 +3111,10 @@ export function AuthenticatedSession({
                 const task = tasksRef.current.find((t) => t.id === taskId);
                 if (task) handleOpenExistingTask(task);
               }}
+              onOpenPlaybookRun={handleOpenPlaybookRun}
+              onStartPlaybookForOpportunity={(opp: Opportunity) =>
+                handleOpenStartPlaybook({ clientId: opp.clientId, opportunityId: opp.id })
+              }
               createTrigger={opportunityCreateTrigger}
               isLoading={!collectionSync.opportunities.loaded}
               syncState={syncSummary.syncState}
@@ -2686,6 +3181,7 @@ export function AuthenticatedSession({
               clients={clients}
               meetings={meetings}
               opportunities={opportunities}
+              playbookRuns={playbookRuns}
               onToggleTask={handleToggleTask}
               onSaveTask={handleSaveTaskWithResult}
               onDeleteTask={handleDeleteTask}
@@ -2693,6 +3189,7 @@ export function AuthenticatedSession({
                 setSelectedOpportunityId(oppId);
                 setActiveTab('opportunities');
               }}
+              onOpenPlaybookRun={handleOpenPlaybookRun}
               onScheduleInCalendar={(task: ActionItem) =>
                 handleNavigateToCalendar({
                   mode: 'planner',
@@ -2745,7 +3242,10 @@ export function AuthenticatedSession({
       {/* Global Modals within User Session Boundary */}
       <InteractionFormModal
         isOpen={interactionModalState.isOpen}
-        onClose={() => setInteractionModalState((prev) => ({ ...prev, isOpen: false }))}
+        onClose={() => {
+          setInteractionModalState((prev) => ({ ...prev, isOpen: false }));
+          setPendingInteractionStepContext(null);
+        }}
         clients={clients}
         opportunities={opportunities}
         tasks={tasks}
@@ -2757,6 +3257,33 @@ export function AuthenticatedSession({
         onSaveInteraction={(interaction, followUpTaskDraft) => {
           void handleSaveInteraction(interaction, followUpTaskDraft);
         }}
+      />
+
+      <PlaybookStartModal
+        isOpen={playbookStartModalState.isOpen}
+        onClose={() => setPlaybookStartModalState({ isOpen: false })}
+        customTemplates={playbookTemplates}
+        clients={clients}
+        opportunities={opportunities}
+        existingRuns={playbookRuns}
+        currentUserId={user.uid}
+        defaultTemplateId={playbookStartModalState.defaultTemplateId}
+        defaultClientId={playbookStartModalState.defaultClientId}
+        defaultOpportunityId={playbookStartModalState.defaultOpportunityId}
+        language={language}
+        onStartRun={(run) => {
+          handleSavePlaybookRun(run);
+          handleOpenPlaybookRun(run.id);
+        }}
+      />
+
+      <PlaybookTemplateEditorModal
+        isOpen={playbookTemplateEditorState.isOpen}
+        onClose={() => setPlaybookTemplateEditorState({ isOpen: false, initialTemplate: null })}
+        initialTemplate={playbookTemplateEditorState.initialTemplate}
+        currentUserId={user.uid}
+        language={language}
+        onSaveTemplate={handleSavePlaybookTemplate}
       />
 
       {isBiometricLocked && (
@@ -2772,7 +3299,7 @@ export function AuthenticatedSession({
         <SearchModal
           isOpen={isSearchOpen}
           onClose={() => setIsSearchOpen(false)}
-          data={{ clients, meetings, tasks, notes, opportunities, interactions }}
+          data={{ clients, meetings, tasks, notes, opportunities, interactions, playbookRuns }}
           currentUserId={user.uid}
           collectionsLoaded={{
             clients: collectionSync.clients.loaded,
@@ -2781,6 +3308,7 @@ export function AuthenticatedSession({
             notes: collectionSync.notes.loaded,
             opportunities: collectionSync.opportunities.loaded,
             interactions: collectionSync.interactions.loaded,
+            playbookRuns: collectionSync.playbookRuns.loaded,
           }}
           onSelectClient={(client: Client) => {
             setSelectedClientId(client.id);
@@ -2803,6 +3331,9 @@ export function AuthenticatedSession({
           }}
           onSelectInteraction={(inter: CommunicationInteraction) => {
             handleEditInteraction(inter);
+          }}
+          onSelectPlaybookRun={(run: PlaybookRun) => {
+            handleOpenPlaybookRun(run.id);
           }}
           language={language}
         />
@@ -2841,6 +3372,8 @@ export function AuthenticatedSession({
           opportunities={opportunities}
           opportunityStageEvents={opportunityStageEvents}
           interactions={interactions}
+          playbookTemplates={playbookTemplates}
+          playbookRuns={playbookRuns}
           isOnline={isOnline}
           collectionsLoaded={{
             clients: collectionSync.clients.loaded,
@@ -2850,6 +3383,8 @@ export function AuthenticatedSession({
             opportunities: collectionSync.opportunities.loaded,
             opportunityStageEvents: collectionSync.opportunityStageEvents.loaded,
             interactions: collectionSync.interactions.loaded,
+            playbookTemplates: collectionSync.playbookTemplates.loaded,
+            playbookRuns: collectionSync.playbookRuns.loaded,
           }}
           importHandlers={{
             saveClient: async (client: Client) => {
@@ -2878,6 +3413,14 @@ export function AuthenticatedSession({
             },
             saveInteraction: async (inter: CommunicationInteraction) => {
               const handle = fbSaveInteraction(inter);
+              await handle.serverPromise;
+            },
+            savePlaybookTemplate: async (tpl: PlaybookTemplate) => {
+              const handle = fbSavePlaybookTemplate(tpl);
+              await handle.serverPromise;
+            },
+            savePlaybookRun: async (run: PlaybookRun) => {
+              const handle = fbSavePlaybookRun(run);
               await handle.serverPromise;
             },
           }}

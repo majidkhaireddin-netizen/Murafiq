@@ -13,6 +13,7 @@ import {
   CommunicationInteraction,
   Meeting,
   Opportunity,
+  PlaybookRun,
 } from '../../types';
 import {
   ACTIVITY_TYPE_META,
@@ -85,6 +86,7 @@ interface CalendarViewProps {
   tasks: ActionItem[];
   opportunities: Opportunity[];
   interactions?: CommunicationInteraction[];
+  playbookRuns?: PlaybookRun[];
   currentUserId: string;
   referenceDate: Date;
   isOnline: boolean;
@@ -94,6 +96,7 @@ interface CalendarViewProps {
     tasks: boolean;
     opportunities: boolean;
     interactions?: boolean;
+    playbookRuns?: boolean;
   };
   hasPendingWrites: boolean;
   calendarSettings: CalendarSettings;
@@ -106,6 +109,7 @@ interface CalendarViewProps {
   onOpenTask: (task: ActionItem) => void;
   onOpenClient: (client: Client) => void;
   onOpenOpportunity: (opportunity: Opportunity) => void;
+  onOpenPlaybookRun?: (runId: string) => void;
   onCreateNewMeeting: (params: {
     clientId?: string;
     dateTimeIso?: string;
@@ -162,6 +166,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
   tasks,
   opportunities,
   interactions = [],
+  playbookRuns = [],
   currentUserId,
   referenceDate,
   isOnline,
@@ -177,6 +182,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
   onOpenTask,
   onOpenClient,
   onOpenOpportunity,
+  onOpenPlaybookRun,
   onCreateNewMeeting,
   onCreateNewTask,
   navigationTrigger,
@@ -243,6 +249,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
         tasks,
         opportunities,
         interactions,
+        playbookRuns,
         currentUserId,
         referenceDate,
         timeZone: localTimeZone,
@@ -256,6 +263,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
       tasks,
       opportunities,
       interactions,
+      playbookRuns,
       currentUserId,
       referenceDate,
       localTimeZone,
@@ -273,6 +281,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
         meetings,
         tasks,
         opportunities,
+        playbookRuns,
         currentUserId,
         referenceDate,
         timeZone: localTimeZone,
@@ -289,6 +298,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
       meetings,
       tasks,
       opportunities,
+      playbookRuns,
       currentUserId,
       referenceDate,
       localTimeZone,
@@ -695,6 +705,10 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
     }
     if (ev.opportunityRef) {
       onOpenOpportunity(ev.opportunityRef);
+      return;
+    }
+    if (ev.playbookRunRef && onOpenPlaybookRun) {
+      onOpenPlaybookRun(ev.playbookRunRef.id);
       return;
     }
     if (ev.clientId) {
@@ -1213,6 +1227,17 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
                   className="rounded border-stone-300 text-emerald-700"
                 />
                 <span>إظهار مواعيد الفرص</span>
+              </label>
+              <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={calendarSettings.showPlaybooks !== false}
+                  onChange={(e) =>
+                    onUpdateCalendarSettings({ showPlaybooks: e.target.checked })
+                  }
+                  className="rounded border-stone-300 text-emerald-700"
+                />
+                <span>إظهار خطط المتابعة</span>
               </label>
               <label className="inline-flex items-center gap-1.5 cursor-pointer">
                 <input
