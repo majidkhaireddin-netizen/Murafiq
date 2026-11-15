@@ -200,7 +200,7 @@ export const DEFAULT_AI_BRIEFING_SECTION_SELECTION: AiBriefingSectionSelection =
   openTasks: true,
   opportunityDetails: true,
   recentInteractions: true,
-  clientNotes: true,
+  clientNotes: false,
 };
 
 const PREPARATION_COLLECTION_LABELS_AR: Record<keyof PreparationCollectionsLoadedState, string> = {
@@ -279,14 +279,17 @@ export function normalizePreparationGoals(
     });
 }
 
-export function getMeetingPreparationData(meeting: Partial<Meeting>): MeetingPreparationData {
+export function getMeetingPreparationData(
+  meeting: Partial<Meeting>
+): MeetingPreparationData & { goals: MeetingPreparationGoal[] } {
   const raw = meeting.preparation;
+  const rawDismissed = Array.isArray(raw?.dismissedTopicKeys)
+    ? raw.dismissedTopicKeys.filter((k) => typeof k === 'string' && k.trim().length > 0).slice(0, 60)
+    : undefined;
   return {
     goals: normalizePreparationGoals(raw?.goals),
     notes: typeof raw?.notes === 'string' ? raw.notes.slice(0, MAX_PREPARATION_NOTES_CHARS) : undefined,
-    dismissedTopicKeys: Array.isArray(raw?.dismissedTopicKeys)
-      ? raw!.dismissedTopicKeys.filter((k) => typeof k === 'string' && k.trim().length > 0).slice(0, 60)
-      : undefined,
+    dismissedTopicKeys: rawDismissed,
     updatedAt: raw?.updatedAt || meeting.updatedAt || new Date().toISOString(),
   };
 }
@@ -731,24 +734,26 @@ export function buildMeetingPreparationBrief(
   // 2. Client & Contacts
   const client = ownedClients.find((c) => c.id === meeting.clientId) || null;
   const contacts: ClientContact[] = Array.isArray(client?.contacts)
-    ? client!.contacts.filter((ct) => ct && typeof ct.name === 'string' && ct.name.trim().length > 0)
+    ? client.contacts.filter((ct) => ct && typeof ct.name === 'string' && ct.name.trim().length > 0)
     : [];
   const primaryContact = contacts.find((ct) => ct.isPrimary) || contacts[0] || null;
   const participants = getEffectiveParticipants(meeting);
 
   // 3. Linked Opportunity vs Other Open Client Opportunities (Strict same-client check)
   let linkedOpportunity: Opportunity | null = null;
-  if (meeting.opportunityId && meeting.opportunityId.trim()) {
-    const candidateOpp = ownedOpportunities.find((o) => o.id === meeting.opportunityId!.trim());
+  const trimmedOppId = meeting.opportunityId?.trim();
+  if (trimmedOppId) {
+    const candidateOpp = ownedOpportunities.find((o) => o.id === trimmedOppId);
     // Requirement G: Never link an opportunity belonging to a different client
     if (candidateOpp && candidateOpp.clientId === meeting.clientId) {
       linkedOpportunity = candidateOpp;
     }
   }
 
-  const linkedOpportunityStageEvents: OpportunityStageEvent[] = linkedOpportunity
+  const linkedOpportunityId = linkedOpportunity?.id;
+  const linkedOpportunityStageEvents: OpportunityStageEvent[] = linkedOpportunityId
     ? ownedStageEvents
-        .filter((e) => e.opportunityId === linkedOpportunity!.id)
+        .filter((e) => e.opportunityId === linkedOpportunityId)
         .sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime())
         .slice(0, 5)
     : [];
@@ -1212,9 +1217,22 @@ export function extractSuggestedDiscussionTopics(
 // Level B: AI Advanced Briefing Payload Builder, Sanitizer & Validator
 // ============================================================================
 
+export function redactSensitiveUrlsAndPaths(text: string): string {
+  if (!text) return '';
+  return redactTemporaryAttachmentUrls(text)
+    .replace(/https?:\/\/[^\s"'<>]+/gi, '[تم حجب رابط مرفق خاص]')
+    .replace(
+      /(?:^|[\s"'`(])(?:users|clients|attachments)\/[a-zA-Z0-9_.\-/]+/g,
+      (match) => {
+        const leadingSpace = match[0] && /\s|["'`(]/.test(match[0]) ? match[0] : '';
+        return `${leadingSpace}[تم حجب مسار تخزين خاص]`;
+      }
+    );
+}
+
 function clampText(value: unknown, maxLen: number): string {
   if (typeof value !== 'string') return '';
-  return redactTemporaryAttachmentUrls(value.trim()).slice(0, maxLen);
+  return redactSensitiveUrlsAndPaths(value.trim()).slice(0, maxLen);
 }
 
 export interface BuildAiBriefingBundleResult {
@@ -1398,7 +1416,31 @@ export function buildMeetingAiBriefingInputBundle(
     truncatedSectionsAr.push(
       `تم اقتصاص النص الإجمالي ليلتزم بالحد الأقصى الآمن (${MAX_AI_BRIEFING_INPUT_CHARS} حرف)`
     );
-    previewText = previewText.slice(0, MAX_AI_BRIEFING_INPUT_CHARS);
+    // Iteratively trim optional/verbose payload sections so payload matches previewText and passes server bounds
+    while (
+      formatAiBriefingConsentPreviewText(payload).length > MAX_AI_BRIEFING_INPUT_CHARS &&
+      ((payload.clientNotes && payload.clientNotes.length > 0) ||
+        (payload.recentInteractions && payload.recentInteractions.length > 1) ||
+        (payload.previousMeetings && payload.previousMeetings.length > 1) ||
+        (payload.openTasks && payload.openTasks.length > 3) ||
+        Boolean(payload.preparationNotes && payload.preparationNotes.length > 200) ||
+        (payload.agendaItems && payload.agendaItems.length > 5))
+    ) {
+      if (payload.clientNotes && payload.clientNotes.length > 0) {
+        payload.clientNotes.pop();
+      } else if (payload.recentInteractions && payload.recentInteractions.length > 1) {
+        payload.recentInteractions.pop();
+      } else if (payload.previousMeetings && payload.previousMeetings.length > 1) {
+        payload.previousMeetings.pop();
+      } else if (payload.openTasks && payload.openTasks.length > 3) {
+        payload.openTasks.pop();
+      } else if (payload.preparationNotes && payload.preparationNotes.length > 200) {
+        payload.preparationNotes = payload.preparationNotes.slice(0, 200);
+      } else if (payload.agendaItems && payload.agendaItems.length > 5) {
+        payload.agendaItems.pop();
+      }
+    }
+    previewText = formatAiBriefingConsentPreviewText(payload).slice(0, MAX_AI_BRIEFING_INPUT_CHARS);
   }
 
   return {

@@ -12,12 +12,10 @@
 - **`meeting`**: وثيقة الاجتماع الحالية بما فيها `agendaItems` و`preparation`.
 - **`client` & `primaryContact` & `contacts`**: العميل المرتبط وجهات الاتصال المسجلة مع تمييز جهة الاتصال الرئيسية.
 - **`completeness` (`PreparationCompletenessMeta`)**: حالة الاتصال بالإنترنت، اكتمال تحميل المجموعات السبعة، وجود تعديلات محلية معلّقة (`hasPendingWrites`)، ونص إفصاح عربي صريح.
-- **`lastConfirmedInteraction` & `lastAttemptInteraction`**: فصل صريح بين آخر تواصل فعلي مؤكد وآخر محاولة تواصل غير مكتملة.
-- **`recentInteractions` & `pendingFollowUpInteractions`**: آخر 5 سجلات تواصل، والمتابعات المستحقة أو المتأخرة التي لم تُحوَّل إلى مهام مكتملة.
-- **`lastHeldMeeting` & `previousHeldMeetings` & `cancelledMeetingsCount`**: الاجتماعات السابقة المنعقدة فقط (باستثناء الاجتماعات الملغاة `status === 'cancelled'`) مرتبة تنازليًا، مع عدد الاجتماعات الملغاة للإفصاح.
-- **`previousDecisions`**: القرارات المسجلة في الاجتماعات السابقة المنعقدة مع ربط كل قرار بعنوان وتاريخ اجتماعه الأصلي.
+- **`relationshipSummary`**: يضم `lastConfirmedInteraction` و`lastAttemptInteraction` مع فصل صريح بين آخر تواصل فعلي مؤكد وآخر محاولة تواصل غير مكتملة، إضافة إلى `recentInteractions` و`pendingFollowUpInteractions` و`overdueFollowUpInteractions`.
+- **`previousMeetings` & `recentDecisions`**: الاجتماعات السابقة المنعقدة فقط (باستثناء الاجتماعات الملغاة `status === 'cancelled'`) مرتبة تنازليًا، والقرارات المسجلة فيها مع ربط كل قرار بعنوان وتاريخ اجتماعه الأصلي.
 - **`openTasks`**: تصنيف المهام المفتوحة للعميل إلى أربع فئات (`overdue`, `dueToday`, `upcoming`, `noDueDate`) عبر محرك التوقيت الآمن في `followUpEngine.ts`.
-- **`linkedOpportunity` & `linkedOpportunityLatestStageEvent` & `otherOpenClientOpportunities`**: الفرصة المرتبطة مباشرةً بالاجتماع (`meeting.opportunityId`) مع آخر حدث مرحلة، منفصلة عن بقية الفرص المفتوحة لنفس العميل، مع حارس صارم يمنع عرض أي فرصة تتبع عميلًا آخر.
+- **`opportunitiesContext`**: يضم `linkedOpportunity` و`linkedOpportunityStageEvents` منفصلين عن `otherClientOpportunities` (بقية الفرص المفتوحة لنفس العميل)، مع حارس صارم يمنع عرض أي فرصة تتبع عميلًا آخر.
 - **`suggestedTopics`**: قائمة المحاور المقترحة حتميًا للمناقشة مع مصدر كل محور (`SuggestedDiscussionTopic`).
 - **`goals` & `preparationNotes`**: أهداف الاجتماع التحضيرية (`MeetingPreparationGoal[]`) وملاحظات التحضير المحفوظة داخل `meeting.preparation`.
 
@@ -54,7 +52,7 @@
   - `no_answer` (لم يتم الرد)
   - `busy_or_callback` (مشغول / طلب معاودة الاتصال)
   - `message_sent` (تم إرسال رسالة بانتظار الرد)
-- **تواصل فعلي مؤكد (`isConfirmedInteraction`)**: عندما تكون النتيجة تفاعلية مؤكدة (`responded`, `follow_up_needed`, `agreement_reached`, `postponed`, `closed_no_action`).
+- **تواصل فعلي مؤكد (`isConfirmedInteraction`)**: عندما تكون النتيجة تفاعلية مؤكدة (`answered`, `replied`, `follow_up_needed`, `agreement_reached`, `info_shared`, `other`).
 - يعرض ملف التحضير بطاقتين منفصلتين: **«آخر تواصل فعلي مؤكد»** و**«آخر محاولة تواصل غير مؤكدة»** حتى لا يُضلَّل المستخدم باعتبار مكالمة لم يُرد عليها تواصلًا فعليًا.
 
 ---
@@ -64,14 +62,13 @@
 يولّد المحرك الحتمي (`extractSuggestedDiscussionTopics`) حتى `12` محورًا مقترحًا وفق الأولويات التالية:
 1. **المهام المتأخرة (`overdue_task`)**: أعلى أولوية لمعالجة الالتزامات المتأخرة مع العميل.
 2. **المهام المستحقة اليوم (`due_today_task`)**: التزامات يوم انعقاد/مراجعة الاجتماع.
-3. **متابعات التواصل المعلقة (`interaction_follow_up`)**: سجلات التواصل التي تحتوي على `nextStep` أو `followUpDate` مستحق ولم تُغلق بمهمة مكتملة.
-4. **الخطوة القادمة للفرصة المرتبطة (`linked_opportunity_next_action`)**: حقل `nextAction` للفرصة المرتبطة بالاجتماع.
-5. **نقاط متابعة الاجتماع السابق (`previous_meeting_follow_up`)**: عندما يحتوي آخر اجتماع منعقد على موعد متابعة مقترح أو قرارات مسجلة.
-6. **الخطوات القادمة للفرص المفتوحة الأخرى (`other_opportunity_next_action`)**.
+3. **الخطوة القادمة للفرص (`opportunity_next_action`)**: حقل `nextAction` للفرصة المرتبطة أو الفرص المفتوحة للعميل.
+4. **متابعات التواصل المعلقة (`interaction_follow_up`)**: سجلات التواصل التي تحتوي على `nextStep` أو `nextFollowUpDate` مستحق ولم تُغلق بمهمة مكتملة.
+5. **نقاط متابعة الاجتماع السابق (`previous_meeting_follow_up`)** والقرارات السابقة (**`previous_decision`**).
 
 **قواعد عدم التكرار والاستبعاد:**
-- يُقارن كل محور مقترح نصيًا (بعد تطبيع النص العربي عبر `normalizeComparableArabicText`) مع بنود جدول الأعمال الحالية (`meeting.agendaItems`)، فإذا كان موجودًا لا يُقترح مجددًا.
-- إذا ضغط المستخدم على «استبعاد»، يُحفظ مفتاح المحور في `meeting.preparation.dismissedTopicKeys` (بحد أقصى 60 مفتاحًا) فلا يظهر مرة أخرى.
+- يُقارن كل محور مقترح نصيًا (بعد تطبيع النص العربي عبر `normalizeTaskTitle`) مع بنود جدول الأعمال الحالية (`meeting.agendaItems`)، فإذا كان موجودًا يُعلَّم بـ `alreadyInAgenda = true` ولا يُسمح بتكراره.
+- إذا ضغط المستخدم على «استبعاد»، يُحفظ مفتاح المحور في `meeting.preparation.dismissedTopicKeys` (بحد أقصى 60 مفتاحًا) فلا يظهر في الاقتراحات النشطة مرة أخرى.
 
 ---
 
@@ -89,9 +86,9 @@ export type MeetingGoalStatus =
 
 export interface MeetingPreparationGoal {
   id: string;
-  title: string;        // 1..300 حرف
-  notes?: string;       // حتى 1000 حرف
+  text: string;         // 2..300 حرف
   status: MeetingGoalStatus;
+  note?: string;        // حتى 1000 حرف
   order: number;
   createdAt: string;
   updatedAt?: string;
@@ -117,14 +114,14 @@ export interface MeetingPreparationGoal {
 
 ## 8. تدفق موافقة المستخدم الصريحة قبل إرسال البيانات إلى Gemini
 
-لا يتم استدعاء `POST /api/ai/meeting-briefing` تلقائيًا عند فتح الاجتماع أو التبويب؛ بل يمر حصرًا عبر نافذة موافقة صريحة (`ai-briefing-consent-modal`):
-1. يضغط المستخدم على زر **«تحليل وتوصيات بالذكاء الاصطناعي»**.
+لا يتم استدعاء `POST /api/ai/meeting-briefing` تلقائيًا عند فتح الاجتماع أو التبويب؛ بل يمر حصرًا عبر نافذة موافقة صريحة (`prep-ai-consent-modal`):
+1. يضغط المستخدم على زر **«إعداد تحضير متقدم»** (`prep-open-ai-consent-btn`).
 2. تفتح نافذة المراجعة والموافقة، وتعرض:
-   - مربعات اختيار مستقلة لكل قسم (`meeting_details`, `client_overview`, `previous_meetings`, `open_tasks`, `opportunities`, `recent_interactions`, `client_notes`).
-   - ملاحظات العميل الخاصة (`client_notes`) **غير مفعّلة افتراضيًا** (`false`).
-   - عدادًا حيًا لعدد الأحرف (`totalChars / 12,000`) وتنبيه اقتطاع إن وُجد.
+   - مربعات اختيار مستقلة لكل قسم (`currentMeeting`, `clientSummary`, `previousMeetings`, `openTasks`, `opportunityDetails`, `recentInteractions`, `clientNotes`).
+   - ملاحظات العميل الخاصة (`clientNotes`) **غير مفعّلة افتراضيًا** (`false`) حتى يحددها المستخدم صراحة.
+   - عدادًا حيًا لعدد الأحرف (`charCount / 24,000`) وتنبيه اقتطاع إن وُجد.
    - معاينة نصية كاملة ودقيقة (`previewText`) للنص المنقّح الذي سيُرسل إلى الخادم.
-3. لا يُرسل الطلب إلا عند ضغط المستخدم على زر **«أوافق وأطلب التحليل»**، مع توفير زر إلغاء فوري مدعوم بـ `AbortController`.
+3. لا يُرسل الطلب إلا عند ضغط المستخدم على زر **«موافقة وإرسال للتحضير المتقدم»** (`prep-ai-confirm-send-btn`)، مع توفير زر إلغاء فوري مدعوم بـ `AbortController`.
 
 ---
 
@@ -132,21 +129,21 @@ export interface MeetingPreparationGoal {
 
 تُنفَّذ تنقية مزدوجة في المتصفح (`buildMeetingAiBriefingInputBundle`) وعلى الخادم (`sanitizeIncomingAiBriefingPayload` + `detectDisallowedAiFields`):
 - **الحقول المحجوبة كليًا:** `photoPaths`, `attachments`, `storagePath`, `downloadUrl`, `uploadUrl`, `b2Key`, `avatarPath`, ومعرفات الهوية (`uid`, `userId`, `ownerId`).
-- **تنقيح النصوص (`redactSensitiveUrlsAndPaths`):** يتم استبدال أي روابط HTTP/HTTPS أو روابط Backblaze B2 الموقعة أو مسارات التخزين الخاصة بعبارة `[تم حجب رابط مرفق خاص]` و`[تم حجب مسار تخزين خاص]`.
-- **الحد الأقصى لحجم المدخلات:** `12,000` حرف إجمالًا، مع اقتطاع آمن وإرجاع تحذير عربي صريح عند تجاوز الحد.
+- **تنقيح النصوص (`redactSensitiveUrlsAndPaths`):** يتم استبدال أي روابط HTTP/HTTPS أو روابط Backblaze B2 الموقعة أو مسارات التخزين الخاصة (`users/...`, `clients/...`, `attachments/...`) بعبارة `[تم حجب رابط مرفق خاص]` و`[تم حجب مسار تخزين خاص]`.
+- **الحد الأقصى لحجم المدخلات:** `24,000` حرف إجمالًا (`MAX_AI_BRIEFING_INPUT_CHARS`)، مع اقتطاع آمن وتقليص متدرج للبيانات المرسلة وإرجاع تحذير عربي صريح عند تجاوز الحد.
 
 ---
 
 ## 10. آلية المراجعة البشرية واعتماد المقترحات
 
 - جميع مخرجات `MeetingAiBriefingResult` تُحفظ في ذاكرة الجلسة (`React State`) فقط ولا تُكتب في Firestore أو `localStorage` أو `IndexedDB`.
-- تصنَّف كل نقطة نقاش (`talkingPoints`) ومخاطرة (`potentialRisks`) بشارة أساس واضحة:
-  - `documented_fact`: **حقيقة مسجلة**
-  - `inference`: **استنتاج**
-  - `ai_suggestion`: **مقترح ذكاء اصطناعي**
+- تصنَّف كل نقطة نقاش (`recommendedTalkingPoints`) بشارة أساس واضحة:
+  - `documented_fact`: **حقيقة موثقة من السجلات**
+  - `inference`: **استنتاج من السياق**
+  - `ai_suggestion`: **اقتراح ذكي قابل للمراجعة**
 - يستطيع المستخدم:
-  - تعديل عنوان أي نقطة نقاش مقترحة ثم اعتمادها في `meeting.agendaItems` عبر `approveAiTalkingPointIntoAgenda`.
-  - تعديل عنوان أي مخرج متوقع ثم اعتماده كهدف في `meeting.preparation.goals` عبر `approveAiSuggestedGoalIntoMeeting`.
+  - تعديل عنوان أي نقطة نقاش مقترحة ثم اعتمادها في `meeting.agendaItems` عبر `approveAiTalkingPointToAgenda`.
+  - تعديل نص أي مخرج متوقع ثم اعتماده كهدف في `meeting.preparation.goals` عبر `approveAiSuggestedGoalToPreparation`.
   - تمنع الدالتان تكرار العناصر المعتمدة عند النقر المتكرر.
 
 ---
