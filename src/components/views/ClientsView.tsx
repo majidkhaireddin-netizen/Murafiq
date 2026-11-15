@@ -212,9 +212,8 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
         importance: importanceFilter,
         category: categoryFilter,
         sortBy,
-      },
-      undefined,
-      interactions
+        interactions,
+      }
     );
     if (!createdRangeFilter) return base;
     return base.filter(({ client }) => {
@@ -240,7 +239,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
 
   // Quick badge counts computed from unfiltered list
   const quickCounts = useMemo(() => {
-    const all = filterAndSortClients(clients, meetings, tasks, notes, {}, undefined, interactions);
+    const all = filterAndSortClients(clients, meetings, tasks, notes, { interactions });
     return {
       total: all.length,
       favorites: all.filter((x) => x.client.isFavorite).length,

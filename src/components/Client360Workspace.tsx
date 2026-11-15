@@ -40,6 +40,7 @@ import {
 } from '../utils/client360';
 import {
   COMMUNICATION_CHANNEL_META,
+  COMMUNICATION_CHANNELS_ORDER,
   COMMUNICATION_DIRECTION_META,
   COMMUNICATION_OUTCOME_META,
   EXTERNAL_COMMUNICATION_DISCLOSURE_AR,
@@ -241,13 +242,41 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
 
   const commSummary = useMemo(
     () =>
-      computeClientCommunicationSummary({
+      computeClientCommunicationSummary(
         client,
-        interactions: clientInteractions,
-        tasks: clientTasks,
-      }),
-    [client, clientInteractions, clientTasks]
+        clientInteractions,
+        clientMeetings,
+        clientTasks
+      ),
+    [client, clientInteractions, clientMeetings, clientTasks]
   );
+
+  const mostUsedChannel = useMemo(() => {
+    let bestChannel: CommunicationChannel | null = null;
+    let bestCount = 0;
+    for (const ch of COMMUNICATION_CHANNELS_ORDER) {
+      const cnt = commSummary.byChannel[ch] || 0;
+      if (cnt > bestCount) {
+        bestCount = cnt;
+        bestChannel = ch;
+      }
+    }
+    return bestChannel;
+  }, [commSummary.byChannel]);
+
+  const topContactName = useMemo(() => {
+    let bestContactId: string | null = null;
+    let bestCount = 0;
+    for (const [cid, entry] of Object.entries(commSummary.byContactId)) {
+      if (entry.count > bestCount) {
+        bestCount = entry.count;
+        bestContactId = cid;
+      }
+    }
+    if (!bestContactId) return null;
+    const found = (client.contacts || []).find((c) => c.id === bestContactId);
+    return found?.name || null;
+  }, [commSummary.byContactId, client.contacts]);
 
   const oppSummary = useMemo(
     () => computeClientOpportunitySummary(opportunities, client.id),
@@ -1817,9 +1846,9 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                 const cTel = sanitizePhoneForTel(c.phone);
                 const cEmail = isValidEmailAddress(c.email) ? c.email!.trim() : null;
                 const contactInteractions = getContactInteractionHistory(
-                  clientInteractions,
+                  client.id,
                   c.id,
-                  c.name
+                  clientInteractions
                 );
                 const lastContactInteraction = contactInteractions[0] || null;
                 return (
@@ -2180,15 +2209,15 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
             <div className="p-2.5 rounded-xl bg-stone-50 border border-stone-200">
               <span className="text-[10px] text-stone-500 block">القناة الأكثر استخداماً</span>
               <span className="font-bold text-xs text-stone-900">
-                {commSummary.mostUsedChannel
-                  ? COMMUNICATION_CHANNEL_META[commSummary.mostUsedChannel].labelAr
+                {mostUsedChannel
+                  ? COMMUNICATION_CHANNEL_META[mostUsedChannel].labelAr
                   : '—'}
               </span>
             </div>
             <div className="p-2.5 rounded-xl bg-stone-50 border border-stone-200">
               <span className="text-[10px] text-stone-500 block">جهة الاتصال الأكثر تفاعلاً</span>
               <span className="font-bold text-xs text-stone-900 truncate block">
-                {commSummary.topContactName || '—'}
+                {topContactName || '—'}
               </span>
             </div>
           </div>
@@ -2212,7 +2241,12 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                 const channelMeta = COMMUNICATION_CHANNEL_META[inter.channel];
                 const dirMeta = COMMUNICATION_DIRECTION_META[inter.direction];
                 const outcomeMeta = COMMUNICATION_OUTCOME_META[inter.outcome];
-                const contactResolved = resolveInteractionContact(inter, client);
+                const contactResolved = resolveInteractionContact(client, inter.contactId);
+                const contactDisplayName =
+                  contactResolved?.name || inter.contactName || 'تواصل عام مع العميل';
+                const contactRoleOrDept = [contactResolved?.title, contactResolved?.department]
+                  .filter(Boolean)
+                  .join(' • ');
                 const linkedOpp = inter.opportunityId
                   ? clientOpportunities.find((o) => o.id === inter.opportunityId)
                   : undefined;
@@ -2253,10 +2287,8 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                     <div className="flex items-center gap-3 text-[11px] text-stone-600 flex-wrap">
                       <span>
                         تحدثت مع:{' '}
-                        <strong className="text-stone-900">{contactResolved.displayName}</strong>
-                        {contactResolved.roleOrDepartment
-                          ? ` (${contactResolved.roleOrDepartment})`
-                          : ''}
+                        <strong className="text-stone-900">{contactDisplayName}</strong>
+                        {contactRoleOrDept ? ` (${contactRoleOrDept})` : ''}
                       </span>
                       {linkedOpp && (
                         <button
@@ -2275,9 +2307,9 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                       </p>
                     )}
 
-                    {inter.discussionTopics && inter.discussionTopics.length > 0 && (
+                    {inter.topics && inter.topics.length > 0 && (
                       <div className="flex items-center gap-1.5 flex-wrap">
-                        {inter.discussionTopics.map((topic) => (
+                        {inter.topics.map((topic) => (
                           <span
                             key={topic}
                             className="text-[10px] px-2 py-0.5 rounded bg-stone-100 text-stone-700 border border-stone-200"
@@ -2324,11 +2356,11 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                                 type="button"
                                 data-testid={`client-360-convert-inter-task-${inter.id}`}
                                 onClick={() => {
-                                  const res = convertInteractionNextStepToTaskDraft({
-                                    interaction: inter,
-                                    existingTasks: clientTasks,
-                                  });
-                                  if (res.ok && res.task && res.updatedInteraction) {
+                                  const res = convertInteractionNextStepToTaskDraft(
+                                    inter,
+                                    clientTasks
+                                  );
+                                  if (!res.alreadyExisted) {
                                     void onConvertInteractionToTask(
                                       res.updatedInteraction,
                                       res.task

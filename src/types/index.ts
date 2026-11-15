@@ -979,6 +979,7 @@ export interface CommunicationInteraction {
   userId?: string;
   clientId: string;
   contactId?: string;
+  contactName?: string;
   opportunityId?: string;
   meetingId?: string;
   channel: CommunicationChannel;

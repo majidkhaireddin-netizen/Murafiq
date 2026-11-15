@@ -315,28 +315,37 @@ service cloud.firestore {
     // Communication Interaction Validation (Task 011: Communication Center & Interaction History)
     function isValidInteraction(data, userId) {
       return data.keys().hasOnly([
-          'id', 'userId', 'clientId', 'contactId', 'contactName', 'opportunityId',
+          'id', 'userId', 'clientId', 'contactId', 'contactName', 'opportunityId', 'meetingId',
           'channel', 'direction', 'occurredAt', 'durationMinutes', 'subject',
           'summary', 'topics', 'outcome', 'nextStep', 'nextFollowUpDate',
-          'followUpTaskId', 'createdAt', 'updatedAt'
+          'linkedTaskId', 'followUpTaskId', 'createdAt', 'updatedAt'
         ])
-        && data.keys().hasAll(['id', 'clientId', 'channel', 'direction', 'occurredAt', 'summary', 'outcome', 'createdAt', 'updatedAt'])
+        && data.keys().hasAll(['id', 'clientId', 'channel', 'direction', 'occurredAt', 'outcome', 'createdAt', 'updatedAt'])
         && data.id is string && isValidId(data.id)
         && data.clientId is string && isValidId(data.clientId)
-        && data.channel in ['phone', 'whatsapp', 'email', 'in_person', 'video', 'sms', 'quick_check_in']
+        && data.channel in [
+          'phone_call', 'whatsapp', 'email', 'in_person_visit', 'video_call', 'sms', 'other',
+          'phone', 'in_person', 'video', 'quick_check_in'
+        ]
         && data.direction in ['outbound', 'inbound']
         && data.occurredAt is string && data.occurredAt.size() > 0 && data.occurredAt.size() <= 50
-        && data.summary is string && data.summary.size() > 0 && data.summary.size() <= 4000
-        && data.outcome in ['answered', 'no_answer', 'follow_up_needed', 'sent_waiting_reply', 'completed', 'postponed', 'escalated']
+        && data.outcome in [
+          'answered', 'no_answer', 'busy_or_callback', 'message_sent', 'replied',
+          'agreement_reached', 'follow_up_needed', 'info_shared', 'other',
+          'sent_waiting_reply', 'completed', 'postponed', 'escalated'
+        ]
         && (!('userId' in data) || (data.userId is string && data.userId == userId))
         && (!('contactId' in data) || (data.contactId is string && isValidId(data.contactId)))
         && (!('contactName' in data) || (data.contactName is string && data.contactName.size() <= 150))
         && (!('opportunityId' in data) || (data.opportunityId is string && isValidId(data.opportunityId)))
+        && (!('meetingId' in data) || (data.meetingId is string && isValidId(data.meetingId)))
         && (!('durationMinutes' in data) || (data.durationMinutes is number && data.durationMinutes >= 0 && data.durationMinutes <= 1440))
         && (!('subject' in data) || (data.subject is string && data.subject.size() <= 200))
-        && (!('topics' in data) || (data.topics is list && data.topics.size() <= 15))
+        && (!('summary' in data) || (data.summary is string && data.summary.size() <= 5000))
+        && (!('topics' in data) || (data.topics is list && data.topics.size() <= 20))
         && (!('nextStep' in data) || (data.nextStep is string && data.nextStep.size() <= 500))
         && (!('nextFollowUpDate' in data) || isValidDateOnlyString(data.nextFollowUpDate))
+        && (!('linkedTaskId' in data) || (data.linkedTaskId is string && isValidId(data.linkedTaskId)))
         && (!('followUpTaskId' in data) || (data.followUpTaskId is string && isValidId(data.followUpTaskId)))
         && data.createdAt is string && data.createdAt.size() > 0 && data.createdAt.size() <= 50
         && data.updatedAt is string && data.updatedAt.size() > 0 && data.updatedAt.size() <= 50;

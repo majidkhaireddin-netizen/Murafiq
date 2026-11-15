@@ -10,6 +10,7 @@ import {
   CalendarViewMode,
   CalendarWeekStartDay,
   Client,
+  CommunicationInteraction,
   Meeting,
   Opportunity,
 } from '../../types';
@@ -83,6 +84,7 @@ interface CalendarViewProps {
   meetings: Meeting[];
   tasks: ActionItem[];
   opportunities: Opportunity[];
+  interactions?: CommunicationInteraction[];
   currentUserId: string;
   referenceDate: Date;
   isOnline: boolean;
@@ -91,6 +93,7 @@ interface CalendarViewProps {
     meetings: boolean;
     tasks: boolean;
     opportunities: boolean;
+    interactions?: boolean;
   };
   hasPendingWrites: boolean;
   calendarSettings: CalendarSettings;
@@ -157,6 +160,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
   meetings,
   tasks,
   opportunities,
+  interactions = [],
   currentUserId,
   referenceDate,
   isOnline,
@@ -236,6 +240,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
         meetings,
         tasks,
         opportunities,
+        interactions,
         currentUserId,
         referenceDate,
         timeZone: localTimeZone,
@@ -248,6 +253,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
       meetings,
       tasks,
       opportunities,
+      interactions,
       currentUserId,
       referenceDate,
       localTimeZone,

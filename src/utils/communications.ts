@@ -381,8 +381,16 @@ export function sanitizeInteractionForSave(
     updatedAt: nowIso,
   };
 
+  const matchedContact = contactId ? clientObj?.contacts?.find((c) => c.id === contactId) : undefined;
+  const contactName = matchedContact?.name
+    ? matchedContact.name.trim().slice(0, 150)
+    : interaction.contactName?.trim()
+    ? interaction.contactName.trim().slice(0, 150)
+    : undefined;
+
   if (interaction.userId) sanitized.userId = interaction.userId;
   if (contactId) sanitized.contactId = contactId;
+  if (contactName) sanitized.contactName = contactName;
   if (opportunityId) sanitized.opportunityId = opportunityId;
   if (meetingId) sanitized.meetingId = meetingId;
   if (durationMinutes !== undefined) sanitized.durationMinutes = durationMinutes;

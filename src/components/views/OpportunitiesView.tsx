@@ -63,6 +63,7 @@ interface OpportunitiesViewProps {
   onCreateLinkedMeeting: (opportunity: Opportunity) => void;
   onCreateLinkedTask: (opportunity: Opportunity) => void;
   onLogInteraction?: (defaults: { clientId: string; opportunityId: string }) => void;
+  onEditInteraction?: (interaction: CommunicationInteraction) => void;
   onOpenClient: (clientId: string) => void;
   onOpenMeeting: (meetingId: string) => void;
   onOpenTask: (taskId: string) => void;
@@ -93,6 +94,7 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
   onCreateLinkedMeeting,
   onCreateLinkedTask,
   onLogInteraction,
+  onEditInteraction,
   onOpenClient,
   onOpenMeeting,
   onOpenTask,
@@ -235,6 +237,7 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
           onCreateLinkedMeeting={onCreateLinkedMeeting}
           onCreateLinkedTask={onCreateLinkedTask}
           onLogInteraction={onLogInteraction}
+          onEditInteraction={onEditInteraction}
           onOpenClient={onOpenClient}
           onOpenMeeting={onOpenMeeting}
           onOpenTask={onOpenTask}

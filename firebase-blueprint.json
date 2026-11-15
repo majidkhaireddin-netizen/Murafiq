@@ -290,22 +290,41 @@
         "contactId": { "type": "string", "maxLength": 128 },
         "contactName": { "type": "string", "maxLength": 150 },
         "opportunityId": { "type": "string", "maxLength": 128 },
+        "meetingId": { "type": "string", "maxLength": 128 },
         "channel": {
           "type": "string",
-          "enum": ["phone", "whatsapp", "email", "in_person", "video", "sms", "quick_check_in"]
+          "enum": [
+            "phone_call",
+            "whatsapp",
+            "email",
+            "in_person_visit",
+            "video_call",
+            "sms",
+            "other",
+            "phone",
+            "in_person",
+            "video",
+            "quick_check_in"
+          ]
         },
         "direction": { "type": "string", "enum": ["outbound", "inbound"] },
         "occurredAt": { "type": "string", "maxLength": 50 },
         "durationMinutes": { "type": "number" },
         "subject": { "type": "string", "maxLength": 200 },
-        "summary": { "type": "string", "maxLength": 4000 },
+        "summary": { "type": "string", "maxLength": 5000 },
         "topics": { "type": "array" },
         "outcome": {
           "type": "string",
           "enum": [
             "answered",
             "no_answer",
+            "busy_or_callback",
+            "message_sent",
+            "replied",
+            "agreement_reached",
             "follow_up_needed",
+            "info_shared",
+            "other",
             "sent_waiting_reply",
             "completed",
             "postponed",
@@ -314,11 +333,12 @@
         },
         "nextStep": { "type": "string", "maxLength": 500 },
         "nextFollowUpDate": { "type": "string", "maxLength": 10, "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "linkedTaskId": { "type": "string", "maxLength": 128 },
         "followUpTaskId": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string", "maxLength": 50 },
         "updatedAt": { "type": "string", "maxLength": 50 }
       },
-      "required": ["id", "clientId", "channel", "direction", "occurredAt", "summary", "outcome", "createdAt", "updatedAt"]
+      "required": ["id", "clientId", "channel", "direction", "occurredAt", "outcome", "createdAt", "updatedAt"]
     }
   },
   "firestore": {

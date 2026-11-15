@@ -10,10 +10,10 @@ import type {
 } from '../types';
 import {
   COMMUNICATION_CHANNEL_META,
-  COMMUNICATION_CHANNEL_ORDER,
+  COMMUNICATION_CHANNELS_ORDER,
   COMMUNICATION_DIRECTION_META,
   COMMUNICATION_OUTCOME_META,
-  COMMUNICATION_OUTCOME_ORDER,
+  COMMUNICATION_OUTCOMES_ORDER,
   convertInteractionNextStepToTaskDraft,
   findLinkedTaskForInteraction,
   sanitizeInteractionForSave,
@@ -85,13 +85,13 @@ export const CHANNEL_ICON_MAP: Record<
   CommunicationChannel,
   React.FC<{ className?: string }>
 > = {
-  phone: Phone,
+  phone_call: Phone,
   whatsapp: MessageCircle,
   email: Mail,
-  in_person: MapPin,
-  video: Video,
+  in_person_visit: MapPin,
+  video_call: Video,
   sms: MessageSquare,
-  quick_check_in: UserCheck,
+  other: UserCheck,
 };
 
 export const InteractionFormModal: React.FC<InteractionFormModalProps> = ({
@@ -111,7 +111,7 @@ export const InteractionFormModal: React.FC<InteractionFormModalProps> = ({
   const [contactId, setContactId] = useState<string>('');
   const [customContactName, setCustomContactName] = useState<string>('');
   const [opportunityId, setOpportunityId] = useState<string>('');
-  const [channel, setChannel] = useState<CommunicationChannel>('phone');
+  const [channel, setChannel] = useState<CommunicationChannel>('phone_call');
   const [direction, setDirection] = useState<CommunicationDirection>('outbound');
   const [occurredAtLocal, setOccurredAtLocal] = useState<string>(() =>
     toLocalDateTimeInputValue()
@@ -160,7 +160,7 @@ export const InteractionFormModal: React.FC<InteractionFormModalProps> = ({
       setContactId(defaultContactId || '');
       setCustomContactName('');
       setOpportunityId(defaultOpportunityId || '');
-      setChannel(defaultChannel || 'phone');
+      setChannel(defaultChannel || 'phone_call');
       setDirection('outbound');
       setOccurredAtLocal(toLocalDateTimeInputValue());
       setDurationMinutes('');
@@ -259,39 +259,45 @@ export const InteractionFormModal: React.FC<InteractionFormModalProps> = ({
       initialInteraction?.id ||
       `ix_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
-    const baseRecord: CommunicationInteraction = sanitizeInteractionForSave({
-      id: interactionId,
-      userId: initialInteraction?.userId,
-      clientId,
-      contactId: matchedContact ? matchedContact.id : undefined,
-      contactName: resolvedContactName,
-      opportunityId: opportunityId || undefined,
-      channel,
-      direction,
-      occurredAt: occurredAtIso,
-      durationMinutes:
-        parsedDuration !== undefined && Number.isFinite(parsedDuration) && parsedDuration >= 0
-          ? parsedDuration
-          : undefined,
-      subject: subject.trim() || undefined,
-      summary: summary.trim(),
-      topics: topics.length > 0 ? topics : undefined,
-      outcome,
-      nextStep: nextStep.trim() || undefined,
-      nextFollowUpDate: nextFollowUpDate.trim() || undefined,
-      followUpTaskId: existingLinkedTask?.id || initialInteraction?.followUpTaskId,
-      createdAt: initialInteraction?.createdAt || nowIso,
-      updatedAt: nowIso,
-    });
+    const resolvedSubject =
+      subject.trim() ||
+      `${COMMUNICATION_CHANNEL_META[channel].labelAr} مع ${selectedClient?.name || 'العميل'}`;
 
-    if (! existingLinkedTask && createFollowUpTask) {
-      const converted = convertInteractionNextStepToTaskDraft({
-        interaction: baseRecord,
-        client: selectedClient,
-        existingTasks: tasks,
+    const baseRecord: CommunicationInteraction = sanitizeInteractionForSave(
+      {
+        id: interactionId,
+        userId: initialInteraction?.userId,
+        clientId,
+        contactId: matchedContact ? matchedContact.id : undefined,
+        contactName: resolvedContactName,
+        opportunityId: opportunityId || undefined,
+        channel,
+        direction,
+        occurredAt: occurredAtIso,
+        durationMinutes:
+          parsedDuration !== undefined && Number.isFinite(parsedDuration) && parsedDuration >= 0
+            ? parsedDuration
+            : undefined,
+        subject: resolvedSubject,
+        summary: summary.trim(),
+        topics: topics.length > 0 ? topics : undefined,
+        outcome,
+        nextStep: nextStep.trim() || undefined,
+        nextFollowUpDate: nextFollowUpDate.trim() || undefined,
+        linkedTaskId: existingLinkedTask?.id || initialInteraction?.linkedTaskId,
+        createdAt: initialInteraction?.createdAt || nowIso,
+        updatedAt: nowIso,
+      },
+      clients,
+      opportunities,
+      nowIso
+    );
+
+    if (!existingLinkedTask && createFollowUpTask) {
+      const converted = convertInteractionNextStepToTaskDraft(baseRecord, tasks, {
         nowIso,
       });
-      onSaveInteraction(converted.updatedInteraction, converted.taskDraft);
+      onSaveInteraction(converted.updatedInteraction, converted.task);
     } else {
       onSaveInteraction(baseRecord);
     }
@@ -352,7 +358,7 @@ export const InteractionFormModal: React.FC<InteractionFormModalProps> = ({
               وسيلة التواصل <span className="text-rose-600">*</span>
             </label>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
-              {COMMUNICATION_CHANNEL_ORDER.map((ch) => {
+              {COMMUNICATION_CHANNELS_ORDER.map((ch) => {
                 const meta = COMMUNICATION_CHANNEL_META[ch];
                 const Icon = CHANNEL_ICON_MAP[ch];
                 const isSelected = channel === ch;
@@ -459,7 +465,7 @@ export const InteractionFormModal: React.FC<InteractionFormModalProps> = ({
                     <option value="">— تواصل عام مع العميل / اسم آخر —</option>
                     {clientContacts.map((ct) => (
                       <option key={ct.id} value={ct.id}>
-                        {ct.name} {ct.role ? `— ${ct.role}` : ''}
+                        {ct.name} {ct.title ? `— ${ct.title}` : ''}
                       </option>
                     ))}
                   </select>
@@ -571,7 +577,7 @@ export const InteractionFormModal: React.FC<InteractionFormModalProps> = ({
               نتيجة التواصل <span className="text-rose-600">*</span>
             </label>
             <div className="flex flex-wrap gap-1.5">
-              {COMMUNICATION_OUTCOME_ORDER.map((out) => {
+              {COMMUNICATION_OUTCOMES_ORDER.map((out) => {
                 const meta = COMMUNICATION_OUTCOME_META[out];
                 const isSelected = outcome === out;
                 return (

@@ -211,6 +211,7 @@ const INTERACTION_ALLOWED_KEYS = new Set([
   'userId',
   'clientId',
   'contactId',
+  'contactName',
   'opportunityId',
   'meetingId',
   'channel',

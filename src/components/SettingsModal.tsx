@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import type {
   AppState,
   CacheRuntimeState,
+  CommunicationInteraction,
   CsvExportEntityType,
   FollowUpPreferences,
   ImportExecutionReport,
@@ -69,6 +70,7 @@ interface SettingsModalProps {
   currentUserId?: string;
   opportunities?: Opportunity[];
   opportunityStageEvents?: OpportunityStageEvent[];
+  interactions?: CommunicationInteraction[];
   isOnline?: boolean;
   collectionsLoaded?: {
     clients?: boolean;
@@ -77,6 +79,7 @@ interface SettingsModalProps {
     notes?: boolean;
     opportunities?: boolean;
     opportunityStageEvents?: boolean;
+    interactions?: boolean;
   };
   importHandlers?: ImportPersistenceHandlers;
   initialTab?: 'general' | 'data' | 'assumptions';
@@ -96,6 +99,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   currentUserId = 'anonymous',
   opportunities = [],
   opportunityStageEvents = [],
+  interactions = [],
   isOnline = true,
   collectionsLoaded,
   importHandlers,
@@ -152,7 +156,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     (collectionsLoaded?.tasks ?? true) &&
     (collectionsLoaded?.notes ?? true) &&
     (collectionsLoaded?.opportunities ?? true) &&
-    (collectionsLoaded?.opportunityStageEvents ?? true);
+    (collectionsLoaded?.opportunityStageEvents ?? true) &&
+    (collectionsLoaded?.interactions ?? true);
 
   const isExportCompleteOnline =
     isOnline && allCollectionsLoaded && pendingOperationsCount === 0;
@@ -219,6 +224,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       notes: appState.notes,
       opportunities,
       opportunityStageEvents,
+      interactions,
       isOnline,
       collectionsLoaded,
       hasPendingLocalWrites: pendingOperationsCount > 0,
@@ -246,6 +252,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       meetings: appState.meetings,
       tasks: appState.tasks,
       opportunities,
+      interactions,
     });
 
     const dateSuffix = new Date().toISOString().slice(0, 10);
@@ -281,6 +288,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           notes: appState.notes,
           opportunities,
           opportunityStageEvents,
+          interactions,
         },
       });
       setImportPreview(preview);

@@ -86,6 +86,7 @@ test('1. Empty workspace yields zero KPIs, empty buckets, and zero reminders', (
     followUpsRequiredCount: 0,
     highPriorityTasksCount: 0,
     overdueOpportunitiesCount: 0,
+    dueInteractionFollowUpsCount: 0,
   });
 
   const rem = evaluateReminders({
@@ -742,6 +743,7 @@ test('12. computeDetailedSyncSummary honestly reports pending and failed states 
     notes: { ...syncedStatus },
     opportunities: { ...syncedStatus },
     opportunityStageEvents: { ...syncedStatus },
+    interactions: { ...syncedStatus },
     reminders: { ...syncedStatus, hasPendingWrites: true, pendingDocIds: ['rem_task_1'] },
     preferences: { ...syncedStatus },
   };

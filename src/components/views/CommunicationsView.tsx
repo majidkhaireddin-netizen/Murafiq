@@ -13,14 +13,15 @@ import type {
 } from '../../types';
 import {
   COMMUNICATION_CHANNEL_META,
-  COMMUNICATION_CHANNEL_ORDER,
+  COMMUNICATION_CHANNELS_ORDER,
   COMMUNICATION_DIRECTION_META,
   COMMUNICATION_OUTCOME_META,
-  COMMUNICATION_OUTCOME_ORDER,
-  DEFAULT_COMMUNICATION_FILTERS,
+  COMMUNICATION_OUTCOMES_ORDER,
+  DEFAULT_COMMUNICATION_FILTER_STATE,
   EXTERNAL_COMMUNICATION_DISCLOSURE_AR,
   EXTERNAL_COMMUNICATION_DISCLOSURE_EN,
   buildWhatsAppExternalUrl,
+  computeClientCommunicationSummary,
   computeCommunicationCenterSummary,
   convertInteractionNextStepToTaskDraft,
   filterAndSortInteractions,
@@ -87,6 +88,7 @@ const DATE_PRESET_LABELS: Record<CommunicationDatePreset, { ar: string; en: stri
   '7d': { ar: 'آخر 7 أيام', en: 'Last 7 days' },
   '30d': { ar: 'آخر 30 يوماً', en: 'Last 30 days' },
   '90d': { ar: 'آخر 90 يوماً', en: 'Last 90 days' },
+  custom: { ar: 'فترة مخصصة', en: 'Custom range' },
 };
 
 export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
@@ -106,7 +108,7 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
   onNavigateToTasks,
 }) => {
   const [filters, setFilters] = useState<CommunicationFilterState>(
-    DEFAULT_COMMUNICATION_FILTERS
+    DEFAULT_COMMUNICATION_FILTER_STATE
   );
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
   const [showStaleClientsPanel, setShowStaleClientsPanel] = useState(true);
@@ -124,25 +126,47 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
 
   const centerSummary = useMemo(
     () =>
-      computeCommunicationCenterSummary({
-        clients,
+      computeCommunicationCenterSummary(
         interactions,
+        clients,
         meetings,
         tasks,
-        staleThresholdDays,
-      }),
+        new Date(),
+        staleThresholdDays
+      ),
     [clients, interactions, meetings, tasks, staleThresholdDays]
   );
 
+  const staleClients = useMemo(() => {
+    const now = new Date();
+    return clients
+      .filter((c) => c.relationshipStatus !== 'inactive')
+      .map((client) => ({
+        client,
+        summary: computeClientCommunicationSummary(
+          client,
+          interactions,
+          meetings,
+          tasks,
+          now,
+          staleThresholdDays
+        ),
+      }))
+      .filter(
+        ({ client, summary }) =>
+          summary.isStaleContact || client.relationshipStatus === 'follow_up_needed'
+      )
+      .sort((a, b) => (b.summary.daysSinceLastContact ?? 9999) - (a.summary.daysSinceLastContact ?? 9999));
+  }, [clients, interactions, meetings, tasks, staleThresholdDays]);
+
   const filteredInteractions = useMemo(
     () =>
-      filterAndSortInteractions({
-        interactions,
+      filterAndSortInteractions(interactions, filters, {
         clients,
+        opportunities,
         tasks,
-        filters,
       }),
-    [interactions, clients, tasks, filters]
+    [interactions, clients, opportunities, tasks, filters]
   );
 
   const selectedFilterClient = useMemo(
@@ -153,7 +177,7 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
 
   const activeFiltersCount = useMemo(() => {
     let count = 0;
-    if (filters.query.trim()) count += 1;
+    if (filters.searchQuery.trim()) count += 1;
     if (filters.channel !== 'all') count += 1;
     if (filters.outcome !== 'all') count += 1;
     if (filters.direction !== 'all') count += 1;
@@ -176,19 +200,14 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
   };
 
   const resetFilters = () => {
-    setFilters(DEFAULT_COMMUNICATION_FILTERS);
+    setFilters(DEFAULT_COMMUNICATION_FILTER_STATE);
   };
 
   const handleConvertNextStep = (interaction: CommunicationInteraction) => {
-    const client = clientById.get(interaction.clientId);
-    const { taskDraft, updatedInteraction, alreadyExists } =
-      convertInteractionNextStepToTaskDraft({
-        interaction,
-        client,
-        existingTasks: tasks,
-      });
-    if (!alreadyExists) {
-      onConvertInteractionToTask(updatedInteraction, taskDraft);
+    const { task, updatedInteraction, alreadyExisted } =
+      convertInteractionNextStepToTaskDraft(interaction, tasks);
+    if (!alreadyExisted) {
+      onConvertInteractionToTask(updatedInteraction, task);
     }
   };
 
@@ -237,7 +256,7 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
             {language === 'ar' ? 'توثيق سريع حسب الوسيلة:' : 'Quick log by channel:'}
           </span>
           {(
-            ['phone', 'whatsapp', 'email', 'in_person', 'video', 'quick_check_in'] as CommunicationChannel[]
+            ['phone_call', 'whatsapp', 'email', 'in_person_visit', 'video_call', 'other'] as CommunicationChannel[]
           ).map((ch) => {
             const meta = COMMUNICATION_CHANNEL_META[ch];
             const Icon = CHANNEL_ICON_MAP[ch];
@@ -288,9 +307,9 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
             <span className="text-[11px] text-stone-500">سجل تواصل</span>
           </div>
           <p className="text-[10px] text-stone-400 mt-1">
-            مكالمات: {centerSummary.byChannel.phone || 0} • واتساب:{' '}
+            مكالمات: {centerSummary.byChannel.phone_call || 0} • واتساب:{' '}
             {centerSummary.byChannel.whatsapp || 0} • زيارات:{' '}
-            {centerSummary.byChannel.in_person || 0}
+            {centerSummary.byChannel.in_person_visit || 0}
           </p>
         </div>
 
@@ -326,7 +345,7 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
             )
           }
           className={`bg-white rounded-2xl border p-3.5 shadow-2xs cursor-pointer transition-all ${
-            centerSummary.overdueFollowUpsCount > 0
+            centerSummary.followUpsOverdueCount > 0
               ? 'border-amber-300 bg-amber-50/20'
               : 'border-stone-200 hover:border-emerald-300'
           }`}
@@ -338,11 +357,11 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
           </div>
           <div className="mt-2 flex items-baseline gap-2">
             <span className="text-2xl font-bold text-stone-900 tabular-nums">
-              {centerSummary.dueFollowUpsCount}
+              {centerSummary.followUpsPendingTotalCount}
             </span>
-            {centerSummary.overdueFollowUpsCount > 0 && (
+            {centerSummary.followUpsOverdueCount > 0 && (
               <span className="px-1.5 py-0.5 rounded-md bg-rose-100 text-rose-800 text-[10px] font-bold">
-                متأخرة: {centerSummary.overdueFollowUpsCount}
+                متأخرة: {centerSummary.followUpsOverdueCount}
               </span>
             )}
           </div>
@@ -379,7 +398,7 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
       </div>
 
       {/* Stale Clients Radar Panel */}
-      {centerSummary.staleClients.length > 0 && showStaleClientsPanel && (
+      {staleClients.length > 0 && showStaleClientsPanel && (
         <div
           data-testid="stale-clients-radar-panel"
           className="bg-white rounded-2xl border border-amber-200/90 p-4 shadow-2xs space-y-3"
@@ -391,7 +410,7 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
               </div>
               <div>
                 <h2 className="font-heading font-bold text-xs sm:text-sm text-stone-900">
-                  رادار انقطاع التواصل ({centerSummary.staleClients.length} عملاء)
+                  رادار انقطاع التواصل ({staleClients.length} عملاء)
                 </h2>
                 <p className="text-[11px] text-stone-500">
                   عملاء لم يُسجل معهم اجتماع أو تواصل خلال آخر {staleThresholdDays} يوماً أو
@@ -409,7 +428,7 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
-            {centerSummary.staleClients.slice(0, 6).map(({ client, summary }) => {
+            {staleClients.slice(0, 6).map(({ client, summary }) => {
               const whatsappUrl = buildWhatsAppExternalUrl(client.phone);
               return (
                 <div
@@ -499,8 +518,8 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
             <input
               type="text"
               data-testid="communications-search-input"
-              value={filters.query}
-              onChange={(e) => updateFilter('query', e.target.value)}
+              value={filters.searchQuery}
+              onChange={(e) => updateFilter('searchQuery', e.target.value)}
               placeholder="ابحث في سجل التواصل بالعميل، جهة الاتصال، الموضوع، الملخص، أو الخطوة التالية..."
               className="w-full bg-transparent text-xs text-stone-900 placeholder-stone-400 focus:outline-hidden"
             />
@@ -554,7 +573,7 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
           >
             كل الوسائل ({interactions.length})
           </button>
-          {COMMUNICATION_CHANNEL_ORDER.map((ch) => {
+          {COMMUNICATION_CHANNELS_ORDER.map((ch) => {
             const meta = COMMUNICATION_CHANNEL_META[ch];
             const Icon = CHANNEL_ICON_MAP[ch];
             const count = centerSummary.byChannel[ch] || 0;
@@ -620,7 +639,7 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
                     <option value="all">جميع جهات الاتصال</option>
                     {(selectedFilterClient.contacts || []).map((ct) => (
                       <option key={ct.id} value={ct.id}>
-                        {ct.name} {ct.role ? `(${ct.role})` : ''}
+                        {ct.name} {ct.title ? `(${ct.title})` : ''}
                       </option>
                     ))}
                   </select>
@@ -640,7 +659,7 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
                 className="w-full bg-stone-50 border border-stone-200 rounded-lg px-2.5 py-1.5 text-xs text-stone-800"
               >
                 <option value="all">كل النتائج</option>
-                {COMMUNICATION_OUTCOME_ORDER.map((out) => (
+                {COMMUNICATION_OUTCOMES_ORDER.map((out) => (
                   <option key={out} value={out}>
                     {COMMUNICATION_OUTCOME_META[out].labelAr}
                   </option>
@@ -775,15 +794,17 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
               const opportunity = interaction.opportunityId
                 ? opportunityById.get(interaction.opportunityId)
                 : undefined;
-              const resolvedContact = resolveInteractionContact(interaction, client);
+              const resolvedContact = resolveInteractionContact(client, interaction.contactId);
+              const contactDisplayName = resolvedContact?.name || interaction.contactName;
+              const contactRole = resolvedContact?.title;
               const linkedTask = findLinkedTaskForInteraction(interaction, tasks);
               const channelMeta = COMMUNICATION_CHANNEL_META[interaction.channel];
               const outcomeMeta = COMMUNICATION_OUTCOME_META[interaction.outcome];
               const directionMeta = COMMUNICATION_DIRECTION_META[interaction.direction];
               const ChannelIcon = CHANNEL_ICON_MAP[interaction.channel];
 
-              const contactPhone = resolvedContact.contact?.phone || client?.phone;
-              const contactEmail = resolvedContact.contact?.email || client?.email;
+              const contactPhone = resolvedContact?.phone || client?.phone;
+              const contactEmail = resolvedContact?.email || client?.email;
               const whatsappUrl = buildWhatsAppExternalUrl(contactPhone);
 
               return (
@@ -898,16 +919,16 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
                       </button>
                     )}
 
-                    {resolvedContact.displayName && (
+                    {contactDisplayName && (
                       <span
                         data-testid={`interaction-contact-badge-${interaction.id}`}
                         className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-teal-50 border border-teal-200 text-teal-900 font-semibold text-[11px]"
                       >
                         <UserCheck className="w-3.5 h-3.5 text-teal-700" />
-                        <span>مع: {resolvedContact.displayName}</span>
-                        {resolvedContact.role && (
+                        <span>مع: {contactDisplayName}</span>
+                        {contactRole && (
                           <span className="text-teal-700 font-normal">
-                            ({resolvedContact.role})
+                            ({contactRole})
                           </span>
                         )}
                       </span>
@@ -983,7 +1004,7 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
                         <button
                           key={tp}
                           type="button"
-                          onClick={() => updateFilter('query', tp)}
+                          onClick={() => updateFilter('searchQuery', tp)}
                           className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-stone-100 hover:bg-emerald-50 text-stone-700 hover:text-emerald-900 border border-stone-200/80 text-[11px] font-medium transition-colors"
                         >
                           <Tag className="w-2.5 h-2.5 text-stone-400" />

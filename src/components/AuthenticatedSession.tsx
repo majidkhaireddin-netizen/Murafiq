@@ -9,6 +9,8 @@ import {
   Opportunity,
   OpportunityStage,
   OpportunityStageEvent,
+  CommunicationChannel,
+  CommunicationInteraction,
   ConflictItem,
   ResolutionChoice,
   RejectedWriteRecord,
@@ -34,6 +36,7 @@ import { BottomNav, NavTab } from './BottomNav';
 import { DashboardView } from './views/DashboardView';
 import { TodayView } from './views/TodayView';
 import { ClientsView, ClientsFilterTrigger } from './views/ClientsView';
+import { CommunicationsView } from './views/CommunicationsView';
 import { OpportunitiesView } from './views/OpportunitiesView';
 import { MeetingsView, MeetingsFilterTrigger } from './views/MeetingsView';
 import { TasksView, TasksFilterTrigger } from './views/TasksView';
@@ -49,11 +52,16 @@ import {
 import type { CalendarSettings, CalendarViewMode } from '../types';
 import type { AnalyticsDrillDownTarget } from '../utils/analytics';
 import { OpportunityCloseModal } from './OpportunityCloseModal';
+import { InteractionFormModal } from './InteractionFormModal';
 import { MeetingMinutesPdfModal } from './MeetingMinutesPdfModal';
 import { BiometricLockModal } from './BiometricLockModal';
 import { SearchModal } from './SearchModal';
 import { SettingsModal } from './SettingsModal';
 import { ConflictResolutionModal } from './ConflictResolutionModal';
+import {
+  computeCommunicationCenterSummary,
+  unlinkInteractionReferencesOnDelete,
+} from '../utils/communications';
 import { detectEntityConflict, resolveConflictRecord } from '../utils/conflictLogic';
 import {
   computeDetailedSyncSummary,
@@ -82,6 +90,7 @@ import {
   subscribeNotes,
   subscribeOpportunities,
   subscribeOpportunityStageEvents,
+  subscribeInteractions,
   subscribeReminders,
   subscribeFollowUpPreferences,
   saveClient as fbSaveClient,
@@ -96,6 +105,8 @@ import {
   deleteOpportunity as fbDeleteOpportunity,
   saveOpportunityStageEvent as fbSaveOpportunityStageEvent,
   deleteOpportunityStageEvent as fbDeleteOpportunityStageEvent,
+  saveInteraction as fbSaveInteraction,
+  deleteInteraction as fbDeleteInteraction,
   saveReminderState as fbSaveReminderState,
   deleteReminderState as fbDeleteReminderState,
   saveFollowUpPreferences as fbSaveFollowUpPreferences,
@@ -132,6 +143,7 @@ export function AuthenticatedSession({
   const [notes, setNotes] = useState<Note[]>([]);
   const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
   const [opportunityStageEvents, setOpportunityStageEvents] = useState<OpportunityStageEvent[]>([]);
+  const [interactions, setInteractions] = useState<CommunicationInteraction[]>([]);
   const [reminders, setReminders] = useState<ReminderStateRecord[]>([]);
   const [followUpPreferences, setFollowUpPreferences] = useState<FollowUpPreferences>(() => ({
     ...DEFAULT_FOLLOW_UP_PREFERENCES,
@@ -148,6 +160,7 @@ export function AuthenticatedSession({
   const notesRef = useRef<Note[]>(notes);
   const opportunitiesRef = useRef<Opportunity[]>(opportunities);
   const opportunityStageEventsRef = useRef<OpportunityStageEvent[]>(opportunityStageEvents);
+  const interactionsRef = useRef<CommunicationInteraction[]>(interactions);
   const remindersRef = useRef<ReminderStateRecord[]>(reminders);
   const followUpPrefsRef = useRef<FollowUpPreferences>(followUpPreferences);
   clientsRef.current = clients;
@@ -156,6 +169,7 @@ export function AuthenticatedSession({
   notesRef.current = notes;
   opportunitiesRef.current = opportunities;
   opportunityStageEventsRef.current = opportunityStageEvents;
+  interactionsRef.current = interactions;
   remindersRef.current = reminders;
   followUpPrefsRef.current = followUpPreferences;
 
@@ -166,6 +180,7 @@ export function AuthenticatedSession({
   const noteOpsRef = useRef(new OperationCoordinator<Note>());
   const opportunityOpsRef = useRef(new OperationCoordinator<Opportunity>());
   const opportunityStageEventOpsRef = useRef(new OperationCoordinator<OpportunityStageEvent>());
+  const interactionOpsRef = useRef(new OperationCoordinator<CommunicationInteraction>());
   const reminderOpsRef = useRef(new OperationCoordinator<ReminderStateRecord>());
   const followUpPrefOpsRef = useRef(new OperationCoordinator<FollowUpPreferences>());
 
@@ -177,6 +192,7 @@ export function AuthenticatedSession({
     notes: new Set(),
     opportunities: new Set(),
     opportunityStageEvents: new Set(),
+    interactions: new Set(),
     reminders: new Set(),
     preferences: new Set(),
   });
@@ -196,6 +212,7 @@ export function AuthenticatedSession({
     notes: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
     opportunities: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
     opportunityStageEvents: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
+    interactions: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
     reminders: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
     preferences: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
   });
@@ -265,6 +282,14 @@ export function AuthenticatedSession({
   const [calendarNavTrigger, setCalendarNavTrigger] = useState<CalendarNavigationTrigger | null>(
     null
   );
+  const [interactionModalState, setInteractionModalState] = useState<{
+    isOpen: boolean;
+    initialInteraction?: CommunicationInteraction | null;
+    defaultClientId?: string;
+    defaultContactId?: string;
+    defaultOpportunityId?: string;
+    defaultChannel?: CommunicationChannel;
+  }>({ isOpen: false });
 
   // Listen to browser online/offline transitions + live 60s / visibility clock refresh
   useEffect(() => {
@@ -554,6 +579,33 @@ export function AuthenticatedSession({
       }
     );
 
+    const unsubInteractions = subscribeInteractions(
+      (data, meta) => {
+        if (!isSubscribed) return;
+        interactionsRef.current = data;
+        setInteractions(data);
+        setCollectionSync((prev) => ({
+          ...prev,
+          interactions: {
+            loaded: true,
+            hasPendingWrites: meta.hasPendingWrites,
+            fromCache: meta.fromCache,
+            hasError: false,
+            pendingDocIds: meta.pendingDocIds,
+            pendingDeletesCount: pendingDeleteIdsRef.current.interactions.size,
+          },
+        }));
+      },
+      (err) => {
+        if (!isSubscribed) return;
+        console.warn(`[User ${sessionUid}] Interactions subscription warning:`, err);
+        setCollectionSync((prev) => ({
+          ...prev,
+          interactions: { ...prev.interactions, hasError: true },
+        }));
+      }
+    );
+
     return () => {
       isSubscribed = false;
       clearAttachmentDownloadCache();
@@ -563,6 +615,7 @@ export function AuthenticatedSession({
       unsubNotes();
       unsubOpportunities();
       unsubOpportunityStageEvents();
+      unsubInteractions();
       unsubReminders();
       unsubFollowUpPrefs();
     };
@@ -599,6 +652,7 @@ export function AuthenticatedSession({
       | Note
       | Opportunity
       | OpportunityStageEvent
+      | CommunicationInteraction
       | ReminderStateRecord
       | FollowUpPreferences;
     wasSuperseded?: boolean;
@@ -708,10 +762,11 @@ export function AuthenticatedSession({
         clients,
         meetings,
         tasks,
+        interactions,
         preferences: followUpPreferences,
         referenceDate,
       }),
-    [clients, meetings, tasks, followUpPreferences, referenceDate]
+    [clients, meetings, tasks, interactions, followUpPreferences, referenceDate]
   );
 
   const dailySummary = useMemo(
@@ -721,10 +776,11 @@ export function AuthenticatedSession({
         meetings,
         tasks,
         opportunities,
+        interactions,
         preferences: followUpPreferences,
         referenceDate,
       }),
-    [clients, meetings, tasks, opportunities, followUpPreferences, referenceDate]
+    [clients, meetings, tasks, opportunities, interactions, followUpPreferences, referenceDate]
   );
 
   const evaluatedReminders = useMemo(
@@ -734,11 +790,25 @@ export function AuthenticatedSession({
         meetings,
         tasks,
         opportunities,
+        interactions,
         persistedStates: reminders,
         preferences: followUpPreferences,
         referenceDate,
       }),
-    [clients, meetings, tasks, opportunities, reminders, followUpPreferences, referenceDate]
+    [clients, meetings, tasks, opportunities, interactions, reminders, followUpPreferences, referenceDate]
+  );
+
+  const commCenterSummary = useMemo(
+    () =>
+      computeCommunicationCenterSummary(
+        interactions,
+        clients,
+        meetings,
+        tasks,
+        referenceDate,
+        followUpPreferences.staleClientDays
+      ),
+    [interactions, clients, meetings, tasks, referenceDate, followUpPreferences.staleClientDays]
   );
 
   const calendarConflictsCount = useMemo(() => {
@@ -747,6 +817,7 @@ export function AuthenticatedSession({
       meetings,
       tasks,
       opportunities,
+      interactions,
       currentUserId: user.uid,
       referenceDate,
       timeZone: getLocalTimeZoneName(),
@@ -758,7 +829,7 @@ export function AuthenticatedSession({
       filterScope: 'all',
     });
     return detectCalendarConflicts(events).length;
-  }, [clients, meetings, tasks, opportunities, user.uid, referenceDate, calendarSettings]);
+  }, [clients, meetings, tasks, opportunities, interactions, user.uid, referenceDate, calendarSettings]);
 
   const handleUpdateCalendarSettings = (patch: Partial<CalendarSettings>) => {
     setCalendarSettings((prev) => {
@@ -1472,6 +1543,146 @@ export function AuthenticatedSession({
     await handleSaveTask(updated);
   };
 
+  // Communication Interaction Mutations (Task 011)
+  const handleSaveInteractionRecord = async (
+    interaction: CommunicationInteraction
+  ): Promise<void> => {
+    const withOwner: CommunicationInteraction = {
+      ...interaction,
+      userId: user.uid,
+    };
+    const prevEntity = interactionsRef.current.find((i) => i.id === withOwner.id);
+    const applyUpsert = (prev: CommunicationInteraction[]) => {
+      const idx = prev.findIndex((i) => i.id === withOwner.id);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = withOwner;
+        return next;
+      }
+      return [withOwner, ...prev];
+    };
+    interactionsRef.current = applyUpsert(interactionsRef.current);
+
+    interactionOpsRef.current.runScopedMutation({
+      entityId: withOwner.id,
+      entityType: 'interaction',
+      previousEntity: prevEntity,
+      setState: setInteractions,
+      applyOptimistic: applyUpsert,
+      dispatchWrite: () => fbSaveInteraction(withOwner),
+      onServerConfirmed: ({ wasSuperseded }) => {
+        clearRejectedForEntity('interaction', withOwner.id, wasSuperseded);
+      },
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+        console.warn('Save interaction rejected by server:', error);
+        recordRejectedWrite({
+          opId,
+          entityType: 'interaction',
+          entityId: withOwner.id,
+          entityTitle: withOwner.subject || `تواصل (${withOwner.id})`,
+          operation: 'save',
+          classification,
+          error,
+          payload: withOwner,
+          wasSuperseded,
+        });
+      },
+    });
+  };
+
+  const handleSaveInteraction = async (
+    interaction: CommunicationInteraction,
+    followUpTaskDraft?: ActionItem
+  ): Promise<void> => {
+    await handleSaveInteractionRecord(interaction);
+    if (followUpTaskDraft) {
+      await handleSaveTask({
+        ...followUpTaskDraft,
+        userId: user.uid,
+      });
+    }
+  };
+
+  const handleDeleteInteraction = async (interactionId: string): Promise<void> => {
+    // Unlink any tasks referencing this interaction while preserving the tasks themselves
+    const linkedTasks = tasksRef.current.filter((t) => t.interactionId === interactionId);
+    if (linkedTasks.length > 0) {
+      const unlinkedList = unlinkInteractionReferencesOnDelete(interactionId, linkedTasks);
+      for (const unlinked of unlinkedList) {
+        void handleSaveTask(unlinked);
+      }
+    }
+
+    const prevEntity = interactionsRef.current.find((i) => i.id === interactionId);
+    const applyDelete = (prev: CommunicationInteraction[]) =>
+      prev.filter((i) => i.id !== interactionId);
+    interactionsRef.current = applyDelete(interactionsRef.current);
+    markDeleteInFlight('interactions', interactionId, true);
+
+    interactionOpsRef.current.runScopedMutation({
+      entityId: interactionId,
+      entityType: 'interaction',
+      isDelete: true,
+      previousEntity: prevEntity,
+      setState: setInteractions,
+      applyOptimistic: applyDelete,
+      dispatchWrite: () => fbDeleteInteraction(interactionId),
+      onServerConfirmed: ({ wasSuperseded }) => {
+        markDeleteInFlight('interactions', interactionId, false);
+        clearRejectedForEntity('interaction', interactionId, wasSuperseded);
+      },
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+        markDeleteInFlight('interactions', interactionId, false);
+        console.warn('Delete interaction rejected by server:', error);
+        recordRejectedWrite({
+          opId,
+          entityType: 'interaction',
+          entityId: interactionId,
+          entityTitle: prevEntity?.subject || `تواصل (${interactionId})`,
+          operation: 'delete',
+          classification,
+          error,
+          payload: prevEntity,
+          wasSuperseded,
+        });
+      },
+    });
+  };
+
+  const handleConvertInteractionToTask = async (
+    updatedInteraction: CommunicationInteraction,
+    taskDraft: ActionItem
+  ): Promise<void> => {
+    await handleSaveTask({
+      ...taskDraft,
+      userId: user.uid,
+    });
+    await handleSaveInteractionRecord(updatedInteraction);
+  };
+
+  const handleOpenNewInteraction = (defaults?: {
+    clientId?: string;
+    contactId?: string;
+    opportunityId?: string;
+    channel?: CommunicationChannel;
+  }) => {
+    setInteractionModalState({
+      isOpen: true,
+      initialInteraction: null,
+      defaultClientId: defaults?.clientId,
+      defaultContactId: defaults?.contactId,
+      defaultOpportunityId: defaults?.opportunityId,
+      defaultChannel: defaults?.channel,
+    });
+  };
+
+  const handleEditInteraction = (interaction: CommunicationInteraction) => {
+    setInteractionModalState({
+      isOpen: true,
+      initialInteraction: interaction,
+    });
+  };
+
   // Reminder State & Follow-Up Preferences Mutations (Operation-Scoped + Offline-Honest)
   const handleSaveReminderState = (record: ReminderStateRecord) => {
     const prevEntity = remindersRef.current.find((r) => r.id === record.id);
@@ -1648,6 +1859,8 @@ export function AuthenticatedSession({
         if (opp) void handleDeleteOpportunity(opp);
       } else if (rec.entityType === 'opportunityStageEvent') {
         void handleDeleteOpportunityStageEvent(rec.entityId);
+      } else if (rec.entityType === 'interaction') {
+        void handleDeleteInteraction(rec.entityId);
       } else if (rec.entityType === 'reminder') {
         handleDeleteReminderState(rec.entityId);
       }
@@ -1663,6 +1876,8 @@ export function AuthenticatedSession({
       void handleSaveOpportunityRecord(rec.payload as Opportunity);
     } else if (rec.entityType === 'opportunityStageEvent') {
       void handleSaveOpportunityStageEvent(rec.payload as OpportunityStageEvent);
+    } else if (rec.entityType === 'interaction') {
+      void handleSaveInteractionRecord(rec.payload as CommunicationInteraction);
     } else if (rec.entityType === 'reminder') {
       handleSaveReminderState(rec.payload as ReminderStateRecord);
     } else if (rec.entityType === 'preference') {
@@ -1833,6 +2048,13 @@ export function AuthenticatedSession({
         setSelectedMeetingId(meeting.id);
         setMeetingInitialTab('all');
         setActiveTab('meetings');
+        return;
+      }
+    }
+    if (reminder.sourceType === 'interaction') {
+      const inter = interactionsRef.current.find((i) => i.id === reminder.sourceId);
+      if (inter) {
+        handleEditInteraction(inter);
         return;
       }
     }
@@ -2056,6 +2278,7 @@ export function AuthenticatedSession({
               tasks={tasks}
               notes={notes}
               opportunities={opportunities}
+              interactions={interactions}
               onSelectMeeting={(m: Meeting) => {
                 setSelectedMeetingId(m.id);
                 setMeetingInitialTab('all');
@@ -2156,6 +2379,7 @@ export function AuthenticatedSession({
               onNewTask={handleOpenNewTask}
               onNewMeeting={handleOpenNewMeeting}
               onNewNote={handleOpenNewNote}
+              onLogInteraction={(clientId?: string) => handleOpenNewInteraction({ clientId })}
               onOpenReminderSource={handleOpenReminderSource}
               onSnoozeReminder={handleSnoozeReminder}
               onUnsnoozeReminder={handleUnsnoozeReminder}
@@ -2174,6 +2398,7 @@ export function AuthenticatedSession({
               meetings={meetings}
               tasks={tasks}
               opportunities={opportunities}
+              interactions={interactions}
               currentUserId={user.uid}
               referenceDate={referenceDate}
               isOnline={isOnline}
@@ -2182,12 +2407,14 @@ export function AuthenticatedSession({
                 meetings: collectionSync.meetings.loaded,
                 tasks: collectionSync.tasks.loaded,
                 opportunities: collectionSync.opportunities.loaded,
+                interactions: collectionSync.interactions.loaded,
               }}
               hasPendingWrites={
                 collectionSync.clients.hasPendingWrites ||
                 collectionSync.meetings.hasPendingWrites ||
                 collectionSync.tasks.hasPendingWrites ||
-                collectionSync.opportunities.hasPendingWrites
+                collectionSync.opportunities.hasPendingWrites ||
+                collectionSync.interactions.hasPendingWrites
               }
               calendarSettings={calendarSettings}
               onUpdateCalendarSettings={handleUpdateCalendarSettings}
@@ -2232,6 +2459,7 @@ export function AuthenticatedSession({
               tasks={tasks}
               notes={notes}
               opportunities={opportunities}
+              interactions={interactions}
               onSelectMeeting={(m: Meeting) => {
                 setSelectedMeetingId(m.id);
                 setMeetingInitialTab('all');
@@ -2253,6 +2481,10 @@ export function AuthenticatedSession({
               onOpenClientCalendar={(clientId: string) =>
                 handleNavigateToCalendar({ mode: 'month', clientId })
               }
+              onLogInteraction={handleOpenNewInteraction}
+              onEditInteraction={handleEditInteraction}
+              onDeleteInteraction={handleDeleteInteraction}
+              onConvertInteractionToTask={handleConvertInteractionToTask}
               onSaveClient={handleSaveClient}
               onDeleteClient={handleDeleteClient}
               selectedClientId={selectedClientId}
@@ -2286,6 +2518,35 @@ export function AuthenticatedSession({
             />
           )}
 
+          {activeTab === 'communications' && (
+            <CommunicationsView
+              clients={clients}
+              meetings={meetings}
+              tasks={tasks}
+              opportunities={opportunities}
+              interactions={interactions}
+              staleThresholdDays={followUpPreferences.staleClientDays}
+              language={language}
+              onOpenNewInteraction={handleOpenNewInteraction}
+              onEditInteraction={handleEditInteraction}
+              onDeleteInteraction={(id: string) => {
+                void handleDeleteInteraction(id);
+              }}
+              onConvertInteractionToTask={(updated, draft) => {
+                void handleConvertInteractionToTask(updated, draft);
+              }}
+              onSelectClient={(c: Client) => {
+                setSelectedClientId(c.id);
+                setActiveTab('clients');
+              }}
+              onSelectOpportunity={(opp: Opportunity) => {
+                setSelectedOpportunityId(opp.id);
+                setActiveTab('opportunities');
+              }}
+              onNavigateToTasks={() => setActiveTab('tasks')}
+            />
+          )}
+
           {activeTab === 'opportunities' && (
             <OpportunitiesView
               opportunities={opportunities}
@@ -2293,6 +2554,7 @@ export function AuthenticatedSession({
               clients={clients}
               meetings={meetings}
               tasks={tasks}
+              interactions={interactions}
               selectedOpportunityId={selectedOpportunityId}
               onSelectOpportunity={setSelectedOpportunityId}
               onSaveOpportunity={handleSaveOpportunity}
@@ -2312,6 +2574,8 @@ export function AuthenticatedSession({
               onCreateLinkedTask={(opp: Opportunity) =>
                 handleOpenNewTask(opp.clientId, opp.id)
               }
+              onLogInteraction={handleOpenNewInteraction}
+              onEditInteraction={handleEditInteraction}
               onOpenClient={(clientId: string) => {
                 setSelectedClientId(clientId);
                 setActiveTab('clients');
@@ -2418,11 +2682,30 @@ export function AuthenticatedSession({
           }
           overdueOpportunitiesCount={dailySummary.overdueOpportunitiesCount || 0}
           calendarConflictsCount={calendarConflictsCount}
+          dueCommunicationsCount={
+            commCenterSummary.followUpsDueTodayCount + commCenterSummary.followUpsOverdueCount
+          }
           language={language}
         />
       </div>
 
       {/* Global Modals within User Session Boundary */}
+      <InteractionFormModal
+        isOpen={interactionModalState.isOpen}
+        onClose={() => setInteractionModalState((prev) => ({ ...prev, isOpen: false }))}
+        clients={clients}
+        opportunities={opportunities}
+        tasks={tasks}
+        initialInteraction={interactionModalState.initialInteraction}
+        defaultClientId={interactionModalState.defaultClientId}
+        defaultContactId={interactionModalState.defaultContactId}
+        defaultOpportunityId={interactionModalState.defaultOpportunityId}
+        defaultChannel={interactionModalState.defaultChannel}
+        onSaveInteraction={(interaction, followUpTaskDraft) => {
+          void handleSaveInteraction(interaction, followUpTaskDraft);
+        }}
+      />
+
       {isBiometricLocked && (
         <BiometricLockModal
           isOpen={isBiometricLocked}
@@ -2436,7 +2719,7 @@ export function AuthenticatedSession({
         <SearchModal
           isOpen={isSearchOpen}
           onClose={() => setIsSearchOpen(false)}
-          data={{ clients, meetings, tasks, notes, opportunities }}
+          data={{ clients, meetings, tasks, notes, opportunities, interactions }}
           currentUserId={user.uid}
           collectionsLoaded={{
             clients: collectionSync.clients.loaded,
@@ -2444,6 +2727,7 @@ export function AuthenticatedSession({
             tasks: collectionSync.tasks.loaded,
             notes: collectionSync.notes.loaded,
             opportunities: collectionSync.opportunities.loaded,
+            interactions: collectionSync.interactions.loaded,
           }}
           onSelectClient={(client: Client) => {
             setSelectedClientId(client.id);
@@ -2463,6 +2747,9 @@ export function AuthenticatedSession({
           onSelectOpportunity={(opportunity: Opportunity) => {
             setSelectedOpportunityId(opportunity.id);
             setActiveTab('opportunities');
+          }}
+          onSelectInteraction={(inter: CommunicationInteraction) => {
+            handleEditInteraction(inter);
           }}
           language={language}
         />
@@ -2500,6 +2787,7 @@ export function AuthenticatedSession({
           currentUserId={user.uid}
           opportunities={opportunities}
           opportunityStageEvents={opportunityStageEvents}
+          interactions={interactions}
           isOnline={isOnline}
           collectionsLoaded={{
             clients: collectionSync.clients.loaded,
@@ -2508,6 +2796,7 @@ export function AuthenticatedSession({
             notes: collectionSync.notes.loaded,
             opportunities: collectionSync.opportunities.loaded,
             opportunityStageEvents: collectionSync.opportunityStageEvents.loaded,
+            interactions: collectionSync.interactions.loaded,
           }}
           importHandlers={{
             saveClient: async (client: Client) => {
@@ -2532,6 +2821,10 @@ export function AuthenticatedSession({
             },
             saveOpportunityStageEvent: async (ev: OpportunityStageEvent) => {
               const handle = fbSaveOpportunityStageEvent(ev);
+              await handle.serverPromise;
+            },
+            saveInteraction: async (inter: CommunicationInteraction) => {
+              const handle = fbSaveInteraction(inter);
               await handle.serverPromise;
             },
           }}

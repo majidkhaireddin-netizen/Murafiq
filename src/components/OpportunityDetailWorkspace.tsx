@@ -20,6 +20,7 @@ import {
 import {
   COMMUNICATION_CHANNEL_META,
   COMMUNICATION_OUTCOME_META,
+  resolveInteractionContact,
 } from '../utils/communications';
 import { formatArabicDate, getPriorityBadge } from '../utils/logic';
 import {
@@ -64,6 +65,7 @@ interface OpportunityDetailWorkspaceProps {
   onCreateLinkedMeeting: (opportunity: Opportunity) => void;
   onCreateLinkedTask: (opportunity: Opportunity) => void;
   onLogInteraction?: (defaults: { clientId: string; opportunityId: string }) => void;
+  onEditInteraction?: (interaction: CommunicationInteraction) => void;
   onOpenClient: (clientId: string) => void;
   onOpenMeeting: (meetingId: string) => void;
   onOpenTask: (taskId: string) => void;
@@ -91,6 +93,7 @@ export const OpportunityDetailWorkspace: React.FC<OpportunityDetailWorkspaceProp
   onCreateLinkedMeeting,
   onCreateLinkedTask,
   onLogInteraction,
+  onEditInteraction,
   onOpenClient,
   onOpenMeeting,
   onOpenTask,
@@ -856,8 +859,9 @@ export const OpportunityDetailWorkspace: React.FC<OpportunityDetailWorkspaceProp
                 COMMUNICATION_CHANNEL_META[inter.channel] || COMMUNICATION_CHANNEL_META.other;
               const outMeta =
                 COMMUNICATION_OUTCOME_META[inter.outcome] ||
-                COMMUNICATION_OUTCOME_META.successful;
-              const contactInfo = resolveInteractionContact(inter, client);
+                COMMUNICATION_OUTCOME_META.answered;
+              const contactObj = resolveInteractionContact(client, inter.contactId);
+              const contactDisplayName = contactObj?.name || inter.contactName;
               return (
                 <div
                   key={inter.id}
@@ -878,12 +882,14 @@ export const OpportunityDetailWorkspace: React.FC<OpportunityDetailWorkspaceProp
                       </span>
                       <span className="font-bold text-stone-900">{inter.subject}</span>
                     </div>
-                    <p className="text-[11px] text-stone-600 line-clamp-2">{inter.summary}</p>
+                    {inter.summary && (
+                      <p className="text-[11px] text-stone-600 line-clamp-2">{inter.summary}</p>
+                    )}
                     <div className="flex flex-wrap items-center gap-2 text-[10px] text-stone-500">
                       <span>{formatArabicDate(inter.occurredAt, true)}</span>
-                      {contactInfo.hasContact && (
+                      {contactDisplayName && (
                         <span>
-                          • {language === 'ar' ? 'مع:' : 'With:'} {contactInfo.displayName}
+                          • {language === 'ar' ? 'مع:' : 'With:'} {contactDisplayName}
                         </span>
                       )}
                       {inter.nextStep && (
