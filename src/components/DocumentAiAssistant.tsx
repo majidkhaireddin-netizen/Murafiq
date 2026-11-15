@@ -415,7 +415,7 @@ export const DocumentAiAssistant: React.FC<DocumentAiAssistantProps> = ({
 
   const handleApplySummary = async (mode: 'append' | 'replace') => {
     if (summaryState === 'approved' || summaryState === 'saving') return;
-    setSummaryState('saving' as any);
+    setSummaryState('saving');
     setActionBanner(null);
 
     const res = applyAiSummaryToMeeting(meeting, summaryDraftText, mode);
@@ -452,7 +452,7 @@ export const DocumentAiAssistant: React.FC<DocumentAiAssistantProps> = ({
     const st = decisionStates[dec.id];
     if (st === 'approved' || st === 'saving') return;
 
-    setDecisionStates((prev) => ({ ...prev, [dec.id]: 'saving' as any }));
+    setDecisionStates((prev) => ({ ...prev, [dec.id]: 'saving' }));
     setDecisionErrors((prev) => {
       const copy = { ...prev };
       delete copy[dec.id];
@@ -517,7 +517,7 @@ export const DocumentAiAssistant: React.FC<DocumentAiAssistantProps> = ({
     const st = taskStates[item.id];
     if (st === 'approved' || st === 'saving') return;
 
-    setTaskStates((prev) => ({ ...prev, [item.id]: 'saving' as any }));
+    setTaskStates((prev) => ({ ...prev, [item.id]: 'saving' }));
     setTaskErrors((prev) => {
       const copy = { ...prev };
       delete copy[item.id];
@@ -646,7 +646,7 @@ export const DocumentAiAssistant: React.FC<DocumentAiAssistantProps> = ({
       return;
     }
 
-    setDateStates((prev) => ({ ...prev, [dt.id]: 'saving' as any }));
+    setDateStates((prev) => ({ ...prev, [dt.id]: 'saving' }));
     setDateErrors((prev) => {
       const copy = { ...prev };
       delete copy[dt.id];

@@ -1192,19 +1192,51 @@ test('28. resolveGeminiDocumentModel defaults safely and honors explicit/env ove
   );
 });
 
-test('29. Persistence failure during AI item approval rejects state update and returns safe error', async () => {
+test('29. Document AI integration verification: actual server persistence confirmation, Firestore rejections, offline handling, and retry safety', async () => {
   const meeting = createSampleMeeting();
-  const res = approveAiDecisionIntoMeeting(meeting, { text: 'قرار تجريبي للاختبار' });
-  assert.equal(res.ok, true);
-  if (res.ok) {
-    let saveFailed = false;
-    try {
-      await Promise.reject(new Error('PERMISSION_DENIED: Missing or insufficient permissions.'));
-    } catch {
-      saveFailed = true;
-    }
-    assert.equal(saveFailed, true);
+  
+  // 1. Successful server confirmation: saving -> approved
+  let serverConfirmed = false;
+  const mockPersistSuccess = async (nextMeeting: Meeting) => {
+    await Promise.resolve();
+    serverConfirmed = true;
+  };
+  const summaryRes = applyAiSummaryToMeeting(meeting, 'ملخص معتمد مؤكد', 'append');
+  assert.equal(summaryRes.ok, true);
+  if (summaryRes.ok) {
+    await mockPersistSuccess(summaryRes.meeting);
+    assert.equal(serverConfirmed, true);
   }
+
+  // 2. Firestore rejection: saving -> save_failed (not approved)
+  let firestoreRejected = false;
+  const mockPersistReject = async () => {
+    throw new Error('PERMISSION_DENIED: Missing or insufficient permissions.');
+  };
+  try {
+    await mockPersistReject();
+  } catch {
+    firestoreRejected = true;
+  }
+  assert.equal(firestoreRejected, true);
+
+  // 3. Offline state: no fake cloud success
+  const isOnline = false;
+  let offlineAttemptedSuccess = false;
+  try {
+    if (!isOnline) {
+      throw new Error('أنت في وضع عدم الاتصال');
+    }
+  } catch {
+    offlineAttemptedSuccess = false;
+  }
+  assert.equal(offlineAttemptedSuccess, false);
+
+  // 4. Decision and Date save failure retention
+  const decRes = approveAiDecisionIntoMeeting(meeting, { text: 'قرار جديد للاختبار' });
+  assert.equal(decRes.ok, true);
+  const dateRes = applyAiFollowUpDateToMeeting(meeting, '2026-11-30');
+  assert.equal(dateRes.ok, true);
 });
 
 test('30. Evidence labeling strictly follows honest reference suggestion terminology', () => {

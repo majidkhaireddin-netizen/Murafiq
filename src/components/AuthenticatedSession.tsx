@@ -1094,39 +1094,37 @@ export function AuthenticatedSession({
     };
     tasksRef.current = applyUpsert(tasksRef.current);
 
-    return new Promise<void>((resolve, reject) => {
-      taskOpsRef.current.runScopedMutation({
-        entityId: task.id,
-        entityType: 'task',
-        previousEntity: prevEntity,
-        setState: setTasks,
-        applyOptimistic: applyUpsert,
-        dispatchWrite: () => fbSaveTask(task),
-        onServerConfirmed: ({ wasSuperseded }) => {
-          clearRejectedForEntity('task', task.id, wasSuperseded);
-          resolve();
-        },
-        onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
-          console.warn('Save task rejected by server:', error);
-          recordRejectedWrite({
-            opId,
-            entityType: 'task',
-            entityId: task.id,
-            entityTitle: task.title,
-            operation: 'save',
-            classification,
-            error,
-            payload: task,
-            wasSuperseded,
-          });
-          reject(new Error(classification.messageArabic));
-        },
-      });
+    if (!isOnline) {
+      return Promise.reject(new Error('أنت في وضع عدم الاتصال: لا يمكن إتمام الاعتماد السحابي المؤكد بدون اتصال بالإنترنت.'));
+    }
 
-      if (!isOnline) {
-        resolve();
-      }
+    const handle = taskOpsRef.current.runScopedMutation({
+      entityId: task.id,
+      entityType: 'task',
+      previousEntity: prevEntity,
+      setState: setTasks,
+      applyOptimistic: applyUpsert,
+      dispatchWrite: () => fbSaveTask(task),
+      onServerConfirmed: ({ wasSuperseded }) => {
+        clearRejectedForEntity('task', task.id, wasSuperseded);
+      },
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+        console.warn('Save task rejected by server:', error);
+        recordRejectedWrite({
+          opId,
+          entityType: 'task',
+          entityId: task.id,
+          entityTitle: task.title,
+          operation: 'save',
+          classification,
+          error,
+          payload: task,
+          wasSuperseded,
+        });
+      },
     });
+
+    return handle.serverPromise;
   };
 
   const handleDeleteTask = async (taskId: string): Promise<void> => {
@@ -1179,7 +1177,11 @@ export function AuthenticatedSession({
     };
     meetingsRef.current = applyUpsert(meetingsRef.current);
 
-    meetingOpsRef.current.runScopedMutation({
+    if (!isOnline) {
+      throw new Error('أنت في وضع عدم الاتصال: لا يمكن تأكيد الحفظ السحابي للقاء حالياً.');
+    }
+
+    const handle = meetingOpsRef.current.runScopedMutation({
       entityId: meeting.id,
       entityType: 'meeting',
       previousEntity: prevEntity,
@@ -1204,6 +1206,8 @@ export function AuthenticatedSession({
         });
       },
     });
+
+    return handle.serverPromise;
   };
 
   const handleDeleteMeeting = async (
