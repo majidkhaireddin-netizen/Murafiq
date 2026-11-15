@@ -1,21 +1,27 @@
 import React, { useEffect, useState } from 'react';
-import { ActionItem, Client, Meeting, Opportunity, TaskPriority, TaskStatus, ProvenanceType } from '../../types';
-import { formatArabicDate, getRelativeTimeArabic, categorizeTasks, suggestFollowUpDate } from '../../utils/logic';
+import {
+  ActionItem,
+  Client,
+  Meeting,
+  Opportunity,
+  TaskPriority,
+  ProvenanceType,
+} from '../../types';
+import {
+  formatArabicDate,
+  getRelativeTimeArabic,
+  suggestFollowUpDate,
+} from '../../utils/logic';
 import { ProvenanceBadge } from '../ProvenanceBadge';
 import {
   Briefcase,
-  CheckSquare,
   Plus,
   Clock,
   Calendar,
   Sparkles,
   AlertCircle,
-  MoreVertical,
   CheckCircle2,
   X,
-  ChevronDown,
-  Filter,
-  ArrowRight,
   Trash2,
   Edit2,
 } from 'lucide-react';
@@ -27,13 +33,26 @@ import {
   extractZonedCalendarParts,
 } from '../../utils/followUpEngine';
 import {
+  assignTaskTimeBlock,
+  buildTimeBlockFromDateAndTime,
+  clearTaskTimeBlock,
   decodeTaskTimeBlockFromFirestore,
+  extractZonedHourAndMinute,
+  formatIsoToDateTimeLocalInput,
   formatTimeInZone,
   validateTimeBlockInterval,
 } from '../../utils/calendarEngine';
 
+export type TaskFilterScope =
+  | 'all'
+  | 'overdue'
+  | 'open'
+  | 'time_blocked'
+  | 'unscheduled'
+  | 'completed';
+
 export interface TasksFilterTrigger {
-  scope?: 'all' | 'overdue' | 'open' | 'completed';
+  scope?: TaskFilterScope;
   priority?: string;
   clientId?: string;
   nonce: number;
@@ -65,10 +84,11 @@ interface TasksViewProps {
   language: 'ar' | 'en';
 }
 
+const QUICK_DURATION_OPTIONS = [30, 45, 60, 90, 120] as const;
+
 export const TasksView: React.FC<TasksViewProps> = ({
   tasks,
   clients,
-  meetings,
   opportunities = [],
   onToggleTask,
   onSaveTask,
@@ -82,12 +102,21 @@ export const TasksView: React.FC<TasksViewProps> = ({
   filterTrigger,
   language,
 }) => {
-  const [filterScope, setFilterScope] = useState<'all' | 'overdue' | 'open' | 'completed'>('all');
+  const [filterScope, setFilterScope] = useState<TaskFilterScope>('all');
   const [filterPriority, setFilterPriority] = useState<string>('all');
   const [filterClientId, setFilterClientId] = useState<string>('all');
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<Partial<ActionItem> | null>(null);
   const [formTimeBlockError, setFormTimeBlockError] = useState<string | null>(null);
+
+  // Dedicated Quick Time Block Modal State (schedules work time without altering dueDate)
+  const [timeBlockModalTask, setTimeBlockModalTask] = useState<ActionItem | null>(null);
+  const [tbDateKey, setTbDateKey] = useState<string>('');
+  const [tbStartTime, setTbStartTime] = useState<string>('10:00');
+  const [tbDurationMinutes, setTbDurationMinutes] = useState<number>(60);
+  const [tbStartLocal, setTbStartLocal] = useState<string>('');
+  const [tbEndLocal, setTbEndLocal] = useState<string>('');
+  const [tbError, setTbError] = useState<string | null>(null);
 
   useEffect(() => {
     if (filterTrigger && filterTrigger.nonce > 0) {
@@ -99,16 +128,27 @@ export const TasksView: React.FC<TasksViewProps> = ({
 
   const todayKey = formatCalendarDateKey(extractZonedCalendarParts(new Date()));
 
-  // Filter tasks
+  // Filter tasks (always decode Firestore wire time block first)
   const filteredTasks = tasks
     .map((t) => decodeTaskTimeBlockFromFirestore(t))
     .filter((t) => {
       if (filterPriority !== 'all' && t.priority !== filterPriority) return false;
       if (filterClientId !== 'all' && t.clientId !== filterClientId) return false;
+      const hasValidTimeBlock = Boolean(
+        t.scheduledStartAt &&
+          t.scheduledEndAt &&
+          validateTimeBlockInterval(t.scheduledStartAt, t.scheduledEndAt).valid
+      );
       if (filterScope === 'open') {
         if (t.status === 'completed' || t.status === 'cancelled') return false;
       } else if (filterScope === 'completed') {
         if (t.status !== 'completed') return false;
+      } else if (filterScope === 'time_blocked') {
+        if (t.status === 'completed' || t.status === 'cancelled') return false;
+        if (!hasValidTimeBlock) return false;
+      } else if (filterScope === 'unscheduled') {
+        if (t.status === 'completed' || t.status === 'cancelled') return false;
+        if (hasValidTimeBlock) return false;
       } else if (filterScope === 'overdue') {
         if (t.status === 'completed' || t.status === 'cancelled') return false;
         const dueParts = resolveCalendarParts(t.dueDate);
@@ -135,7 +175,7 @@ export const TasksView: React.FC<TasksViewProps> = ({
       opportunityId: opportunityId || undefined,
       title: '',
       description: '',
-      dueDate: dueDateOverride || new Date().toISOString().split('T')[0],
+      dueDate: dueDateOverride || todayKey,
       scheduledStartAt: scheduledStartAtOverride,
       scheduledEndAt: scheduledEndAtOverride,
       priority: 'medium',
@@ -149,6 +189,120 @@ export const TasksView: React.FC<TasksViewProps> = ({
     setFormTimeBlockError(null);
     setEditingTask({ ...decodeTaskTimeBlockFromFirestore(task) });
     setIsEditModalOpen(true);
+  };
+
+  const handleOpenTimeBlockModal = (rawTask: ActionItem) => {
+    const task = decodeTaskTimeBlockFromFirestore(rawTask);
+    setTbError(null);
+    setTimeBlockModalTask(task);
+
+    if (task.scheduledStartAt && task.scheduledEndAt) {
+      const check = validateTimeBlockInterval(task.scheduledStartAt, task.scheduledEndAt);
+      if (check.valid && check.startMs && check.endMs && check.durationMinutes) {
+        const startDate = new Date(check.startMs);
+        const dateParts = extractZonedCalendarParts(startDate);
+        const hm = extractZonedHourAndMinute(startDate);
+        setTbDateKey(formatCalendarDateKey(dateParts));
+        setTbStartTime(
+          `${String(hm.hour).padStart(2, '0')}:${String(hm.minute).padStart(2, '0')}`
+        );
+        setTbDurationMinutes(check.durationMinutes);
+        setTbStartLocal(formatIsoToDateTimeLocalInput(check.startIso));
+        setTbEndLocal(formatIsoToDateTimeLocalInput(check.endIso));
+        return;
+      }
+    }
+
+    const defaultDateKey =
+      task.dueDate && task.dueDate >= todayKey ? task.dueDate : todayKey;
+    const defaultStart = '10:00';
+    const defaultDur = 60;
+    setTbDateKey(defaultDateKey);
+    setTbStartTime(defaultStart);
+    setTbDurationMinutes(defaultDur);
+    const built = buildTimeBlockFromDateAndTime({
+      dateKey: defaultDateKey,
+      startTimeHHMM: defaultStart,
+      durationMinutes: defaultDur,
+    });
+    setTbStartLocal(
+      built.ok && built.scheduledStartAt
+        ? formatIsoToDateTimeLocalInput(built.scheduledStartAt)
+        : `${defaultDateKey}T10:00`
+    );
+    setTbEndLocal(
+      built.ok && built.scheduledEndAt
+        ? formatIsoToDateTimeLocalInput(built.scheduledEndAt)
+        : `${defaultDateKey}T11:00`
+    );
+  };
+
+  const handleSyncQuickTimeBlockBuilder = (
+    nextDateKey: string,
+    nextStartTime: string,
+    nextDuration: number
+  ) => {
+    setTbError(null);
+    setTbDateKey(nextDateKey);
+    setTbStartTime(nextStartTime);
+    setTbDurationMinutes(nextDuration);
+    const built = buildTimeBlockFromDateAndTime({
+      dateKey: nextDateKey,
+      startTimeHHMM: nextStartTime,
+      durationMinutes: nextDuration,
+    });
+    if (built.ok && built.scheduledStartAt && built.scheduledEndAt) {
+      setTbStartLocal(formatIsoToDateTimeLocalInput(built.scheduledStartAt));
+      setTbEndLocal(formatIsoToDateTimeLocalInput(built.scheduledEndAt));
+    }
+  };
+
+  const handleSaveTimeBlockModal = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!timeBlockModalTask) return;
+
+    const assigned = assignTaskTimeBlock(timeBlockModalTask, tbStartLocal, tbEndLocal);
+    if (!assigned.ok || !assigned.task) {
+      setTbError(
+        assigned.errorAr || 'يرجى التأكد من أن وقت انتهاء العمل المخطط بعد وقت البدء.'
+      );
+      return;
+    }
+
+    await onSaveTask(assigned.task);
+    setTimeBlockModalTask(null);
+    setTbError(null);
+  };
+
+  const handleClearTimeBlockFromModal = async () => {
+    if (!timeBlockModalTask) return;
+    const cleared = clearTaskTimeBlock(timeBlockModalTask);
+    await onSaveTask(cleared);
+    setTimeBlockModalTask(null);
+    setTbError(null);
+  };
+
+  const handleApplyEditModalDurationPreset = (minutes: number) => {
+    if (!editingTask) return;
+    setFormTimeBlockError(null);
+    let baseStartLocal = editingTask.scheduledStartAt
+      ? formatIsoToDateTimeLocalInput(editingTask.scheduledStartAt)
+      : '';
+    if (!baseStartLocal) {
+      const targetDate =
+        editingTask.dueDate && editingTask.dueDate >= todayKey
+          ? editingTask.dueDate
+          : todayKey;
+      baseStartLocal = `${targetDate}T10:00`;
+    }
+    const startMs = new Date(baseStartLocal).getTime();
+    if (Number.isNaN(startMs)) return;
+    const endIso = new Date(startMs + minutes * 60000).toISOString();
+    setEditingTask({
+      ...editingTask,
+      scheduledStartAt: new Date(startMs).toISOString(),
+      scheduledEndAt: endIso,
+    });
   };
 
   useEffect(() => {
@@ -176,7 +330,7 @@ export const TasksView: React.FC<TasksViewProps> = ({
 
   const handleSmartSuggestDate = (priority: TaskPriority) => {
     if (!editingTask) return;
-    const baseDate = editingTask.dueDate || new Date().toISOString().split('T')[0];
+    const baseDate = editingTask.dueDate || todayKey;
     const suggestion = suggestFollowUpDate(baseDate, priority);
     setEditingTask({
       ...editingTask,
@@ -235,6 +389,8 @@ export const TasksView: React.FC<TasksViewProps> = ({
       scheduledEndAt: cleanEndIso,
       priority: editingTask.priority || 'medium',
       status: editingTask.status || 'pending',
+      reminderDate: editingTask.reminderDate,
+      completedAt: editingTask.completedAt,
       provenance: editingTask.provenance || 'approved',
       createdAt: editingTask.createdAt || new Date().toISOString(),
     };
@@ -252,6 +408,10 @@ export const TasksView: React.FC<TasksViewProps> = ({
   const renderTaskItem = (task: ActionItem) => {
     const client = clients.find((c) => c.id === task.clientId);
     const isCompleted = task.status === 'completed';
+    const hasTimeBlock = Boolean(task.scheduledStartAt && task.scheduledEndAt);
+    const timeBlockDateLabel = task.scheduledStartAt
+      ? formatCalendarDateKey(extractZonedCalendarParts(new Date(task.scheduledStartAt)))
+      : '';
 
     const getPriorityBadge = (p: TaskPriority) => {
       switch (p) {
@@ -320,17 +480,15 @@ export const TasksView: React.FC<TasksViewProps> = ({
             )}
 
             <div className="flex items-center gap-3 mt-2 text-[11px] text-stone-400 flex-wrap">
-              {client && (
-                <span className="font-medium text-stone-700">
-                  {client.name}
-                </span>
-              )}
+              {client && <span className="font-medium text-stone-700">{client.name}</span>}
 
               {task.opportunityId && (
                 <button
                   type="button"
                   onClick={() =>
-                    onSelectOpportunity && task.opportunityId && onSelectOpportunity(task.opportunityId)
+                    onSelectOpportunity &&
+                    task.opportunityId &&
+                    onSelectOpportunity(task.opportunityId)
                   }
                   className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200 font-semibold text-[10px] hover:bg-emerald-100"
                 >
@@ -342,52 +500,65 @@ export const TasksView: React.FC<TasksViewProps> = ({
               )}
 
               {task.dueDate && (
-                <span className="text-stone-600 flex items-center gap-1">
+                <span
+                  data-testid={`task-due-date-badge-${task.id}`}
+                  className="text-stone-600 flex items-center gap-1"
+                >
                   <Calendar className="w-3 h-3 text-stone-400" />
                   <span>الاستحقاق: {formatArabicDate(task.dueDate)}</span>
                   <span className="text-stone-400">({getRelativeTimeArabic(task.dueDate)})</span>
                 </span>
               )}
 
-              {task.scheduledStartAt && task.scheduledEndAt && (
+              {hasTimeBlock && task.scheduledStartAt && task.scheduledEndAt && (
                 <span
                   data-testid={`task-time-block-badge-${task.id}`}
                   className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-sky-50 text-sky-900 border border-sky-200 font-semibold text-[10px]"
                 >
                   <Clock className="w-3 h-3 text-sky-700" />
                   <span>
-                    وقت العمل: {task.scheduledStartAt.slice(0, 10)} ·{' '}
+                    وقت العمل: {timeBlockDateLabel} ·{' '}
                     {formatTimeInZone(task.scheduledStartAt, '12h')} -{' '}
                     {formatTimeInZone(task.scheduledEndAt, '12h')}
                   </span>
                 </span>
               )}
 
-              {/* Quick Postpone & Calendar Schedule Shortcuts */}
+              {/* Quick Time Blocking, Postpone & Calendar Shortcuts */}
               {!isCompleted && (
-                <div className="flex items-center gap-1 ltr:ml-auto rtl:mr-auto text-[10px]">
+                <div className="flex items-center gap-1 ltr:ml-auto rtl:mr-auto text-[10px] flex-wrap">
+                  <button
+                    type="button"
+                    data-testid={`task-quick-time-block-${task.id}`}
+                    onClick={() => handleOpenTimeBlockModal(task)}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-sky-600 hover:bg-sky-700 text-white font-semibold shadow-2xs transition-colors"
+                    title="تخطيط وجدولة وقت للعمل على المهمة دون تغيير تاريخ الاستحقاق"
+                  >
+                    <Clock className="w-2.5 h-2.5" />
+                    <span>{hasTimeBlock ? 'تعديل وقت العمل' : 'جدولة وقت عمل'}</span>
+                  </button>
                   {onScheduleInCalendar && (
                     <button
                       type="button"
                       data-testid={`task-schedule-in-calendar-${task.id}`}
                       onClick={() => onScheduleInCalendar(task)}
                       className="px-2 py-0.5 rounded bg-sky-50 border border-sky-200 text-sky-800 hover:bg-sky-100 font-semibold"
-                      title="تخصيص وقت عمل في التقويم"
+                      title="عرض وتخصيص وقت العمل في شبكة التقويم"
                     >
-                      جدولة في التقويم
+                      في التقويم
                     </button>
                   )}
                   <button
                     onClick={() => handlePostponeTask(task, 1)}
                     className="px-1.5 py-0.5 rounded bg-stone-100 text-stone-600 hover:bg-stone-200"
-                    title="تأجيل ليوم غد"
+                    title="تأجيل تاريخ الاستحقاق ليوم غد"
                   >
                     +1 يوم
                   </button>
                   <button
                     onClick={() => handlePostponeTask(task, 3)}
                     className="px-1.5 py-0.5 rounded bg-stone-100 text-stone-600 hover:bg-stone-200"
-                    title="تأجيل 3 أيام"
+                    title="تأجيل تاريخ الاستحقاق 3 أيام"
                   >
                     +3 أيام
                   </button>
@@ -425,7 +596,9 @@ export const TasksView: React.FC<TasksViewProps> = ({
             {language === 'ar' ? 'مهام المتابعة والالتزامات' : 'Action Items & Follow-ups'}
           </h2>
           <p className="text-xs text-stone-500">
-            {language === 'ar' ? 'متابعة دورية مباشرة بدون تعقيد' : 'Direct lightweight action item tracking'}
+            {language === 'ar'
+              ? 'متابعة الالتزامات وتخصيص فترات عمل زمنية (Time Blocking) دون المساس بمواعيد الاستحقاق'
+              : 'Direct action item tracking with non-destructive Time Blocking'}
           </p>
         </div>
         <button
@@ -442,14 +615,14 @@ export const TasksView: React.FC<TasksViewProps> = ({
         <select
           aria-label="تصفية حسب حالة المهام"
           value={filterScope}
-          onChange={(e) =>
-            setFilterScope(e.target.value as 'all' | 'overdue' | 'open' | 'completed')
-          }
+          onChange={(e) => setFilterScope(e.target.value as TaskFilterScope)}
           className="bg-white border border-stone-200 rounded-lg py-1 px-2.5 text-xs text-stone-700 focus:outline-hidden focus:ring-1 focus:ring-emerald-600"
         >
           <option value="all">كل المهام</option>
           <option value="overdue">المتأخرة فقط</option>
           <option value="open">المفتوحة فقط</option>
+          <option value="time_blocked">المجدولة بوقت عمل (Time Blocked)</option>
+          <option value="unscheduled">مفتوحة بدون وقت عمل محجوز</option>
           <option value="completed">المنجزة فقط</option>
         </select>
 
@@ -555,6 +728,209 @@ export const TasksView: React.FC<TasksViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* Dedicated Quick Task Time Blocking Modal (Time Blocking without modifying dueDate) */}
+      {timeBlockModalTask && (
+        <div
+          data-testid="task-quick-time-block-modal"
+          className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-stone-900/60 backdrop-blur-xs overflow-y-auto"
+        >
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full my-auto overflow-hidden border border-stone-200 p-5 space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-stone-200">
+              <div className="flex items-center gap-2">
+                <Clock className="w-5 h-5 text-sky-700" />
+                <div>
+                  <h3 className="font-heading font-bold text-base text-stone-900">
+                    التخطيط الزمني للمهمة (Time Blocking)
+                  </h3>
+                  <p className="text-[11px] text-stone-500">
+                    تخصيص فترة عمل لتنفيذ المهمة دون تعديل تاريخ الاستحقاق
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTimeBlockModalTask(null)}
+                className="p-1 text-stone-400 hover:text-stone-700 rounded-lg"
+                aria-label="إغلاق نافذة التخطيط الزمني"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Task Summary & Preserved Due Date */}
+            <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-1.5 text-xs">
+              <div className="font-bold text-stone-900">{timeBlockModalTask.title}</div>
+              <div className="flex items-center justify-between text-[11px] text-stone-600 flex-wrap gap-2">
+                <span>
+                  العميل:{' '}
+                  <strong>
+                    {clients.find((c) => c.id === timeBlockModalTask.clientId)?.name || '—'}
+                  </strong>
+                </span>
+                <span
+                  data-testid="time-block-modal-preserved-due-date"
+                  className="px-2 py-0.5 rounded bg-amber-50 text-amber-900 border border-amber-200 font-semibold"
+                >
+                  تاريخ الاستحقاق (ثابت):{' '}
+                  {timeBlockModalTask.dueDate
+                    ? formatArabicDate(timeBlockModalTask.dueDate)
+                    : 'غير محدد'}
+                </span>
+              </div>
+            </div>
+
+            <form onSubmit={handleSaveTimeBlockModal} className="space-y-3.5 text-xs">
+              {/* Quick Builder: Date + Start Hour + Duration */}
+              <div className="p-3 rounded-xl bg-sky-50/70 border border-sky-200 space-y-2.5">
+                <span className="font-bold text-sky-950 block">
+                  اختيار سريع ليوم وساعة ومدة العمل
+                </span>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-semibold text-sky-900 mb-0.5">
+                      يوم العمل المخطط
+                    </label>
+                    <input
+                      type="date"
+                      data-testid="tb-quick-date-input"
+                      value={tbDateKey}
+                      onChange={(e) =>
+                        handleSyncQuickTimeBlockBuilder(
+                          e.target.value,
+                          tbStartTime,
+                          tbDurationMinutes
+                        )
+                      }
+                      className="w-full bg-white rounded-lg border border-sky-200 p-1.5 text-xs text-stone-800"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold text-sky-900 mb-0.5">
+                      ساعة البدء
+                    </label>
+                    <input
+                      type="time"
+                      data-testid="tb-quick-start-time-input"
+                      value={tbStartTime}
+                      onChange={(e) =>
+                        handleSyncQuickTimeBlockBuilder(
+                          tbDateKey,
+                          e.target.value,
+                          tbDurationMinutes
+                        )
+                      }
+                      className="w-full bg-white rounded-lg border border-sky-200 p-1.5 text-xs text-stone-800 font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-semibold text-sky-900 mb-1">
+                    المدة المخططة للعمل
+                  </label>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {QUICK_DURATION_OPTIONS.map((mins) => (
+                      <button
+                        key={mins}
+                        type="button"
+                        data-testid={`tb-duration-preset-${mins}`}
+                        onClick={() =>
+                          handleSyncQuickTimeBlockBuilder(tbDateKey, tbStartTime, mins)
+                        }
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-colors ${
+                          tbDurationMinutes === mins
+                            ? 'bg-sky-700 text-white border-sky-700'
+                            : 'bg-white text-sky-900 border-sky-200 hover:bg-sky-100'
+                        }`}
+                      >
+                        {mins} د
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Exact Start & End Timestamp Controls */}
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[11px] font-semibold text-stone-700 mb-1">
+                    بداية العمل (`scheduledStartAt`)
+                  </label>
+                  <input
+                    type="datetime-local"
+                    required
+                    data-testid="tb-direct-start-input"
+                    value={tbStartLocal}
+                    onChange={(e) => {
+                      setTbError(null);
+                      setTbStartLocal(e.target.value);
+                    }}
+                    className="w-full bg-stone-50 rounded-xl border border-stone-200 p-2 text-[11px] font-mono text-stone-800"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-stone-700 mb-1">
+                    نهاية العمل (`scheduledEndAt`)
+                  </label>
+                  <input
+                    type="datetime-local"
+                    required
+                    data-testid="tb-direct-end-input"
+                    value={tbEndLocal}
+                    onChange={(e) => {
+                      setTbError(null);
+                      setTbEndLocal(e.target.value);
+                    }}
+                    className="w-full bg-stone-50 rounded-xl border border-stone-200 p-2 text-[11px] font-mono text-stone-800"
+                  />
+                </div>
+              </div>
+
+              {tbError && (
+                <p
+                  data-testid="tb-modal-error"
+                  className="text-[11px] font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded-lg p-2"
+                >
+                  {tbError}
+                </p>
+              )}
+
+              <div className="flex items-center justify-between gap-2 pt-3 border-t border-stone-100">
+                {timeBlockModalTask.scheduledStartAt && timeBlockModalTask.scheduledEndAt ? (
+                  <button
+                    type="button"
+                    data-testid="tb-modal-clear-btn"
+                    onClick={() => void handleClearTimeBlockFromModal()}
+                    className="px-3 py-1.5 rounded-xl text-rose-700 hover:bg-rose-50 border border-rose-200 font-semibold"
+                  >
+                    إزالة الوقت المحجوز
+                  </button>
+                ) : (
+                  <span />
+                )}
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setTimeBlockModalTask(null)}
+                    className="px-3 py-1.5 rounded-xl text-stone-600 hover:bg-stone-100 font-medium"
+                  >
+                    إلغاء
+                  </button>
+                  <button
+                    type="submit"
+                    data-testid="tb-modal-save-btn"
+                    className="px-4 py-1.5 rounded-xl text-white bg-sky-700 hover:bg-sky-800 font-semibold shadow-xs"
+                  >
+                    حفظ وقت العمل
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Add / Edit Task Modal */}
       {isEditModalOpen && editingTask && (
@@ -728,6 +1104,21 @@ export const TasksView: React.FC<TasksViewProps> = ({
                   )}
                 </div>
 
+                {/* Quick duration chips */}
+                <div className="flex items-center gap-1 flex-wrap">
+                  <span className="text-[10px] text-sky-800 ml-1">مدة سريعة:</span>
+                  {QUICK_DURATION_OPTIONS.map((mins) => (
+                    <button
+                      key={mins}
+                      type="button"
+                      onClick={() => handleApplyEditModalDurationPreset(mins)}
+                      className="px-2 py-0.5 rounded bg-white hover:bg-sky-100 text-sky-900 border border-sky-200 text-[10px] font-semibold transition-colors"
+                    >
+                      {mins} د
+                    </button>
+                  ))}
+                </div>
+
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-[10px] font-semibold text-sky-900 mb-0.5">
@@ -736,11 +1127,7 @@ export const TasksView: React.FC<TasksViewProps> = ({
                     <input
                       type="datetime-local"
                       data-testid="task-modal-scheduled-start"
-                      value={
-                        editingTask.scheduledStartAt
-                          ? editingTask.scheduledStartAt.slice(0, 16)
-                          : ''
-                      }
+                      value={formatIsoToDateTimeLocalInput(editingTask.scheduledStartAt)}
                       onChange={(e) => {
                         setFormTimeBlockError(null);
                         const val = e.target.value;
@@ -759,11 +1146,7 @@ export const TasksView: React.FC<TasksViewProps> = ({
                     <input
                       type="datetime-local"
                       data-testid="task-modal-scheduled-end"
-                      value={
-                        editingTask.scheduledEndAt
-                          ? editingTask.scheduledEndAt.slice(0, 16)
-                          : ''
-                      }
+                      value={formatIsoToDateTimeLocalInput(editingTask.scheduledEndAt)}
                       onChange={(e) => {
                         setFormTimeBlockError(null);
                         const val = e.target.value;

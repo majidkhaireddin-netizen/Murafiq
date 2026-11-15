@@ -36,6 +36,10 @@ import {
   setPrimaryClientContact,
   updateClientContact,
 } from '../utils/client360';
+import {
+  decodeTaskTimeBlockFromFirestore,
+  formatTimeInZone,
+} from '../utils/calendarEngine';
 import { ProvenanceBadge } from './ProvenanceBadge';
 import {
   AlertCircle,
@@ -168,7 +172,10 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
   );
 
   const clientTasks = useMemo(
-    () => tasks.filter((t) => t.clientId === client.id),
+    () =>
+      tasks
+        .filter((t) => t.clientId === client.id)
+        .map((t) => decodeTaskTimeBlockFromFirestore(t)),
     [tasks, client.id]
   );
 
@@ -1504,23 +1511,55 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                         {task.description && (
                           <p className="text-[11px] text-stone-500">{task.description}</p>
                         )}
-                        <div className="text-[11px] text-stone-400">
-                          {task.dueDate
-                            ? `الموعد: ${formatArabicDate(task.dueDate)} (${getRelativeTimeArabic(
-                                task.dueDate
-                              )})`
-                            : 'بدون موعد نهائي'}
+                        <div className="flex items-center flex-wrap gap-2 text-[11px] text-stone-500 pt-0.5">
+                          <span>
+                            {task.dueDate
+                              ? `الاستحقاق: ${formatArabicDate(task.dueDate)} (${getRelativeTimeArabic(
+                                  task.dueDate
+                                )})`
+                              : 'بدون موعد نهائي'}
+                          </span>
+                          {task.scheduledStartAt && task.scheduledEndAt && (
+                            <span
+                              data-testid={`client360-task-time-block-${task.id}`}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-sky-50 text-sky-900 border border-sky-200 font-semibold text-[10px]"
+                            >
+                              <Clock className="w-3 h-3 text-sky-700" />
+                              <span>
+                                وقت العمل: {task.scheduledStartAt.slice(0, 10)} ·{' '}
+                                {formatTimeInZone(task.scheduledStartAt, '12h')} -{' '}
+                                {formatTimeInZone(task.scheduledEndAt, '12h')}
+                              </span>
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => onOpenTask(task)}
-                      className="px-2.5 py-1 rounded-lg border border-stone-200 hover:bg-stone-50 text-[11px] font-semibold text-stone-700 shrink-0"
-                    >
-                      تعديل
-                    </button>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {!isDone && (
+                        <button
+                          type="button"
+                          onClick={() => onOpenTask(task)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-sky-50 hover:bg-sky-100 border border-sky-200 text-[11px] font-semibold text-sky-900"
+                          title="جدولة أو تعديل وقت العمل المخطط دون تغيير تاريخ الاستحقاق"
+                        >
+                          <Clock className="w-3 h-3 text-sky-700" />
+                          <span>
+                            {task.scheduledStartAt && task.scheduledEndAt
+                              ? 'تعديل وقت العمل'
+                              : 'جدولة وقت عمل'}
+                          </span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => onOpenTask(task)}
+                        className="px-2.5 py-1 rounded-lg border border-stone-200 hover:bg-stone-50 text-[11px] font-semibold text-stone-700"
+                      >
+                        تعديل
+                      </button>
+                    </div>
                   </div>
                 );
               })}

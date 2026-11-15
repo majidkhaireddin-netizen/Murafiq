@@ -31,6 +31,7 @@ import {
   isOpportunityOpen,
 } from './opportunities.ts';
 import { normalizeArabicSearchText } from './searchEngine.ts';
+import { decodeTaskTimeBlockFromFirestore } from './calendarEngine.ts';
 
 export const MURAFIQ_EXPORT_SCHEMA_VERSION = 'murafiq-export-v1' as const;
 export const LEGACY_PROTOTYPE_SCHEMA_VERSION = '1.0.0-prototype' as const;
@@ -330,7 +331,7 @@ export function buildUserDataExportBundle(
   });
 
   const cleanTasks = rawTasks.map((t) => ({
-    ...stripSecretsAndInternalFields(t),
+    ...stripSecretsAndInternalFields(decodeTaskTimeBlockFromFirestore(t)),
     userId: uid,
   }));
 
@@ -548,7 +549,7 @@ export function buildEntityCsv(params: BuildEntityCsvParams): string {
   }
 
   if (params.entityType === 'tasks') {
-    const ownedTasks = filterOwned(params.tasks);
+    const ownedTasks = filterOwned(params.tasks).map((t) => decodeTaskTimeBlockFromFirestore(t));
     const headers = [
       'معرف المهمة',
       'العنوان',
@@ -557,6 +558,8 @@ export function buildEntityCsv(params: BuildEntityCsvParams): string {
       'الحالة',
       'الأولوية',
       'تاريخ الاستحقاق',
+      'بداية العمل المخطط',
+      'نهاية العمل المخطط',
       'الوصف',
       'تاريخ الإنجاز',
       'تاريخ الإنشاء',
@@ -569,6 +572,8 @@ export function buildEntityCsv(params: BuildEntityCsvParams): string {
       TASK_STATUS_AR[t.status] || t.status,
       PRIORITY_AR[t.priority] || t.priority,
       t.dueDate || '',
+      t.scheduledStartAt || '',
+      t.scheduledEndAt || '',
       t.description || '',
       t.completedAt || '',
       t.createdAt || '',

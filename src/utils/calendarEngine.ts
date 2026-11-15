@@ -320,6 +320,64 @@ export function formatTimeInZone(
   return formatHourMinuteLabel(hour, minute, timeFormat, language);
 }
 
+/**
+ * Formats an ISO or naive datetime string into a local `YYYY-MM-DDTHH:mm` value
+ * suitable for `<input type="datetime-local" />` without UTC offset shift.
+ */
+export function formatIsoToDateTimeLocalInput(
+  input?: string | null,
+  timeZone?: string
+): string {
+  if (!input || typeof input !== 'string') return '';
+  const trimmed = input.trim();
+  if (!trimmed) return '';
+  const naiveMatch = trimmed.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})/);
+  if (naiveMatch && !timeZone && !trimmed.endsWith('Z') && !/[+-]\d{2}:\d{2}$/.test(trimmed)) {
+    return naiveMatch[1];
+  }
+  const d = new Date(trimmed);
+  if (Number.isNaN(d.getTime())) return '';
+  const parts = extractZonedCalendarParts(d, timeZone);
+  const { hour, minute } = extractZonedHourAndMinute(d, timeZone);
+  const dateKey = formatCalendarDateKey(parts);
+  return `${dateKey}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+/**
+ * Builds validated ISO start and end timestamps from a calendar date (`YYYY-MM-DD`),
+ * start time (`HH:mm`), and duration in minutes.
+ */
+export function buildTimeBlockFromDateAndTime(params: {
+  dateKey: string;
+  startTimeHHMM: string;
+  durationMinutes: number;
+  timeZone?: string;
+}): { ok: boolean; scheduledStartAt?: string; scheduledEndAt?: string; errorAr?: string } {
+  const parts = parseDateOnlyString(params.dateKey);
+  if (!parts) {
+    return { ok: false, errorAr: 'يرجى تحديد تاريخ صحيح لوقت العمل المخطط.' };
+  }
+  const timeMatch = (params.startTimeHHMM || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!timeMatch) {
+    return { ok: false, errorAr: 'يرجى تحديد وقت بدء صحيح (ساعة:دقيقة).' };
+  }
+  const hour = Number(timeMatch[1]);
+  const minute = Number(timeMatch[2]);
+  if (!Number.isFinite(hour) || hour < 0 || hour > 23 || !Number.isFinite(minute) || minute < 0 || minute > 59) {
+    return { ok: false, errorAr: 'وقت البدء المحدد خارج النطاق المسموح.' };
+  }
+  if (!Number.isFinite(params.durationMinutes) || params.durationMinutes < 5 || params.durationMinutes > 1440) {
+    return { ok: false, errorAr: 'مدة العمل المخططة يجب أن تكون بين 5 دقائق و24 ساعة.' };
+  }
+  const startDate = buildZonedDate(parts, hour, minute, params.timeZone);
+  const endDate = new Date(startDate.getTime() + Math.round(params.durationMinutes) * 60000);
+  return {
+    ok: true,
+    scheduledStartAt: startDate.toISOString(),
+    scheduledEndAt: endDate.toISOString(),
+  };
+}
+
 export function formatMonthYearHeaderAr(parts: CalendarDateParts): string {
   return `${MONTH_NAMES_AR[parts.month] || ''} ${parts.year}`;
 }

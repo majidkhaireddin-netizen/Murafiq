@@ -32,6 +32,10 @@ import {
   getRelativeTimeArabic,
 } from '../../utils/logic';
 import { MEETING_STATUS_LABELS } from '../../utils/meetingMinutes';
+import {
+  decodeTaskTimeBlockFromFirestore,
+  formatTimeInZone,
+} from '../../utils/calendarEngine';
 import { ProvenanceBadge } from '../ProvenanceBadge';
 import {
   AlertCircle,
@@ -578,7 +582,8 @@ export const TodayView: React.FC<TodayViewProps> = ({
                       </p>
                     ) : (
                       <div className="divide-y divide-stone-100 border border-stone-200 rounded-xl overflow-hidden">
-                        {bucket.items.map((task) => {
+                        {bucket.items.map((rawTask) => {
+                          const task = decodeTaskTimeBlockFromFirestore(rawTask);
                           const client = clientsById.get(task.clientId);
                           const prio = PRIORITY_LABEL_AR[task.priority];
                           return (
@@ -634,13 +639,13 @@ export const TodayView: React.FC<TodayViewProps> = ({
                                     {task.scheduledStartAt && task.scheduledEndAt && (
                                       <>
                                         <span aria-hidden="true">·</span>
-                                        <span className="px-1.5 py-0.5 rounded bg-sky-50 text-sky-900 border border-sky-200 font-semibold text-[10px] tabular-nums">
+                                        <span
+                                          data-testid={`today-task-time-block-${task.id}`}
+                                          className="px-1.5 py-0.5 rounded bg-sky-50 text-sky-900 border border-sky-200 font-semibold text-[10px] tabular-nums"
+                                        >
                                           وقت العمل المخطط: {task.scheduledStartAt.slice(0, 10)} (
-                                          {new Date(task.scheduledStartAt).toLocaleTimeString('ar', {
-                                            hour: '2-digit',
-                                            minute: '2-digit',
-                                          })}
-                                          )
+                                          {formatTimeInZone(task.scheduledStartAt, '12h')} -{' '}
+                                          {formatTimeInZone(task.scheduledEndAt, '12h')})
                                         </span>
                                       </>
                                     )}
@@ -648,8 +653,19 @@ export const TodayView: React.FC<TodayViewProps> = ({
                                 </div>
                               </div>
 
-                              {/* Quick Reschedule Actions (writes task.dueDate directly) */}
-                              <div className="flex items-center gap-1 shrink-0 self-end sm:self-center">
+                              {/* Quick Time Block & Due Date Reschedule Actions */}
+                              <div className="flex items-center gap-1 shrink-0 self-end sm:self-center flex-wrap">
+                                <button
+                                  type="button"
+                                  data-testid={`today-task-schedule-work-${task.id}`}
+                                  onClick={() => onOpenTask(task)}
+                                  className="px-2 py-1 rounded-lg border border-sky-200 bg-sky-50 hover:bg-sky-100 text-[10px] font-semibold text-sky-900"
+                                  title="جدولة وقت للعمل على المهمة دون تعديل تاريخ الاستحقاق"
+                                >
+                                  {task.scheduledStartAt && task.scheduledEndAt
+                                    ? 'تعديل وقت العمل'
+                                    : 'جدولة وقت عمل'}
+                                </button>
                                 {task.dueDate !== todayKey && (
                                   <button
                                     type="button"
