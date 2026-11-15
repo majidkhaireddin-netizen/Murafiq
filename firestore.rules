@@ -113,7 +113,7 @@ service cloud.firestore {
           'participants', 'agendaItems', 'discussionSummary', 'decisions',
           'followUpDateTime', 'minutesStatus', 'minutesStatusUpdatedAt',
           'minutesIncludedSections', 'minutesAdditionalNotes', 'appliedTemplateId',
-          'opportunityId', 'createdAt', 'updatedAt'
+          'opportunityId', 'preparation', 'createdAt', 'updatedAt'
         ])
         && data.keys().hasAll(['id', 'clientId', 'title', 'dateTime', 'type', 'status', 'notes'])
         && data.id is string && isValidId(data.id)
@@ -140,6 +140,14 @@ service cloud.firestore {
         && (!('minutesAdditionalNotes' in data) || (data.minutesAdditionalNotes is string && data.minutesAdditionalNotes.size() <= 5000))
         && (!('appliedTemplateId' in data) || (data.appliedTemplateId is string && data.appliedTemplateId.size() <= 100))
         && (!('opportunityId' in data) || (data.opportunityId is string && isValidId(data.opportunityId)))
+        && (!('preparation' in data) || (
+          data.preparation is map
+          && data.preparation.keys().hasOnly(['goals', 'notes', 'dismissedTopicKeys', 'updatedAt'])
+          && (!('goals' in data.preparation) || (data.preparation.goals is list && data.preparation.goals.size() <= 20))
+          && (!('notes' in data.preparation) || (data.preparation.notes is string && data.preparation.notes.size() <= 5000))
+          && (!('dismissedTopicKeys' in data.preparation) || (data.preparation.dismissedTopicKeys is list && data.preparation.dismissedTopicKeys.size() <= 60))
+          && (!('updatedAt' in data.preparation) || (data.preparation.updatedAt is string && data.preparation.updatedAt.size() <= 50))
+        ))
         && (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 50))
         && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50));
     }

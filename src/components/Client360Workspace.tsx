@@ -114,6 +114,8 @@ interface Client360WorkspaceProps {
   onDeleteClient: (clientId: string) => Promise<void> | void;
   onNewMeeting: (clientId: string) => void;
   onSelectMeeting: (meeting: Meeting) => void;
+  onPrepareMeeting?: (meeting: Meeting) => void;
+  onPrepareClientMeeting?: (clientId: string) => void;
   onOpenMeetingAttachments: (meeting: Meeting) => void;
   onNewTask: (clientId: string) => void;
   onToggleTask: (taskId: string) => void;
@@ -154,6 +156,8 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
   onDeleteClient,
   onNewMeeting,
   onSelectMeeting,
+  onPrepareMeeting,
+  onPrepareClientMeeting,
   onOpenMeetingAttachments,
   onNewTask,
   onToggleTask,
@@ -655,6 +659,18 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
               <Plus className="w-3.5 h-3.5" />
               <span>اجتماع جديد</span>
             </button>
+
+            {onPrepareClientMeeting && (
+              <button
+                type="button"
+                data-testid="client-360-prepare-meeting-btn"
+                onClick={() => onPrepareClientMeeting(client.id)}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-950 text-xs font-semibold transition-colors"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-amber-700" />
+                <span>تحضير لقاء</span>
+              </button>
+            )}
 
             <button
               type="button"
@@ -1521,7 +1537,18 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2 shrink-0">
+                    <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                      {onPrepareMeeting && (
+                        <button
+                          type="button"
+                          data-testid={`client-360-prepare-meeting-${meeting.id}`}
+                          onClick={() => onPrepareMeeting(meeting)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-900 text-[11px] font-semibold"
+                        >
+                          <Sparkles className="w-3 h-3 text-amber-700" />
+                          <span>حضّرني لهذا الاجتماع</span>
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => onOpenMeetingAttachments(meeting)}

@@ -1,6 +1,11 @@
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
-import type { AiMeetingInputPayload, MeetingAiAnalysisResult } from '../types/index.ts';
+import type {
+  AiBriefingInputPayload,
+  AiMeetingInputPayload,
+  MeetingAiAnalysisResult,
+  MeetingAiBriefingResult,
+} from '../types/index.ts';
 import { isValidResourceId } from '../utils/attachmentPolicy.ts';
 import {
   AI_RATE_LIMIT_MAX_REQUESTS,
@@ -8,6 +13,7 @@ import {
   detectDisallowedAiFields,
   sanitizeIncomingAiPayload,
 } from '../utils/meetingAiAssistant.ts';
+import { sanitizeIncomingAiBriefingPayload } from '../utils/meetingPreparation.ts';
 import {
   verifyFirebaseBearerToken,
   verifyMeetingOwnershipInNamedDb,
@@ -16,6 +22,7 @@ import {
 import {
   analyzeMeetingWithGemini,
   GeminiServiceError,
+  generateMeetingBriefingWithGemini,
 } from './geminiMeetingAssistant.ts';
 
 export interface AiRouterDeps {
@@ -29,6 +36,10 @@ export interface AiRouterDeps {
     payload: AiMeetingInputPayload;
     signal?: AbortSignal;
   }) => Promise<MeetingAiAnalysisResult>;
+  generateBriefing?: (params: {
+    payload: AiBriefingInputPayload;
+    signal?: AbortSignal;
+  }) => Promise<MeetingAiBriefingResult>;
   nowMs?: () => number;
   rateLimitMaxRequests?: number;
   rateLimitWindowMs?: number;
@@ -44,6 +55,7 @@ export function createAiRouter(customDeps: AiRouterDeps = {}) {
   const verifyMeetingOwner =
     customDeps.verifyMeetingOwnership ?? verifyMeetingOwnershipInNamedDb;
   const analyzeMeeting = customDeps.analyzeMeeting ?? analyzeMeetingWithGemini;
+  const generateBriefing = customDeps.generateBriefing ?? generateMeetingBriefingWithGemini;
   const nowMs = customDeps.nowMs ?? (() => Date.now());
   const rateLimitMax = customDeps.rateLimitMaxRequests ?? AI_RATE_LIMIT_MAX_REQUESTS;
   const rateLimitWindow = customDeps.rateLimitWindowMs ?? AI_RATE_LIMIT_WINDOW_MS;
@@ -221,6 +233,149 @@ export function createAiRouter(customDeps: AiRouterDeps = {}) {
       res.status(502).json({
         error: 'AI_ANALYSIS_FAILED',
         messageArabic: 'تعذر إتمام تحليل الاجتماع عبر المساعد الذكي حالياً.',
+      });
+    } finally {
+      inFlightKeys.delete(inFlightKey);
+      res.off('close', onResponseClose);
+    }
+  });
+
+  router.post('/meeting-briefing', async (req: AuthenticatedRequest, res: Response) => {
+    const uid = req.authUser!.uid;
+    const body = (req.body || {}) as Record<string, unknown>;
+
+    // 1. Reject explicit uid/userId/ownerId spoofing immediately
+    const claimedUid = body.uid ?? body.userId ?? body.ownerId;
+    if (claimedUid !== undefined && claimedUid !== uid) {
+      res.status(403).json({
+        error: 'FORBIDDEN',
+        messageArabic: 'مرفوض: لا يُسمح بطلب تحضير ذكي لاجتماع يخص حساباً آخر.',
+      });
+      return;
+    }
+
+    // 2. Reject any disallowed control, secret, or Backblaze B2 attachment fields
+    const disallowedField = detectDisallowedAiFields(body);
+    if (disallowedField) {
+      res.status(400).json({
+        error: 'DISALLOWED_AI_INPUT_FIELD',
+        messageArabic:
+          'مرفوض: يُمنع إرسال المرفقات السحابية أو الروابط المؤقتة أو حقول التحكم في طلب التحضير الذكي.',
+      });
+      return;
+    }
+
+    // 3. Validate meetingId
+    if (!isValidResourceId(body.meetingId)) {
+      res.status(400).json({
+        error: 'INVALID_MEETING_ID',
+        messageArabic: 'معرّف اللقاء غير صالح.',
+      });
+      return;
+    }
+    const meetingId = body.meetingId;
+
+    // 4. Validate and sanitize briefing payload
+    const sanitized = sanitizeIncomingAiBriefingPayload(body);
+    if (!sanitized.ok) {
+      res.status(400).json({
+        error: 'INVALID_BRIEFING_PAYLOAD',
+        messageArabic: sanitized.errorArabic,
+      });
+      return;
+    }
+
+    // 5. Verify meeting ownership inside named Firestore database ONLY
+    try {
+      const ownsMeeting = await verifyMeetingOwner({
+        uid,
+        meetingId,
+        idToken: req.authUser!.idToken,
+      });
+      if (!ownsMeeting) {
+        res.status(403).json({
+          error: 'MEETING_ACCESS_DENIED',
+          messageArabic: 'اللقاء غير موجود أو لا تملك صلاحية الوصول إليه.',
+        });
+        return;
+      }
+    } catch (ownerErr: any) {
+      const msg = String(ownerErr?.message || '');
+      if (msg.startsWith('FORBIDDEN:')) {
+        res.status(403).json({
+          error: 'FORBIDDEN',
+          messageArabic: 'تم رفض الوصول إلى سجل هذا اللقاء.',
+        });
+        return;
+      }
+      res.status(503).json({
+        error: 'OWNERSHIP_VERIFICATION_UNAVAILABLE',
+        messageArabic: 'تعذر التحقق من ملكية اللقاء على الخادم حالياً.',
+      });
+      return;
+    }
+
+    // 6. Per-uid sliding-window rate limit check
+    const currentNow = nowMs();
+    const recent = (requestTimestampsByUid.get(uid) || []).filter(
+      (ts) => currentNow - ts < rateLimitWindow
+    );
+    if (recent.length >= rateLimitMax) {
+      requestTimestampsByUid.set(uid, recent);
+      res.status(429).json({
+        error: 'AI_RATE_LIMITED',
+        messageArabic:
+          'تم إرسال عدد كبير من الطلبات خلال دقيقة واحدة. يرجى الانتظار قليلاً ثم المحاولة مرة أخرى.',
+      });
+      return;
+    }
+    recent.push(currentNow);
+    requestTimestampsByUid.set(uid, recent);
+
+    // 7. Prevent duplicate simultaneous briefing requests for the same user & meeting
+    const inFlightKey = `briefing:${uid}:${meetingId}`;
+    if (inFlightKeys.has(inFlightKey)) {
+      res.status(409).json({
+        error: 'AI_BRIEFING_IN_PROGRESS',
+        messageArabic: 'يوجد طلب تحضير ذكي قيد التنفيذ حالياً لهذا اللقاء. يرجى الانتظار أو إلغاء الطلب السابق.',
+      });
+      return;
+    }
+    inFlightKeys.add(inFlightKey);
+
+    const requestAbortController = new AbortController();
+    const onResponseClose = () => {
+      if (!res.writableEnded) {
+        requestAbortController.abort();
+      }
+    };
+    res.on('close', onResponseClose);
+
+    try {
+      const briefing = await generateBriefing({
+        payload: sanitized.data,
+        signal: requestAbortController.signal,
+      });
+
+      if (res.writableEnded || requestAbortController.signal.aborted) {
+        return;
+      }
+
+      res.json(briefing);
+    } catch (err: any) {
+      if (res.writableEnded) return;
+
+      if (err instanceof GeminiServiceError) {
+        res.status(err.statusCode).json({
+          error: err.errorCode,
+          messageArabic: err.message,
+        });
+        return;
+      }
+
+      res.status(502).json({
+        error: 'AI_BRIEFING_FAILED',
+        messageArabic: 'تعذر إتمام التحضير الذكي المتقدم عبر المساعد حالياً.',
       });
     } finally {
       inFlightKeys.delete(inFlightKey);

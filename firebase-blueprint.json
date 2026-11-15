@@ -68,6 +68,10 @@
         "minutesAdditionalNotes": { "type": "string", "maxLength": 5000 },
         "appliedTemplateId": { "type": "string", "maxLength": 100 },
         "opportunityId": { "type": "string", "maxLength": 128 },
+        "preparation": {
+          "type": "object",
+          "description": "Smart meeting preparation goals, notes, and dismissed topic keys"
+        },
         "createdAt": { "type": "string", "maxLength": 50 },
         "updatedAt": { "type": "string", "maxLength": 50 }
       },

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActionItem,
   Client,
+  CommunicationInteraction,
   Meeting,
   MeetingAgendaItem,
   MeetingDecision,
@@ -9,14 +10,18 @@ import {
   MeetingStatus,
   MeetingType,
   MinutesStatus,
+  Note,
   Opportunity,
+  OpportunityStageEvent,
   ParticipantParty,
+  PreparationCollectionsLoadedState,
   TaskPriority,
 } from '../../types';
 import { formatArabicDate } from '../../utils/logic';
 import { parseMeetingDateTimeMs } from '../../utils/followUpEngine';
 import { MeetingAttachmentsSection } from '../MeetingAttachmentsSection';
 import { MeetingAiAssistant } from '../MeetingAiAssistant';
+import { MeetingPreparationWorkspace } from '../MeetingPreparationWorkspace';
 import type { requestMeetingAiSuggestions } from '../../services/meetingAi';
 import {
   CustomTemplateOverride,
@@ -75,6 +80,7 @@ import {
   Save,
   Search,
   Sparkles,
+  Target,
   Trash2,
   Unlock,
   UserCheck,
@@ -94,7 +100,13 @@ interface MeetingsViewProps {
   meetings: Meeting[];
   clients: Client[];
   tasks: ActionItem[];
+  notes?: Note[];
   opportunities?: Opportunity[];
+  opportunityStageEvents?: OpportunityStageEvent[];
+  interactions?: CommunicationInteraction[];
+  currentUserId?: string;
+  collectionsLoaded?: Partial<PreparationCollectionsLoadedState>;
+  hasPendingWrites?: boolean;
   onSaveMeeting: (meeting: Meeting) => Promise<void> | void;
   onDeleteMeeting?: (
     meetingId: string,
@@ -105,6 +117,8 @@ interface MeetingsViewProps {
   onOpenPdfModal: (meeting: Meeting) => void;
   onNewTaskFromMeeting: (meeting: Meeting) => void;
   onSelectOpportunity?: (opportunityId: string) => void;
+  onSelectClient?: (clientId: string) => void;
+  onOpenTask?: (taskId: string) => void;
   selectedMeetingId?: string | null;
   onSelectMeetingChange?: (meeting: Meeting | null) => void;
   preselectedClientId?: string | null;
@@ -123,8 +137,9 @@ interface MeetingsViewProps {
   requestAiAnalysisFn?: typeof requestMeetingAiSuggestions;
 }
 
-type WorkspaceSectionTab =
+export type WorkspaceSectionTab =
   | 'all'
+  | 'preparation'
   | 'basic'
   | 'participants'
   | 'agenda'
@@ -155,7 +170,13 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
   meetings,
   clients,
   tasks,
+  notes = [],
   opportunities = [],
+  opportunityStageEvents = [],
+  interactions = [],
+  currentUserId,
+  collectionsLoaded,
+  hasPendingWrites = false,
   onSaveMeeting,
   onDeleteMeeting,
   onSaveTask,
@@ -163,6 +184,8 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
   onOpenPdfModal,
   onNewTaskFromMeeting,
   onSelectOpportunity,
+  onSelectClient,
+  onOpenTask,
   selectedMeetingId,
   onSelectMeetingChange,
   preselectedClientId,
@@ -1062,6 +1085,21 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
                       <span>{meetingTasks.length} مهام</span>
                     </span>
                   )}
+
+                  <button
+                    type="button"
+                    data-testid={`prepare-meeting-card-btn-${meeting.id}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setActiveMeeting(meeting);
+                      setWorkspaceTab('preparation');
+                      if (onSelectMeetingChange) onSelectMeetingChange(meeting);
+                    }}
+                    className="ms-auto inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-900 border border-emerald-200 hover:bg-emerald-100 text-[11px] font-bold transition-colors"
+                  >
+                    <Target className="w-3 h-3 text-emerald-700" />
+                    <span>{isArabic ? 'حضّرني لهذا الاجتماع' : 'Prepare Brief'}</span>
+                  </button>
                 </div>
               </div>
             );
@@ -1119,6 +1157,20 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
 
                 {/* Action Controls */}
                 <div className="flex items-center gap-1.5 flex-wrap justify-end shrink-0">
+                  <button
+                    type="button"
+                    data-testid="workspace-header-prepare-btn"
+                    onClick={() => setWorkspaceTab('preparation')}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors ${
+                      workspaceTab === 'preparation'
+                        ? 'bg-emerald-700 text-white border-emerald-700'
+                        : 'border-emerald-300 bg-emerald-50 text-emerald-950 hover:bg-emerald-100'
+                    }`}
+                  >
+                    <Target className="w-3.5 h-3.5" />
+                    <span>{isArabic ? 'حضّرني لهذا الاجتماع' : 'Prepare Brief'}</span>
+                  </button>
+
                   <button
                     type="button"
                     data-testid="workspace-header-ai-btn"
@@ -1341,6 +1393,10 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
               {(
                 [
                   { id: 'all', label: 'جميع الأقسام' },
+                  {
+                    id: 'preparation',
+                    label: `التحضير الذكي (${(activeMeeting.preparation?.goals || []).length})`,
+                  },
                   { id: 'basic', label: '1. الأساسية' },
                   { id: 'participants', label: `2. المشاركون (${activeParticipants.length})` },
                   { id: 'agenda', label: `3. جدول الأعمال (${activeAgenda.length})` },
@@ -1369,6 +1425,64 @@ export const MeetingsView: React.FC<MeetingsViewProps> = ({
 
             {/* Scrollable Workspace Sections */}
             <div className="p-4 sm:p-5 overflow-y-auto space-y-5 flex-1 text-xs">
+              {/* SMART MEETING PREPARATION WORKSPACE */}
+              {workspaceTab === 'preparation' && (
+                <MeetingPreparationWorkspace
+                  meeting={activeMeeting}
+                  clients={clients}
+                  meetings={meetings}
+                  tasks={tasks}
+                  notes={notes}
+                  opportunities={opportunities}
+                  opportunityStageEvents={opportunityStageEvents}
+                  interactions={interactions}
+                  currentUserId={currentUserId}
+                  isOnline={isOnline}
+                  collectionsLoaded={collectionsLoaded}
+                  hasPendingWrites={hasPendingWrites || pendingMeetingIds.includes(activeMeeting.id)}
+                  onSaveMeeting={async (updated) => {
+                    await persistActiveMeeting(updated, 'تم حفظ تحديثات التحضير للاجتماع.');
+                  }}
+                  onSelectClient={(clientId) => {
+                    if (onSelectClient) {
+                      setActiveMeeting(null);
+                      onSelectClient(clientId);
+                    }
+                  }}
+                  onSelectMeeting={(targetMeetingId) => {
+                    const target = meetings.find((m) => m.id === targetMeetingId);
+                    if (target) {
+                      setActiveMeeting(target);
+                      setWorkspaceTab('all');
+                      if (onSelectMeetingChange) onSelectMeetingChange(target);
+                    }
+                  }}
+                  onOpenOpportunity={(oppId) => {
+                    if (onSelectOpportunity) {
+                      setActiveMeeting(null);
+                      onSelectOpportunity(oppId);
+                    }
+                  }}
+                  onOpenTask={(taskId) => {
+                    if (onOpenTask) {
+                      setActiveMeeting(null);
+                      onOpenTask(taskId);
+                    } else {
+                      setWorkspaceTab('followUp');
+                    }
+                  }}
+                  onSwitchWorkspaceTab={(tab) => {
+                    if (tab === 'agenda') setWorkspaceTab('agenda');
+                    else if (tab === 'discussions' || tab === 'minutes') setWorkspaceTab('discussions');
+                    else if (tab === 'decisions') setWorkspaceTab('decisions');
+                    else if (tab === 'tasks') setWorkspaceTab('followUp');
+                    else if (tab === 'ai') setWorkspaceTab('ai');
+                    else setWorkspaceTab('all');
+                  }}
+                  language={language}
+                />
+              )}
+
               {/* 1. BASIC INFO SECTION */}
               {(workspaceTab === 'all' || workspaceTab === 'basic') && (
                 <section

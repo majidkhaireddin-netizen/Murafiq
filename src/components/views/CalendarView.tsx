@@ -102,6 +102,7 @@ interface CalendarViewProps {
   onSaveTask: (task: ActionItem) => Promise<void> | void;
   onToggleTask: (taskId: string) => void;
   onOpenMeeting: (meeting: Meeting) => void;
+  onPrepareMeeting?: (meeting: Meeting) => void;
   onOpenTask: (task: ActionItem) => void;
   onOpenClient: (client: Client) => void;
   onOpenOpportunity: (opportunity: Opportunity) => void;
@@ -172,6 +173,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
   onSaveTask,
   onToggleTask,
   onOpenMeeting,
+  onPrepareMeeting,
   onOpenTask,
   onOpenClient,
   onOpenOpportunity,
@@ -1591,6 +1593,11 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
                     timeFormat={calendarSettings.timeFormat}
                     timeZone={localTimeZone}
                     onOpenRecord={() => handleOpenOriginalRecord(ev)}
+                    onPrepareMeeting={
+                      ev.meetingRef && onPrepareMeeting
+                        ? () => onPrepareMeeting(ev.meetingRef!)
+                        : undefined
+                    }
                     onReschedule={() => {
                       if (ev.meetingRef) {
                         openMeetingRescheduleModal(ev.meetingRef);
@@ -1772,7 +1779,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
                               <div className="text-[9px] opacity-85 truncate">
                                 {ev.clientName}
                               </div>
-                              <div className="flex items-center justify-between gap-1 pt-0.5">
+                              <div className="flex items-center justify-between gap-1 pt-0.5 flex-wrap">
                                 <button
                                   type="button"
                                   onClick={() => handleOpenOriginalRecord(ev)}
@@ -1780,6 +1787,16 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
                                 >
                                   فتح السجل
                                 </button>
+                                {ev.meetingRef && onPrepareMeeting && (
+                                  <button
+                                    type="button"
+                                    data-testid={`week-prepare-btn-${ev.id}`}
+                                    onClick={() => onPrepareMeeting(ev.meetingRef!)}
+                                    className="px-1.5 py-0.5 rounded bg-emerald-700 text-white font-semibold"
+                                  >
+                                    فتح التحضير
+                                  </button>
+                                )}
                                 {(ev.meetingRef || ev.taskRef) && (
                                   <button
                                     type="button"
@@ -1886,6 +1903,11 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
                             }
                             onDragStart={(e) => handleDragStartEvent(e, ev)}
                             onOpenRecord={() => handleOpenOriginalRecord(ev)}
+                            onPrepareMeeting={
+                              ev.meetingRef && onPrepareMeeting
+                                ? () => onPrepareMeeting(ev.meetingRef!)
+                                : undefined
+                            }
                             onReschedule={() => {
                               if (ev.meetingRef) {
                                 openMeetingRescheduleModal(ev.meetingRef);
@@ -2355,6 +2377,11 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
                           timeFormat={calendarSettings.timeFormat}
                           timeZone={localTimeZone}
                           onOpenRecord={() => handleOpenOriginalRecord(ev)}
+                          onPrepareMeeting={
+                            ev.meetingRef && onPrepareMeeting
+                              ? () => onPrepareMeeting(ev.meetingRef!)
+                              : undefined
+                          }
                           onReschedule={() => {
                             if (ev.meetingRef) {
                               openMeetingRescheduleModal(ev.meetingRef);
@@ -2857,6 +2884,7 @@ interface CalendarEventCardProps {
   draggable?: boolean;
   onDragStart?: (e: React.DragEvent) => void;
   onOpenRecord: () => void;
+  onPrepareMeeting?: () => void;
   onReschedule?: () => void;
   onClearTimeBlock?: () => void;
   onToggleTask?: () => void;
@@ -2869,6 +2897,7 @@ const CalendarEventCard: React.FC<CalendarEventCardProps> = ({
   draggable,
   onDragStart,
   onOpenRecord,
+  onPrepareMeeting,
   onReschedule,
   onClearTimeBlock,
   onToggleTask,
@@ -2981,7 +3010,17 @@ const CalendarEventCard: React.FC<CalendarEventCardProps> = ({
           )}
         </div>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {onPrepareMeeting && (
+            <button
+              type="button"
+              data-testid={`calendar-prepare-btn-${event.id}`}
+              onClick={onPrepareMeeting}
+              className="px-2 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-[10px] font-semibold"
+            >
+              فتح التحضير
+            </button>
+          )}
           {onReschedule && !event.isCancelled && (
             <button
               type="button"

@@ -55,6 +55,8 @@ interface ClientsViewProps {
   opportunities?: Opportunity[];
   interactions?: CommunicationInteraction[];
   onSelectMeeting: (meeting: Meeting) => void;
+  onPrepareMeeting?: (meeting: Meeting) => void;
+  onPrepareClientMeeting?: (clientId: string) => void;
   onOpenMeetingAttachments: (meeting: Meeting) => void;
   onNewMeeting: (clientId: string) => void;
   onNewTask: (clientId: string) => void;
@@ -106,6 +108,8 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
   opportunities = [],
   interactions = [],
   onSelectMeeting,
+  onPrepareMeeting,
+  onPrepareClientMeeting,
   onOpenMeetingAttachments,
   onNewMeeting,
   onNewTask,
@@ -369,6 +373,8 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
           onDeleteClient={onDeleteClient}
           onNewMeeting={onNewMeeting}
           onSelectMeeting={onSelectMeeting}
+          onPrepareMeeting={onPrepareMeeting}
+          onPrepareClientMeeting={onPrepareClientMeeting}
           onOpenMeetingAttachments={onOpenMeetingAttachments}
           onNewTask={onNewTask}
           onToggleTask={onToggleTask}

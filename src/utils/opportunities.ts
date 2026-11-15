@@ -194,6 +194,10 @@ export function formatOpportunityMoney(
   return `${formatted} ${currency}`;
 }
 
+export const formatOpportunityValue = formatOpportunityMoney;
+
+export const formatOpportunityValue = formatOpportunityMoney;
+
 export interface CurrencyTotalEntry {
   currency: OpportunityCurrency;
   minorUnits: number;

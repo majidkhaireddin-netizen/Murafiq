@@ -1,13 +1,20 @@
 import type {
   ActionItem,
+  AiBriefingSectionSelection,
   AiSectionInclusionSelection,
   Meeting,
   MeetingAiAnalysisResult,
+  MeetingAiBriefingResult,
+  MeetingPreparationBrief,
 } from '../types/index.ts';
 import {
   buildMeetingAiInputBundle,
   validateAndNormalizeMeetingAiAnalysis,
 } from '../utils/meetingAiAssistant.ts';
+import {
+  buildMeetingAiBriefingInputBundle,
+  validateAndNormalizeMeetingBriefingAi,
+} from '../utils/meetingPreparation.ts';
 import { getCurrentUserIdToken } from './firebase.ts';
 
 export class MeetingAiClientError extends Error {
@@ -146,4 +153,103 @@ export async function requestMeetingAiSuggestions(params: {
   signal?: AbortSignal;
 }): Promise<MeetingAiAnalysisResult> {
   return requestMeetingAiSuggestionsWithDeps(params, defaultRequestDeps);
+}
+
+export async function requestMeetingAiBriefingWithDeps(
+  params: {
+    brief: MeetingPreparationBrief;
+    includedSections: AiBriefingSectionSelection;
+    signal?: AbortSignal;
+  },
+  deps: RequestMeetingAiDeps
+): Promise<MeetingAiBriefingResult> {
+  if (!deps.isOnline()) {
+    throw new MeetingAiClientError(
+      'OFFLINE_BLOCKED',
+      'التحضير المتقدم بالذكاء الاصطناعي يتطلب اتصالاً نشطاً بالإنترنت. يبقى التحضير الذكي المباشر متاحاً بالكامل دون اتصال.'
+    );
+  }
+
+  if (params.brief.isMeetingCancelled) {
+    throw new MeetingAiClientError(
+      'CANCELLED_MEETING_BLOCKED',
+      'هذا الاجتماع في حالة «ملغاة» (للقراءة فقط) ولا يمكن تشغيل التحضير المتقدم له.',
+      400
+    );
+  }
+
+  const bundle = buildMeetingAiBriefingInputBundle(params.brief, params.includedSections);
+  if (bundle.charCount < 15) {
+    throw new MeetingAiClientError(
+      'AI_INPUT_EMPTY',
+      'يرجى تحديد قسم واحد على الأقل يحتوي على بيانات كافية لإعداد التحضير المتقدم.',
+      400
+    );
+  }
+
+  const idToken = await deps.getIdToken();
+
+  let res: Response;
+  try {
+    res = await deps.fetchApi('/api/ai/meeting-briefing', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify(bundle.payload),
+      signal: params.signal,
+    });
+  } catch (err: any) {
+    if (params.signal?.aborted || err?.name === 'AbortError') {
+      throw new MeetingAiClientError('AI_ABORTED', 'تم إلغاء طلب التحضير الذكي المتقدم.');
+    }
+    throw new MeetingAiClientError(
+      'NETWORK_ERROR',
+      'تعذر الاتصال بخادم التطبيق لإعداد التحضير المتقدم. تحقق من اتصال الإنترنت وحاول مرة أخرى.'
+    );
+  }
+
+  let body: any = null;
+  try {
+    body = await res.json();
+  } catch {
+    body = null;
+  }
+
+  if (!res.ok) {
+    const code = typeof body?.error === 'string' ? body.error : `HTTP_${res.status}`;
+    const messageArabic =
+      typeof body?.messageArabic === 'string' && body.messageArabic.trim()
+        ? body.messageArabic
+        : res.status === 401
+        ? 'انتهت جلسة المصادقة. أعد تسجيل الدخول بحساب Google ثم حاول مرة أخرى.'
+        : res.status === 403
+        ? 'غير مصرح لك بالوصول إلى هذا اللقاء.'
+        : res.status === 429
+        ? 'تم تجاوز الحد المؤقت للطلبات. انتظر قليلاً ثم أعد المحاولة.'
+        : res.status === 503
+        ? 'خدمة الذكاء الاصطناعي غير مفعّلة على الخادم حالياً.'
+        : 'تعذر إتمام التحضير المتقدم عبر الخادم. يمكنك الاعتماد على التحضير الذكي المباشر أو المحاولة لاحقاً.';
+    throw new MeetingAiClientError(code, messageArabic, res.status);
+  }
+
+  const validated = validateAndNormalizeMeetingBriefingAi(body, {
+    modelUsed: typeof body?.modelUsed === 'string' ? body.modelUsed : 'gemini-4-hydrogen',
+    generatedAt: typeof body?.generatedAt === 'string' ? body.generatedAt : undefined,
+  });
+
+  if (!validated.ok) {
+    throw new MeetingAiClientError('INVALID_AI_RESPONSE', validated.errorArabic, 502);
+  }
+
+  return validated.data;
+}
+
+export async function requestMeetingAiBriefing(params: {
+  brief: MeetingPreparationBrief;
+  includedSections: AiBriefingSectionSelection;
+  signal?: AbortSignal;
+}): Promise<MeetingAiBriefingResult> {
+  return requestMeetingAiBriefingWithDeps(params, defaultRequestDeps);
 }

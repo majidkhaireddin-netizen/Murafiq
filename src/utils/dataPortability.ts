@@ -42,6 +42,7 @@ import {
   isValidCommunicationOutcome,
   resolveInteractionContact,
 } from './communications.ts';
+import { sanitizeMeetingForSave } from './meetingMinutes.ts';
 
 export const MURAFIQ_EXPORT_SCHEMA_VERSION = 'murafiq-export-v1' as const;
 export const LEGACY_PROTOTYPE_SCHEMA_VERSION = '1.0.0-prototype' as const;
@@ -136,6 +137,7 @@ const MEETING_ALLOWED_KEYS = new Set([
   'minutesAdditionalNotes',
   'appliedTemplateId',
   'opportunityId',
+  'preparation',
   'createdAt',
   'updatedAt',
 ]);
@@ -1705,6 +1707,16 @@ export function validateAndPreviewImport(input: ValidateImportInput): ImportPrev
             obj.opportunityId
           )}) لعدم وجودها.`,
         });
+      }
+    }
+
+    if (obj.preparation && typeof obj.preparation === 'object' && !Array.isArray(obj.preparation)) {
+      const sanitizedPrep = sanitizeMeetingForSave({
+        ...meeting,
+        preparation: obj.preparation,
+      }).preparation;
+      if (sanitizedPrep) {
+        meeting.preparation = sanitizedPrep;
       }
     }
 

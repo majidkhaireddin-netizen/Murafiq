@@ -3,7 +3,10 @@ import type {
   Meeting,
   MeetingAgendaItem,
   MeetingDecision,
+  MeetingGoalStatus,
   MeetingParticipant,
+  MeetingPreparationData,
+  MeetingPreparationGoal,
   MeetingStatus,
   MeetingType,
   MinutesSectionKey,
@@ -688,6 +691,53 @@ export function sanitizeMeetingForSave(meeting: Partial<Meeting> & { id: string;
   }
   if (meeting.opportunityId && meeting.opportunityId.trim()) {
     sanitized.opportunityId = meeting.opportunityId.trim().slice(0, 128);
+  }
+  if (meeting.preparation && typeof meeting.preparation === 'object') {
+    const rawPrep = meeting.preparation;
+    const allowedGoalStatuses = new Set<MeetingGoalStatus>([
+      'planned',
+      'achieved',
+      'partially_achieved',
+      'not_achieved',
+      'deferred',
+    ]);
+    const rawGoals = Array.isArray(rawPrep.goals) ? rawPrep.goals : [];
+    const cleanGoals: MeetingPreparationGoal[] = rawGoals
+      .filter((g) => g && typeof g === 'object' && typeof g.text === 'string' && g.text.trim().length > 0)
+      .slice(0, 20)
+      .map((g, idx) => {
+        const status: MeetingGoalStatus = allowedGoalStatuses.has(g.status) ? g.status : 'planned';
+        const goal: MeetingPreparationGoal = {
+          id: (typeof g.id === 'string' && g.id.trim() ? g.id.trim() : `goal-${idx + 1}`).slice(0, 64),
+          text: g.text.trim().slice(0, 300),
+          status,
+          order: idx + 1,
+          createdAt: (typeof g.createdAt === 'string' && g.createdAt.trim() ? g.createdAt.trim() : now).slice(0, 50),
+          updatedAt: (typeof g.updatedAt === 'string' && g.updatedAt.trim() ? g.updatedAt.trim() : now).slice(0, 50),
+        };
+        if (typeof g.note === 'string' && g.note.trim()) {
+          goal.note = g.note.trim().slice(0, 1000);
+        }
+        return goal;
+      });
+
+    const cleanPrep: MeetingPreparationData = {
+      goals: cleanGoals,
+      updatedAt: (typeof rawPrep.updatedAt === 'string' && rawPrep.updatedAt.trim()
+        ? rawPrep.updatedAt.trim()
+        : now
+      ).slice(0, 50),
+    };
+    if (typeof rawPrep.notes === 'string') {
+      cleanPrep.notes = rawPrep.notes.slice(0, 5000);
+    }
+    if (Array.isArray(rawPrep.dismissedTopicKeys) && rawPrep.dismissedTopicKeys.length > 0) {
+      cleanPrep.dismissedTopicKeys = rawPrep.dismissedTopicKeys
+        .filter((k): k is string => typeof k === 'string' && k.trim().length > 0)
+        .slice(0, 60)
+        .map((k) => k.trim().slice(0, 128));
+    }
+    sanitized.preparation = cleanPrep;
   }
 
   return sanitized;

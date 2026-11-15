@@ -252,7 +252,9 @@ export function AuthenticatedSession({
     targetStage: OpportunityStage;
   } | null>(null);
 
-  const [meetingInitialTab, setMeetingInitialTab] = useState<'all' | 'attachments' | null>(null);
+  const [meetingInitialTab, setMeetingInitialTab] = useState<
+    'all' | 'preparation' | 'attachments' | null
+  >(null);
   const [meetingCreateTrigger, setMeetingCreateTrigger] = useState<{
     clientId?: string;
     opportunityId?: string;
@@ -2026,6 +2028,31 @@ export function AuthenticatedSession({
     setActiveTab('meetings');
   };
 
+  const handlePrepareMeeting = (meeting: Meeting) => {
+    setSelectedMeetingId(meeting.id);
+    setMeetingInitialTab('preparation');
+    setActiveTab('meetings');
+  };
+
+  const handlePrepareClientMeeting = (clientId: string) => {
+    const nowMs = referenceDate.getTime() - 3600000;
+    const upcomingForClient = meetingsRef.current
+      .filter((m) => m.clientId === clientId && m.status !== 'cancelled')
+      .filter((m) => {
+        const ms = new Date(m.dateTime).getTime();
+        return !Number.isNaN(ms) && ms >= nowMs;
+      })
+      .sort((a, b) => new Date(a.dateTime).getTime() - new Date(b.dateTime).getTime());
+
+    if (upcomingForClient.length > 0) {
+      handlePrepareMeeting(upcomingForClient[0]);
+      return;
+    }
+
+    // No upcoming meeting: open new meeting creation for this client (never auto-creates)
+    handleOpenNewMeeting(clientId);
+  };
+
   const handleOpenReminderSource = (reminder: ReminderItem) => {
     if (reminder.sourceType === 'opportunity') {
       const opp = opportunitiesRef.current.find((o) => o.id === reminder.sourceId);
@@ -2368,6 +2395,7 @@ export function AuthenticatedSession({
                 setMeetingInitialTab('all');
                 setActiveTab('meetings');
               }}
+              onPrepareMeeting={handlePrepareMeeting}
               onSelectClient={(c: Client) => {
                 setSelectedClientId(c.id);
                 setActiveTab('clients');
@@ -2426,6 +2454,7 @@ export function AuthenticatedSession({
                 setMeetingInitialTab('all');
                 setActiveTab('meetings');
               }}
+              onPrepareMeeting={handlePrepareMeeting}
               onOpenTask={handleOpenExistingTask}
               onOpenClient={(c: Client) => {
                 setSelectedClientId(c.id);
@@ -2465,6 +2494,8 @@ export function AuthenticatedSession({
                 setMeetingInitialTab('all');
                 setActiveTab('meetings');
               }}
+              onPrepareMeeting={handlePrepareMeeting}
+              onPrepareClientMeeting={handlePrepareClientMeeting}
               onOpenMeetingAttachments={handleOpenMeetingAttachments}
               onNewMeeting={handleOpenNewMeeting}
               onNewTask={handleOpenNewTask}
@@ -2601,7 +2632,21 @@ export function AuthenticatedSession({
               meetings={meetings}
               clients={clients}
               tasks={tasks}
+              notes={notes}
               opportunities={opportunities}
+              opportunityStageEvents={opportunityStageEvents}
+              interactions={interactions}
+              currentUserId={user.uid}
+              collectionsLoaded={{
+                clients: collectionSync.clients.loaded,
+                meetings: collectionSync.meetings.loaded,
+                tasks: collectionSync.tasks.loaded,
+                notes: collectionSync.notes.loaded,
+                opportunities: collectionSync.opportunities.loaded,
+                opportunityStageEvents: collectionSync.opportunityStageEvents.loaded,
+                interactions: collectionSync.interactions.loaded,
+              }}
+              hasPendingWrites={collectionSync.meetings.hasPendingWrites}
               onSaveMeeting={handleSaveMeeting}
               onDeleteMeeting={handleDeleteMeeting}
               onSaveTask={handleSaveTaskWithResult}
@@ -2611,6 +2656,14 @@ export function AuthenticatedSession({
               onSelectOpportunity={(oppId: string) => {
                 setSelectedOpportunityId(oppId);
                 setActiveTab('opportunities');
+              }}
+              onSelectClient={(clientId: string) => {
+                setSelectedClientId(clientId);
+                setActiveTab('clients');
+              }}
+              onOpenTask={(taskId: string) => {
+                const task = tasksRef.current.find((t) => t.id === taskId);
+                if (task) handleOpenExistingTask(task);
               }}
               selectedMeetingId={selectedMeetingId}
               onSelectMeetingChange={(m: Meeting | null) => setSelectedMeetingId(m ? m.id : null)}

@@ -123,8 +123,34 @@ export interface Meeting {
   minutesAdditionalNotes?: string;
   appliedTemplateId?: string;
   opportunityId?: string;
+  // Task 012: Smart Meeting Preparation & Briefing (strictly optional for legacy compatibility)
+  preparation?: MeetingPreparationData;
   createdAt: string;
   updatedAt: string;
+}
+
+export type MeetingGoalStatus =
+  | 'planned'
+  | 'achieved'
+  | 'partially_achieved'
+  | 'not_achieved'
+  | 'deferred';
+
+export interface MeetingPreparationGoal {
+  id: string;
+  text: string;
+  status: MeetingGoalStatus;
+  note?: string;
+  order: number;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface MeetingPreparationData {
+  goals?: MeetingPreparationGoal[];
+  notes?: string;
+  dismissedTopicKeys?: string[];
+  updatedAt?: string;
 }
 
 export interface ActionItem {
@@ -1047,6 +1073,202 @@ export interface CommunicationCenterSummary {
   byOutcome: Record<CommunicationOutcome, number>;
 }
 
+// =========================================================================
+// Task 012: Smart Meeting Preparation & Briefing Types
+// =========================================================================
 
+export interface PreparationCollectionsLoadedState {
+  clients: boolean;
+  meetings: boolean;
+  tasks: boolean;
+  notes: boolean;
+  opportunities: boolean;
+  opportunityStageEvents: boolean;
+  interactions: boolean;
+}
 
+export interface PreparationCompletenessMeta {
+  isOnline: boolean;
+  allCollectionsLoaded: boolean;
+  unloadedCollectionsAr: string[];
+  hasPendingWrites: boolean;
+  status: 'complete_online' | 'partial_or_offline';
+  disclosureAr: string;
+}
+
+export type SuggestedDiscussionTopicSourceType =
+  | 'overdue_task'
+  | 'due_today_task'
+  | 'opportunity_next_action'
+  | 'interaction_follow_up'
+  | 'previous_meeting_follow_up'
+  | 'previous_decision';
+
+export interface SuggestedDiscussionTopic {
+  key: string;
+  title: string;
+  reasonAr: string;
+  sourceType: SuggestedDiscussionTopicSourceType;
+  sourceId: string;
+  sourceLabelAr: string;
+  priorityWeight: number;
+  alreadyInAgenda: boolean;
+  isDismissed: boolean;
+}
+
+export interface PreviousMeetingBriefItem {
+  meeting: Meeting;
+  summaryExcerpt: string;
+  decisions: MeetingDecision[];
+  openTasksCount: number;
+  completedTasksCount: number;
+}
+
+export interface MeetingPreparationBrief {
+  meeting: Meeting;
+  client: Client | null;
+  primaryContact: ClientContact | null;
+  contacts: ClientContact[];
+  participants: MeetingParticipant[];
+  completeness: PreparationCompletenessMeta;
+  relationshipSummary: {
+    totalInteractionsCount: number;
+    confirmedInteractionsCount: number;
+    attemptInteractionsCount: number;
+    lastConfirmedInteraction: CommunicationInteraction | null;
+    lastAttemptInteraction: CommunicationInteraction | null;
+    lastHeldMeeting: Meeting | null;
+    lastConfirmedContactAt: string | null;
+    daysSinceLastConfirmedContact: number | null;
+    pendingFollowUpInteractions: CommunicationInteraction[];
+    overdueFollowUpInteractions: CommunicationInteraction[];
+    recentInteractions: CommunicationInteraction[];
+    recordsDisclosureAr: string;
+  };
+  previousMeetings: PreviousMeetingBriefItem[];
+  recentDecisions: {
+    decision: MeetingDecision;
+    meetingId: string;
+    meetingTitle: string;
+    meetingDate: string;
+  }[];
+  openTasks: {
+    overdue: ActionItem[];
+    dueToday: ActionItem[];
+    upcoming: ActionItem[];
+    noDueDate: ActionItem[];
+    totalOpenCount: number;
+  };
+  opportunitiesContext: {
+    linkedOpportunity: Opportunity | null;
+    linkedOpportunityStageEvents: OpportunityStageEvent[];
+    otherClientOpportunities: Opportunity[];
+  };
+  suggestedTopics: SuggestedDiscussionTopic[];
+  goals: MeetingPreparationGoal[];
+  preparationNotes: string;
+  clientNotes: Note[];
+  isMinutesFinalLocked: boolean;
+  isMeetingCancelled: boolean;
+  canEditAgendaAndMinutes: boolean;
+  canEditGoals: boolean;
+  canUpdatePostMeetingGoalStatus: boolean;
+  minutesStatusLabelAr: string;
+}
+
+export type AiBriefingSectionInclusionKey =
+  | 'currentMeeting'
+  | 'clientSummary'
+  | 'previousMeetings'
+  | 'openTasks'
+  | 'opportunityDetails'
+  | 'recentInteractions'
+  | 'clientNotes';
+
+export type AiBriefingSectionSelection = Record<AiBriefingSectionInclusionKey, boolean>;
+
+export interface AiBriefingInputPayload {
+  meetingId: string;
+  meetingTitle: string;
+  meetingDateTime: string;
+  meetingType?: string;
+  meetingLocation?: string;
+  meetingStatus?: string;
+  includedSections: AiBriefingSectionSelection;
+  clientSummary?: {
+    name: string;
+    company?: string;
+    industry?: string;
+    relationshipStatus?: string;
+    importance?: string;
+    primaryContactName?: string;
+    primaryContactRole?: string;
+  };
+  agendaItems?: { title: string; notes?: string }[];
+  preparationGoals?: { text: string; status: string; note?: string }[];
+  preparationNotes?: string;
+  previousMeetings?: {
+    title: string;
+    dateTime: string;
+    status: string;
+    summary: string;
+    decisions: string[];
+  }[];
+  openTasks?: {
+    title: string;
+    dueDate?: string;
+    priority: string;
+    status: string;
+    bucket: string;
+  }[];
+  linkedOpportunity?: {
+    title: string;
+    stage: string;
+    priority: string;
+    valueDisplay?: string;
+    expectedCloseDate?: string;
+    nextAction?: string;
+    nextActionDate?: string;
+  };
+  otherOpenOpportunitiesCount?: number;
+  recentInteractions?: {
+    channel: string;
+    direction: string;
+    occurredAt: string;
+    outcome: string;
+    isConfirmedContact: boolean;
+    subject: string;
+    summary?: string;
+    nextStep?: string;
+    nextFollowUpDate?: string;
+  }[];
+  clientNotes?: { title: string; content: string }[];
+}
+
+export type AiBriefingBasisType = 'documented_fact' | 'inference' | 'ai_suggestion';
+
+export interface AiBriefingTalkingPoint {
+  id: string;
+  title: string;
+  rationale: string;
+  basisType: AiBriefingBasisType;
+  sourceReferenceAr?: string;
+}
+
+export interface AiBriefingSuggestedGoal {
+  id: string;
+  text: string;
+  note?: string;
+}
+
+export interface MeetingAiBriefingResult {
+  executiveBriefing: string;
+  recommendedTalkingPoints: AiBriefingTalkingPoint[];
+  suggestedQuestions: string[];
+  potentialRisks: string[];
+  expectedOutcomes: AiBriefingSuggestedGoal[];
+  warnings: string[];
+  generatedAt: string;
+  modelUsed: string;
+}
 

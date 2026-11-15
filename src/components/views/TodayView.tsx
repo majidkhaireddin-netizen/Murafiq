@@ -86,6 +86,7 @@ interface TodayViewProps {
   onOpenTask: (task: ActionItem) => void;
   onSaveTask: (task: ActionItem) => Promise<void> | void;
   onSelectMeeting: (meeting: Meeting) => void;
+  onPrepareMeeting?: (meeting: Meeting) => void;
   onSelectClient: (client: Client) => void;
   onSelectOpportunity?: (opportunity: Opportunity) => void;
   onNewTask: (clientId?: string) => void;
@@ -151,6 +152,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
   onOpenTask,
   onSaveTask,
   onSelectMeeting,
+  onPrepareMeeting,
   onSelectClient,
   onSelectOpportunity,
   onNewTask,
@@ -810,6 +812,16 @@ export const TodayView: React.FC<TodayViewProps> = ({
                       </div>
 
                       <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
+                        {onPrepareMeeting && (
+                          <button
+                            type="button"
+                            data-testid={`today-prepare-meeting-btn-${item.meeting.id}`}
+                            onClick={() => onPrepareMeeting(item.meeting)}
+                            className="px-2.5 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-semibold"
+                          >
+                            تحضير الاجتماع
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => onSelectMeeting(item.meeting)}
