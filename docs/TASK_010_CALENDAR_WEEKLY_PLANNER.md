@@ -50,10 +50,11 @@
   2. حجز فترة عمل أو تعديلها لا يغير `dueDate` ولا يغير حالة المهمة إلى `completed`.
   3. إزالة فترة العمل (`clearTaskTimeBlock`) تحذف `scheduledStartAt` و `scheduledEndAt` فقط دون حذف المهمة أو المساس بـ `dueDate` أو `status`.
 
-### ب. التوافق الآمن مع قواعد Firestore المنشورة (بدون نشر قواعد جديدة)
-- التزامًا بالقيد رقم 8 («عدم نشر قواعد Firestore»)، وحيث إن القواعد المنشورة حاليًا على قاعدة البيانات المسماة تتحقق من مفاتيح وثيقة المهمة (`hasOnly`) وتسمح بحقل `reminderDate` بطول يصل إلى 50 حرفًا:
-  - يقوم `encodeTaskTimeBlockForFirestore` عند الحفظ بترميز فترة العمل داخل `reminderDate` بصيغة مدمجة آمنة (`tb:<startEpochSec>:<endEpochSec>` أو `<YYYY-MM-DD>#tb:<startEpochSec>:<endEpochSec>` بطول أقصى 35 حرفًا `<= 50`).
-  - يقوم `decodeTaskTimeBlockFromFirestore` عند القراءة في `subscribeTasks` بفك الترميز تلقائيًا واستعادة `scheduledStartAt` و `scheduledEndAt` و `reminderDate` الأصلي بشفافية تامة، مع دعم القراءة المباشرة للحقلين في حال وجودهما.
+### ب. التخزين في حقول مستقلة داخل Firestore ومعالجة أخطاء المزامنة
+- تُخزن حقول التخطيط الزمني **`scheduledStartAt`** و **`scheduledEndAt`** كحقلين مستقلين تمامًا في مستند المهمة (`/users/{uid}/tasks/{taskId}`) عبر `sanitizeTaskForFirestoreSave` في `src/utils/calendarEngine.ts` و `saveTask` في `src/services/firebase.ts`.
+- يبقى الحقل **`reminderDate`** مستقلًا تمامًا ومخصصًا للتذكيرات فقط، ولا يتغير عند إضافة أو تعديل أو حذف فترة العمل (`Time Block`).
+- تم إلغاء الترميز القديم من جميع عمليات الحفظ الجديدة، مع الإبقاء على `decodeTaskTimeBlockFromFirestore` للقراءة فقط حفاظًا على التوافق مع أي سجلات سابقة.
+- في حال رفضت القواعد المنشورة على الخادم عملية الحفظ (`permission-denied`)، يظهر فشل المزامنة بوضوح للمستخدم مع الاحتفاظ الكامل بالمسودة (داخل النافذة المفتوحة وفي مركز استعادة العمليات المرفوضة `rejectedWrites`) دون العودة إلى ترميز البيانات داخل `reminderDate`.
 
 ---
 

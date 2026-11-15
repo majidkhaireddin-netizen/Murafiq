@@ -269,17 +269,33 @@ export const TasksView: React.FC<TasksViewProps> = ({
       return;
     }
 
-    await onSaveTask(assigned.task);
-    setTimeBlockModalTask(null);
-    setTbError(null);
+    try {
+      await onSaveTask(assigned.task);
+      setTimeBlockModalTask(null);
+      setTbError(null);
+    } catch (err) {
+      setTbError(
+        err instanceof Error && err.message
+          ? err.message
+          : 'تعذرت مزامنة وقت العمل مع الخادم. تم الاحتفاظ بالمسودة.'
+      );
+    }
   };
 
   const handleClearTimeBlockFromModal = async () => {
     if (!timeBlockModalTask) return;
     const cleared = clearTaskTimeBlock(timeBlockModalTask);
-    await onSaveTask(cleared);
-    setTimeBlockModalTask(null);
-    setTbError(null);
+    try {
+      await onSaveTask(cleared);
+      setTimeBlockModalTask(null);
+      setTbError(null);
+    } catch (err) {
+      setTbError(
+        err instanceof Error && err.message
+          ? err.message
+          : 'تعذرت مزامنة التعديل مع الخادم. تم الاحتفاظ بالمسودة.'
+      );
+    }
   };
 
   const handleApplyEditModalDurationPreset = (minutes: number) => {
@@ -402,6 +418,11 @@ export const TasksView: React.FC<TasksViewProps> = ({
       setFormTimeBlockError(null);
     } catch (err) {
       console.warn('TasksView: Save task failed, keeping modal open for retry:', err);
+      setFormTimeBlockError(
+        err instanceof Error && err.message
+          ? err.message
+          : 'تعذرت مزامنة المهمة مع الخادم. تم الاحتفاظ بالمسودة.'
+      );
     }
   };
 

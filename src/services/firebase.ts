@@ -68,7 +68,7 @@ import { sanitizeClientForSave } from '../utils/client360';
 import { sanitizeOpportunityForSave } from '../utils/opportunities';
 import {
   decodeTaskTimeBlockFromFirestore,
-  encodeTaskTimeBlockForFirestore,
+  sanitizeTaskForFirestoreSave,
 } from '../utils/calendarEngine';
 
 // Initialize Firebase App
@@ -903,13 +903,12 @@ export function deleteMeeting(
 export function saveTask(task: ActionItem): QueuedWriteHandle {
   const uid = getAuthenticatedUid();
   const path = `users/${uid}/tasks/${task.id}`;
-  const rawPayload: ActionItem = {
+  const rawPayload: ActionItem = sanitizeTaskForFirestoreSave({
     ...task,
     userId: uid,
     createdAt: task.createdAt || new Date().toISOString(),
-  };
-  const wireCompatible = encodeTaskTimeBlockForFirestore(rawPayload);
-  const payload = sanitizeFirestorePayload(wireCompatible);
+  });
+  const payload = sanitizeFirestorePayload(rawPayload);
   const serverPromise = trackInFlightWrite(
     setDoc(doc(db, 'users', uid, 'tasks', task.id), payload).catch((error) =>
       handleFirestoreError(error, OperationType.WRITE, path)

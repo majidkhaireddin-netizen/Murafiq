@@ -1717,8 +1717,9 @@ export function validateAndPreviewImport(input: ValidateImportInput): ImportPrev
     if (description) task.description = description;
     const dueDate = clampStr(obj.dueDate, 50);
     if (dueDate) task.dueDate = dueDate;
-    const scheduledStartAt = clampStr(obj.scheduledStartAt, 50);
-    const scheduledEndAt = clampStr(obj.scheduledEndAt, 50);
+    const decodedLegacy = decodeTaskTimeBlockFromFirestore(obj);
+    const scheduledStartAt = clampStr(decodedLegacy.scheduledStartAt ?? obj.scheduledStartAt, 50);
+    const scheduledEndAt = clampStr(decodedLegacy.scheduledEndAt ?? obj.scheduledEndAt, 50);
     if (scheduledStartAt && scheduledEndAt) {
       const startMs = Date.parse(scheduledStartAt);
       const endMs = Date.parse(scheduledEndAt);
@@ -1727,7 +1728,7 @@ export function validateAndPreviewImport(input: ValidateImportInput): ImportPrev
         task.scheduledEndAt = new Date(endMs).toISOString();
       }
     }
-    const reminderDate = clampStr(obj.reminderDate, 50);
+    const reminderDate = clampStr(decodedLegacy.reminderDate, 50);
     if (reminderDate) task.reminderDate = reminderDate;
     const completedAt = clampStr(obj.completedAt, 50);
     if (completedAt) task.completedAt = completedAt;

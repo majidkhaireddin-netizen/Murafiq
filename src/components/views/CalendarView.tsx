@@ -589,9 +589,23 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
         return;
       }
 
-      await onSaveMeeting(res.meeting);
-      setRescheduleModal(null);
-      showNotice(`تم تحديث موعد الاجتماع «${res.meeting.title}» بنجاح.`);
+      try {
+        await onSaveMeeting(res.meeting);
+        setRescheduleModal(null);
+        showNotice(`تم تحديث موعد الاجتماع «${res.meeting.title}» بنجاح.`);
+      } catch (err) {
+        setRescheduleModal((prev) =>
+          prev
+            ? {
+                ...prev,
+                errorAr:
+                  err instanceof Error && err.message
+                    ? err.message
+                    : 'تعذرت مزامنة موعد الاجتماع مع الخادم. تم الاحتفاظ بالمسودة.',
+              }
+            : null
+        );
+      }
       return;
     }
 
@@ -609,21 +623,57 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
         return;
       }
 
-      await onSaveTask(res.task);
-      setRescheduleModal(null);
-      showNotice(
-        `تم تخصيص وقت عمل للمهمة «${res.task.title}» دون تغيير موعد استحقاقها الأصلي.`
-      );
+      try {
+        await onSaveTask(res.task);
+        setRescheduleModal(null);
+        showNotice(
+          `تم تخصيص وقت عمل للمهمة «${res.task.title}» دون تغيير موعد استحقاقها الأصلي.`
+        );
+      } catch (err) {
+        setRescheduleModal((prev) =>
+          prev
+            ? {
+                ...prev,
+                errorAr:
+                  err instanceof Error && err.message
+                    ? err.message
+                    : 'تعذرت مزامنة وقت العمل مع الخادم. تم الاحتفاظ بالمسودة.',
+              }
+            : null
+        );
+      }
     }
   };
 
   const handleClearTaskTimeBlock = async (task: ActionItem) => {
     const cleared = clearTaskTimeBlock(task);
-    await onSaveTask(cleared);
-    if (rescheduleModal?.task?.id === task.id) {
-      setRescheduleModal(null);
+    try {
+      await onSaveTask(cleared);
+      if (rescheduleModal?.task?.id === task.id) {
+        setRescheduleModal(null);
+      }
+      showNotice(`تم إلغاء تخصيص وقت العمل للمهمة «${task.title}» مع بقاء المهمة كما هي.`);
+    } catch (err) {
+      if (rescheduleModal?.task?.id === task.id) {
+        setRescheduleModal((prev) =>
+          prev
+            ? {
+                ...prev,
+                errorAr:
+                  err instanceof Error && err.message
+                    ? err.message
+                    : 'تعذرت مزامنة التعديل مع الخادم. تم الاحتفاظ بالمسودة.',
+              }
+            : null
+        );
+      } else {
+        showNotice(
+          err instanceof Error && err.message
+            ? err.message
+            : 'تعذرت مزامنة التعديل مع الخادم. تم الاحتفاظ بالمسودة.'
+        );
+      }
     }
-    showNotice(`تم إلغاء تخصيص وقت العمل للمهمة «${task.title}» مع بقاء المهمة كما هي.`);
   };
 
   const handleOpenOriginalRecord = (ev: CalendarEventItem) => {
@@ -711,9 +761,23 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
       );
       return;
     }
-    await onSaveTask(res.task);
-    setQuickSlotModal(null);
-    showNotice(`تمت جدولة وقت عمل للمهمة «${res.task.title}» بنجاح.`);
+    try {
+      await onSaveTask(res.task);
+      setQuickSlotModal(null);
+      showNotice(`تمت جدولة وقت عمل للمهمة «${res.task.title}» بنجاح.`);
+    } catch (err) {
+      setQuickSlotModal((prev) =>
+        prev
+          ? {
+              ...prev,
+              errorAr:
+                err instanceof Error && err.message
+                  ? err.message
+                  : 'تعذرت مزامنة جدولة المهمة مع الخادم. تم الاحتفاظ بالمسودة.',
+            }
+          : null
+      );
+    }
   };
 
   // Period header title

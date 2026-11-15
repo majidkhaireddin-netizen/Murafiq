@@ -2192,7 +2192,7 @@ export function AuthenticatedSession({
               calendarSettings={calendarSettings}
               onUpdateCalendarSettings={handleUpdateCalendarSettings}
               onSaveMeeting={handleSaveMeeting}
-              onSaveTask={handleSaveTask}
+              onSaveTask={handleSaveTaskWithResult}
               onToggleTask={handleToggleTask}
               onOpenMeeting={(m: Meeting) => {
                 setSelectedMeetingId(m.id);
@@ -2370,7 +2370,7 @@ export function AuthenticatedSession({
               meetings={meetings}
               opportunities={opportunities}
               onToggleTask={handleToggleTask}
-              onSaveTask={handleSaveTask}
+              onSaveTask={handleSaveTaskWithResult}
               onDeleteTask={handleDeleteTask}
               onSelectOpportunity={(oppId: string) => {
                 setSelectedOpportunityId(oppId);

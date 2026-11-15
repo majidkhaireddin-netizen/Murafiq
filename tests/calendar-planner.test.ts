@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import type { ActionItem, Client, Meeting, Opportunity } from '../src/types/index.ts';
+import { readFileSync } from 'node:fs';
+import type { ActionItem, Client, Meeting, Opportunity, RejectedWriteRecord } from '../src/types/index.ts';
 import {
   AVAILABLE_SLOTS_DISCLOSURE_AR,
   DEFAULT_CALENDAR_SETTINGS,
@@ -14,12 +15,18 @@ import {
   computeDayAvailableSlots,
   decodeTaskTimeBlockFromFirestore,
   detectCalendarConflicts,
-  encodeTaskTimeBlockForFirestore,
   extractZonedHourAndMinute,
   navigateCalendarDate,
+  sanitizeTaskForFirestoreSave,
   validateTimeBlockInterval,
 } from '../src/utils/calendarEngine.ts';
 import { extractZonedCalendarParts, formatCalendarDateKey } from '../src/utils/followUpEngine.ts';
+import {
+  OperationCoordinator,
+  applyScopedRejection,
+  classifyWriteError,
+  serializeRejectedDraftJson,
+} from '../src/utils/sessionState.ts';
 
 const USER_A = 'user-alpha-100';
 const USER_B = 'user-beta-200';
@@ -802,26 +809,205 @@ describe('Task 010: Integrated Calendar, Weekly Planner & Time Blocking (30 Scen
     assert.equal(formatCalendarDateKey(zonedParts), '2026-05-12');
   });
 
-  it('30. يرمّز ويفك ترميز فترة عمل المهمة (Time Block) للتوافق مع قواعد Firestore الحية ضمن حد 50 حرفًا', () => {
+  it('30. يخزن scheduledStartAt و scheduledEndAt كحقلين مستقلين في مستند المهمة مع إبقاء reminderDate مستقلًا تمامًا والتوافق مع firestore.rules', () => {
     const taskWithBlock = makeTask({
+      dueDate: '2026-05-20',
       reminderDate: '2026-05-12',
       scheduledStartAt: '2026-05-12T08:00:00.000Z',
       scheduledEndAt: '2026-05-12T09:30:00.000Z',
     });
 
-    const wirePayload = encodeTaskTimeBlockForFirestore(taskWithBlock);
-    assert.equal('scheduledStartAt' in wirePayload, false);
-    assert.equal('scheduledEndAt' in wirePayload, false);
-    assert.ok(typeof wirePayload.reminderDate === 'string');
-    assert.ok(
-      wirePayload.reminderDate.length <= 50,
-      `يجب ألا يتجاوز reminderDate 50 حرفًا، الطول الفعلي: ${wirePayload.reminderDate.length}`
-    );
+    const savedPayload = sanitizeTaskForFirestoreSave(taskWithBlock);
+    assert.equal('scheduledStartAt' in savedPayload, true, 'يجب وجود scheduledStartAt كحقل مستقل عند الحفظ');
+    assert.equal('scheduledEndAt' in savedPayload, true, 'يجب وجود scheduledEndAt كحقل مستقل عند الحفظ');
+    assert.equal(savedPayload.scheduledStartAt, '2026-05-12T08:00:00.000Z');
+    assert.equal(savedPayload.scheduledEndAt, '2026-05-12T09:30:00.000Z');
+    assert.equal(savedPayload.reminderDate, '2026-05-12', 'يجب أن يبقى reminderDate مستقلًا تمامًا ومخصصًا للتذكيرات');
+    assert.equal(savedPayload.reminderDate?.includes('tb:'), false, 'يُمنع ترميز حجز الوقت داخل reminderDate');
+    assert.equal(savedPayload.dueDate, '2026-05-20');
+    assert.ok(savedPayload.scheduledStartAt!.length <= 50);
+    assert.ok(savedPayload.scheduledEndAt!.length <= 50);
+    assert.ok(savedPayload.reminderDate!.length <= 50);
 
-    const decoded = decodeTaskTimeBlockFromFirestore(wirePayload);
+    // Verify reading the saved payload preserves all independent fields
+    const decoded = decodeTaskTimeBlockFromFirestore(savedPayload);
     assert.equal(decoded.reminderDate, '2026-05-12');
+    assert.equal(decoded.dueDate, '2026-05-20');
     assert.equal(decoded.scheduledStartAt, '2026-05-12T08:00:00.000Z');
     assert.equal(decoded.scheduledEndAt, '2026-05-12T09:30:00.000Z');
+
+    // Verify firestore.rules explicitly allows scheduledStartAt, scheduledEndAt, and reminderDate in isValidTask
+    const rulesContent = readFileSync(new URL('../firestore.rules', import.meta.url), 'utf8');
+    assert.ok(rulesContent.includes("'scheduledStartAt'"), 'يجب أن يتضمن firestore.rules حقل scheduledStartAt');
+    assert.ok(rulesContent.includes("'scheduledEndAt'"), 'يجب أن يتضمن firestore.rules حقل scheduledEndAt');
+    assert.ok(
+      rulesContent.includes("(!('scheduledStartAt' in data) || (data.scheduledStartAt is string && data.scheduledStartAt.size() <= 50))")
+    );
+    assert.ok(
+      rulesContent.includes("(!('scheduledEndAt' in data) || (data.scheduledEndAt is string && data.scheduledEndAt.size() <= 50))")
+    );
     assert.equal(DEFAULT_CALENDAR_SETTINGS.weekStartDay, 6);
+  });
+
+  it('31. يضمن أن إضافة أو تعديل أو حذف حجز الوقت (Time Block) لا يغير reminderDate أو dueDate أبدًا', () => {
+    const initialTask = makeTask({
+      id: 'task-preserve-reminder-due',
+      dueDate: '2026-05-25',
+      reminderDate: '2026-05-18',
+      status: 'pending',
+    });
+
+    // 1. Assign initial Time Block
+    const assigned1 = assignTaskTimeBlock(
+      initialTask,
+      '2026-05-12T08:00:00.000Z',
+      '2026-05-12T09:30:00.000Z'
+    );
+    assert.equal(assigned1.ok, true);
+    assert.ok(assigned1.task);
+    assert.equal(assigned1.task.dueDate, '2026-05-25');
+    assert.equal(assigned1.task.reminderDate, '2026-05-18');
+    assert.equal(assigned1.task.scheduledStartAt, '2026-05-12T08:00:00.000Z');
+    assert.equal(assigned1.task.scheduledEndAt, '2026-05-12T09:30:00.000Z');
+
+    const saved1 = sanitizeTaskForFirestoreSave(assigned1.task);
+    assert.equal(saved1.dueDate, '2026-05-25');
+    assert.equal(saved1.reminderDate, '2026-05-18');
+    assert.equal(saved1.scheduledStartAt, '2026-05-12T08:00:00.000Z');
+    assert.equal(saved1.scheduledEndAt, '2026-05-12T09:30:00.000Z');
+
+    // 2. Modify Time Block to a different day/time
+    const assigned2 = assignTaskTimeBlock(
+      saved1,
+      '2026-05-14T11:00:00.000Z',
+      '2026-05-14T12:15:00.000Z'
+    );
+    assert.equal(assigned2.ok, true);
+    assert.ok(assigned2.task);
+    assert.equal(assigned2.task.dueDate, '2026-05-25');
+    assert.equal(assigned2.task.reminderDate, '2026-05-18');
+    assert.equal(assigned2.task.scheduledStartAt, '2026-05-14T11:00:00.000Z');
+    assert.equal(assigned2.task.scheduledEndAt, '2026-05-14T12:15:00.000Z');
+
+    // 3. Clear Time Block
+    const cleared = clearTaskTimeBlock(assigned2.task);
+    const savedCleared = sanitizeTaskForFirestoreSave(cleared);
+    assert.equal(savedCleared.dueDate, '2026-05-25');
+    assert.equal(savedCleared.reminderDate, '2026-05-18');
+    assert.equal(savedCleared.scheduledStartAt, undefined);
+    assert.equal(savedCleared.scheduledEndAt, undefined);
+    assert.equal('scheduledStartAt' in savedCleared, false);
+    assert.equal('scheduledEndAt' in savedCleared, false);
+  });
+
+  it('32. يحافظ على فك الترميز القديم للقراءة فقط للسجلات السابقة ويحولها إلى حقول مستقلة عند أي حفظ جديد', () => {
+    const legacyRawRecord = {
+      id: 'task-legacy-1',
+      userId: USER_A,
+      clientId: 'client-1',
+      title: 'مهمة محفوظة بالترميز القديم',
+      dueDate: '2026-05-22',
+      reminderDate: '2026-05-12#tb:1778572800:1778578200', // 2026-05-12T08:00:00.000Z -> 2026-05-12T09:30:00.000Z
+      priority: 'high',
+      status: 'pending',
+      createdAt: '2026-05-01T08:00:00.000Z',
+    };
+
+    const decoded = decodeTaskTimeBlockFromFirestore(legacyRawRecord);
+    assert.equal(decoded.reminderDate, '2026-05-12');
+    assert.equal(decoded.dueDate, '2026-05-22');
+    assert.equal(decoded.scheduledStartAt, '2026-05-12T08:00:00.000Z');
+    assert.equal(decoded.scheduledEndAt, '2026-05-12T09:30:00.000Z');
+
+    // If saved again, it stores independent fields and cleans reminderDate
+    const migratedSave = sanitizeTaskForFirestoreSave(legacyRawRecord as ActionItem);
+    assert.equal(migratedSave.reminderDate, '2026-05-12');
+    assert.equal(migratedSave.scheduledStartAt, '2026-05-12T08:00:00.000Z');
+    assert.equal(migratedSave.scheduledEndAt, '2026-05-12T09:30:00.000Z');
+  });
+
+  it('33. يظهر فشل المزامنة بوضوح ويحتفظ بالمسودة كاملة عند رفض القواعد المنشورة للحفظ دون العودة لترميز reminderDate', async () => {
+    const originalTask = makeTask({
+      id: 'task-sync-reject',
+      dueDate: '2026-05-20',
+      reminderDate: '2026-05-15',
+    });
+    const assigned = assignTaskTimeBlock(
+      originalTask,
+      '2026-05-12T08:00:00.000Z',
+      '2026-05-12T09:30:00.000Z'
+    );
+    assert.ok(assigned.task);
+
+    const payloadToSave = sanitizeTaskForFirestoreSave(assigned.task);
+    // Verify payload sent to Firestore never encodes inside reminderDate
+    assert.equal(payloadToSave.reminderDate, '2026-05-15');
+    assert.equal(payloadToSave.scheduledStartAt, '2026-05-12T08:00:00.000Z');
+    assert.equal(payloadToSave.scheduledEndAt, '2026-05-12T09:30:00.000Z');
+
+    let stateItems: ActionItem[] = [originalTask];
+    let rejectedWrites: RejectedWriteRecord[] = [];
+    const coordinator = new OperationCoordinator<ActionItem>();
+
+    const handle = coordinator.runScopedMutation({
+      entityId: payloadToSave.id,
+      entityType: 'task',
+      previousEntity: originalTask,
+      setState: (updater) => {
+        stateItems = updater(stateItems);
+      },
+      applyOptimistic: (prev) => prev.map((t) => (t.id === payloadToSave.id ? payloadToSave : t)),
+      dispatchWrite: () => ({
+        serverPromise: Promise.reject(
+          Object.assign(new Error('Missing or insufficient permissions.'), {
+            code: 'permission-denied',
+          })
+        ),
+      }),
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+        rejectedWrites = applyScopedRejection(rejectedWrites, {
+          record: {
+            opId,
+            entityType: 'task',
+            entityId: payloadToSave.id,
+            entityTitle: payloadToSave.title,
+            operation: 'save',
+            category: classification.category,
+            messageArabic: classification.messageArabic,
+            rawMessage: error.message,
+            payload: payloadToSave,
+            occurredAt: '2026-05-12T08:00:00.000Z',
+          },
+          wasSuperseded,
+        });
+      },
+    });
+
+    await handle.serverPromise;
+
+    // 1. State reconciles cleanly back to previousEntity without corrupting local state
+    assert.equal(stateItems[0]?.scheduledStartAt, undefined);
+    assert.equal(stateItems[0]?.reminderDate, '2026-05-15');
+
+    // 2. Sync failure is recorded clearly with Arabic permission-denied explanation
+    assert.equal(rejectedWrites.length, 1);
+    const rejected = rejectedWrites[0]!;
+    assert.equal(rejected.category, 'permission-denied');
+    assert.ok(rejected.messageArabic.includes('رفض الخادم حفظ المهمة'));
+
+    // 3. Full draft is retained with independent scheduledStartAt, scheduledEndAt, reminderDate, and dueDate
+    const draftPayload = rejected.payload as ActionItem;
+    assert.equal(draftPayload.scheduledStartAt, '2026-05-12T08:00:00.000Z');
+    assert.equal(draftPayload.scheduledEndAt, '2026-05-12T09:30:00.000Z');
+    assert.equal(draftPayload.reminderDate, '2026-05-15');
+    assert.equal(draftPayload.dueDate, '2026-05-20');
+
+    const exportedDraftJson = JSON.parse(serializeRejectedDraftJson(rejected));
+    assert.equal(exportedDraftJson.payload.scheduledStartAt, '2026-05-12T08:00:00.000Z');
+    assert.equal(exportedDraftJson.payload.scheduledEndAt, '2026-05-12T09:30:00.000Z');
+    assert.equal(exportedDraftJson.payload.reminderDate, '2026-05-15');
+
+    const directClass = classifyWriteError({ code: 'permission-denied', message: 'Denied' }, 'task');
+    assert.equal(directClass.category, 'permission-denied');
   });
 });

@@ -518,8 +518,22 @@ export function validateTimeBlockInterval(
   };
 }
 
+const LEGACY_TIME_BLOCK_TOKEN_REGEX = /^(?:(.*?)#)?tb:(\d{8,12}):(\d{8,12})$/;
+
+function extractCleanReminderDate(rawReminder?: string | null): string | undefined {
+  if (typeof rawReminder !== 'string') return undefined;
+  const trimmed = rawReminder.trim();
+  if (!trimmed) return undefined;
+  const legacyMatch = trimmed.match(LEGACY_TIME_BLOCK_TOKEN_REGEX);
+  if (legacyMatch) {
+    const baseReminder = (legacyMatch[1] || '').trim();
+    return baseReminder ? baseReminder.slice(0, 50) : undefined;
+  }
+  return trimmed.slice(0, 50);
+}
+
 /**
- * Assigns or updates a Time Block on a task WITHOUT modifying its dueDate or status,
+ * Assigns or updates a Time Block on a task WITHOUT modifying its dueDate, reminderDate, or status,
  * and without creating a duplicate task.
  */
 export function assignTaskTimeBlock(
@@ -531,80 +545,115 @@ export function assignTaskTimeBlock(
   if (!check.valid || !check.startIso || !check.endIso) {
     return { ok: false, errorAr: check.errorAr };
   }
+  const cleanReminder = extractCleanReminderDate(task.reminderDate);
+  const nextTask: ActionItem = {
+    ...task,
+    // Preserve dueDate, reminderDate, and status strictly as-is
+    dueDate: task.dueDate,
+    status: task.status,
+    scheduledStartAt: check.startIso,
+    scheduledEndAt: check.endIso,
+  };
+  if (cleanReminder !== undefined) {
+    nextTask.reminderDate = cleanReminder;
+  } else {
+    delete nextTask.reminderDate;
+  }
   return {
     ok: true,
-    task: {
-      ...task,
-      // Preserve dueDate and status strictly as-is
-      dueDate: task.dueDate,
-      status: task.status,
-      scheduledStartAt: check.startIso,
-      scheduledEndAt: check.endIso,
-    },
+    task: nextTask,
   };
 }
 
 /**
- * Clears the planned Time Block from a task without deleting the task or altering its dueDate/status.
+ * Clears the planned Time Block from a task without deleting the task or altering its dueDate, reminderDate, or status.
  */
 export function clearTaskTimeBlock(task: ActionItem): ActionItem {
+  const cleanReminder = extractCleanReminderDate(task.reminderDate);
   const next: ActionItem = {
     ...task,
     dueDate: task.dueDate,
     status: task.status,
   };
+  if (cleanReminder !== undefined) {
+    next.reminderDate = cleanReminder;
+  } else {
+    delete next.reminderDate;
+  }
   delete next.scheduledStartAt;
   delete next.scheduledEndAt;
   return next;
 }
 
 /**
- * Encodes scheduledStartAt & scheduledEndAt compactly inside reminderDate (<= 50 chars)
- * for live Firestore compatibility without requiring a rules deployment.
- * Format:
- * - Without base reminderDate: "tb:<startEpochSec>:<endEpochSec>" (e.g. "tb:1763200800:1763204400" = 24 chars)
- * - With YYYY-MM-DD reminderDate: "YYYY-MM-DD#tb:<startSec>:<endSec>" (e.g. 35 chars <= 50)
+ * Prepares a task document for Firestore persistence:
+ * - Stores `scheduledStartAt` and `scheduledEndAt` as independent fields on the Task document.
+ * - Keeps `reminderDate` completely independent and dedicated exclusively to reminders.
+ * - Never encodes Time Blocking inside `reminderDate`.
+ * - If an older legacy record still carried a `tb:...` token in `reminderDate`, normalizes it into
+ *   independent `scheduledStartAt` / `scheduledEndAt` fields and restores the clean `reminderDate`.
  */
-const TIME_BLOCK_TOKEN_REGEX = /^(?:(.*?)#)?tb:(\d{8,12}):(\d{8,12})$/;
+export function sanitizeTaskForFirestoreSave(task: ActionItem): ActionItem {
+  const clone: ActionItem = { ...task };
 
-export function encodeTaskTimeBlockForFirestore(task: ActionItem): Record<string, any> {
-  const clone: Record<string, any> = { ...task };
-  delete clone.scheduledStartAt;
-  delete clone.scheduledEndAt;
+  let legacyStartIso: string | undefined;
+  let legacyEndIso: string | undefined;
 
-  // Strip any existing token from reminderDate first
-  let baseReminder = typeof task.reminderDate === 'string' ? task.reminderDate.trim() : '';
-  const existingMatch = baseReminder.match(TIME_BLOCK_TOKEN_REGEX);
-  if (existingMatch) {
-    baseReminder = existingMatch[1] || '';
-  }
-
-  if (task.scheduledStartAt && task.scheduledEndAt) {
-    const validation = validateTimeBlockInterval(task.scheduledStartAt, task.scheduledEndAt);
-    if (validation.valid && validation.startMs && validation.endMs) {
-      const startSec = Math.floor(validation.startMs / 1000);
-      const endSec = Math.floor(validation.endMs / 1000);
-      const prefix = baseReminder && baseReminder.length <= 15 ? `${baseReminder}#` : '';
-      const encoded = `${prefix}tb:${startSec}:${endSec}`;
-      if (encoded.length <= 50) {
-        clone.reminderDate = encoded;
-        return clone;
+  if (typeof clone.reminderDate === 'string') {
+    const trimmedReminder = clone.reminderDate.trim();
+    const legacyMatch = trimmedReminder.match(LEGACY_TIME_BLOCK_TOKEN_REGEX);
+    if (legacyMatch) {
+      const baseReminder = (legacyMatch[1] || '').trim();
+      const startMs = Number(legacyMatch[2]) * 1000;
+      const endMs = Number(legacyMatch[3]) * 1000;
+      if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
+        legacyStartIso = new Date(startMs).toISOString();
+        legacyEndIso = new Date(endMs).toISOString();
       }
+      if (baseReminder) {
+        clone.reminderDate = baseReminder.slice(0, 50);
+      } else {
+        delete clone.reminderDate;
+      }
+    } else if (trimmedReminder) {
+      clone.reminderDate = trimmedReminder.slice(0, 50);
+    } else {
+      delete clone.reminderDate;
     }
-  }
-
-  if (baseReminder) {
-    clone.reminderDate = baseReminder.slice(0, 50);
   } else {
     delete clone.reminderDate;
   }
+
+  const candidateStart = clone.scheduledStartAt || legacyStartIso;
+  const candidateEnd = clone.scheduledEndAt || legacyEndIso;
+
+  if (candidateStart && candidateEnd) {
+    const check = validateTimeBlockInterval(candidateStart, candidateEnd);
+    if (check.valid && check.startIso && check.endIso) {
+      clone.scheduledStartAt = check.startIso.slice(0, 50);
+      clone.scheduledEndAt = check.endIso.slice(0, 50);
+    } else {
+      delete clone.scheduledStartAt;
+      delete clone.scheduledEndAt;
+    }
+  } else {
+    delete clone.scheduledStartAt;
+    delete clone.scheduledEndAt;
+  }
+
   return clone;
 }
 
+/**
+ * Read-only hydration helper for tasks loaded from Firestore:
+ * 1. Reads independent `scheduledStartAt` and `scheduledEndAt` fields directly.
+ * 2. Preserves read-only backward compatibility for legacy records that encoded `tb:<startSec>:<endSec>`
+ *    inside `reminderDate`, extracting the time block and restoring the clean `reminderDate`.
+ */
 export function decodeTaskTimeBlockFromFirestore(raw: Record<string, any>): ActionItem {
   const result: ActionItem = { ...(raw as ActionItem) };
 
-  // 1. Check if top-level scheduledStartAt / scheduledEndAt are already present (e.g. in-memory or JSON import)
+  // 1. Read independent top-level scheduledStartAt / scheduledEndAt fields directly
   if (typeof raw.scheduledStartAt === 'string' && typeof raw.scheduledEndAt === 'string') {
     const check = validateTimeBlockInterval(raw.scheduledStartAt, raw.scheduledEndAt);
     if (check.valid && check.startIso && check.endIso) {
@@ -614,13 +663,16 @@ export function decodeTaskTimeBlockFromFirestore(raw: Record<string, any>): Acti
       delete result.scheduledStartAt;
       delete result.scheduledEndAt;
     }
+  } else {
+    delete result.scheduledStartAt;
+    delete result.scheduledEndAt;
   }
 
-  // 2. Check if reminderDate carries the compact wire token
+  // 2. Read-only backward compatibility for legacy records that carried a wire token in reminderDate
   if (typeof raw.reminderDate === 'string') {
-    const match = raw.reminderDate.trim().match(TIME_BLOCK_TOKEN_REGEX);
+    const match = raw.reminderDate.trim().match(LEGACY_TIME_BLOCK_TOKEN_REGEX);
     if (match) {
-      const baseReminder = match[1] || undefined;
+      const baseReminder = (match[1] || '').trim() || undefined;
       const startMs = Number(match[2]) * 1000;
       const endMs = Number(match[3]) * 1000;
       if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
