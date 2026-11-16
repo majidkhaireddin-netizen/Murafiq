@@ -63,6 +63,7 @@ import {
   UserCheck,
   Users,
   WifiOff,
+  MessageSquarePlus,
 } from 'lucide-react';
 
 interface TodayViewProps {
@@ -114,6 +115,12 @@ interface TodayViewProps {
   onOpenSettings: () => void;
   onOpenTodayCalendar?: () => void;
   onOpenWeeklyPlanner?: () => void;
+  onOpenCommunicationComposer?: (params: {
+    clientId: string;
+    contactId?: string;
+    opportunityId?: string;
+    meetingId?: string;
+  }) => void;
 }
 
 const BUCKET_META: Array<{
@@ -179,6 +186,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
   onOpenSettings,
   onOpenTodayCalendar,
   onOpenWeeklyPlanner,
+  onOpenCommunicationComposer,
 }) => {
   const [selectedBucket, setSelectedBucket] = useState<'all' | DailyTaskBucketKey>('all');
   const [priorityFilter, setPriorityFilter] = useState<'all' | 'urgent_high'>('all');
@@ -290,9 +298,9 @@ export const TodayView: React.FC<TodayViewProps> = ({
   return (
     <div data-testid="today-command-center" className="space-y-5 pb-6">
       {/* 1. Greeting, Date & Quick Actions */}
-      <section className="bg-white rounded-2xl border border-stone-200 p-4 sm:p-5 space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
-          <div className="space-y-1">
+      <section className="bg-white rounded-2xl border border-stone-200 p-4 sm:p-5 space-y-3.5">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div className="min-w-0 flex-1 space-y-1">
             <div className="flex items-center gap-2">
               <CalendarCheck className="w-5 h-5 text-emerald-700 shrink-0" />
               <h2 className="font-heading font-extrabold text-lg sm:text-xl text-stone-900">
@@ -325,69 +333,89 @@ export const TodayView: React.FC<TodayViewProps> = ({
             </p>
           </div>
 
-          {/* Reuses existing creation pipelines + Calendar links */}
-          <div className="flex items-center flex-wrap gap-2 shrink-0">
-            {onOpenTodayCalendar && (
-              <button
-                type="button"
-                data-testid="today-open-day-calendar-btn"
-                onClick={onOpenTodayCalendar}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold transition-colors"
-              >
-                <Calendar className="w-3.5 h-3.5 text-emerald-400" />
-                <span>فتح تقويم اليوم</span>
-              </button>
-            )}
-            {onOpenWeeklyPlanner && (
-              <button
-                type="button"
-                data-testid="today-open-weekly-planner-btn"
-                onClick={onOpenWeeklyPlanner}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-xs font-semibold transition-colors"
-              >
-                <Clock className="w-3.5 h-3.5 text-emerald-700" />
-                <span>خطتي لهذا الأسبوع</span>
-              </button>
-            )}
+          {(onOpenTodayCalendar || onOpenWeeklyPlanner) && (
+            <div className="flex items-center flex-wrap gap-2 shrink-0">
+              {onOpenTodayCalendar && (
+                <button
+                  type="button"
+                  data-testid="today-open-day-calendar-btn"
+                  onClick={onOpenTodayCalendar}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold transition-colors"
+                >
+                  <Calendar className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>فتح تقويم اليوم</span>
+                </button>
+              )}
+              {onOpenWeeklyPlanner && (
+                <button
+                  type="button"
+                  data-testid="today-open-weekly-planner-btn"
+                  onClick={onOpenWeeklyPlanner}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-xs font-semibold transition-colors"
+                >
+                  <Clock className="w-3.5 h-3.5 text-emerald-700" />
+                  <span>خطتي لهذا الأسبوع</span>
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Reuses existing creation pipelines */}
+        <div className="flex items-center flex-wrap gap-2 pt-3 border-t border-stone-100">
+          <button
+            type="button"
+            data-testid="today-quick-new-task"
+            onClick={() => onNewTask()}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold transition-colors"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>مهمة جديدة</span>
+          </button>
+          <button
+            type="button"
+            data-testid="today-quick-new-meeting"
+            onClick={() => onNewMeeting()}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-stone-200 bg-white hover:bg-stone-50 text-stone-800 text-xs font-semibold transition-colors"
+          >
+            <Calendar className="w-3.5 h-3.5 text-emerald-700" />
+            <span>اجتماع جديد</span>
+          </button>
+          <button
+            type="button"
+            data-testid="today-quick-new-note"
+            onClick={() => onNewNote()}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-stone-200 bg-white hover:bg-stone-50 text-stone-800 text-xs font-semibold transition-colors"
+          >
+            <StickyNote className="w-3.5 h-3.5 text-amber-700" />
+            <span>ملاحظة عميل</span>
+          </button>
+          {onLogInteraction && (
             <button
               type="button"
-              data-testid="today-quick-new-task"
-              onClick={() => onNewTask()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold transition-colors"
+              data-testid="today-quick-log-interaction"
+              onClick={() => onLogInteraction()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-xs font-semibold transition-colors"
             >
-              <Plus className="w-3.5 h-3.5" />
-              <span>مهمة جديدة</span>
+              <PhoneCall className="w-3.5 h-3.5 text-emerald-700" />
+              <span>تسجيل تواصل</span>
             </button>
+          )}
+          {onOpenCommunicationComposer && clients.length > 0 && (
             <button
               type="button"
-              data-testid="today-quick-new-meeting"
-              onClick={() => onNewMeeting()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-stone-200 bg-white hover:bg-stone-50 text-stone-800 text-xs font-semibold transition-colors"
+              data-testid="today-quick-smart-outreach"
+              onClick={() =>
+                onOpenCommunicationComposer({
+                  clientId: clientFollowUps[0]?.client.id || clients[0]!.id,
+                })
+              }
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-900 text-xs font-semibold transition-colors"
             >
-              <Calendar className="w-3.5 h-3.5 text-emerald-700" />
-              <span>اجتماع جديد</span>
+              <MessageSquarePlus className="w-3.5 h-3.5 text-indigo-700" />
+              <span>مساعد المراسلات الذكي</span>
             </button>
-            <button
-              type="button"
-              data-testid="today-quick-new-note"
-              onClick={() => onNewNote()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-stone-200 bg-white hover:bg-stone-50 text-stone-800 text-xs font-semibold transition-colors"
-            >
-              <StickyNote className="w-3.5 h-3.5 text-amber-700" />
-              <span>ملاحظة عميل</span>
-            </button>
-            {onLogInteraction && (
-              <button
-                type="button"
-                data-testid="today-quick-log-interaction"
-                onClick={() => onLogInteraction()}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-xs font-semibold transition-colors"
-              >
-                <PhoneCall className="w-3.5 h-3.5 text-emerald-700" />
-                <span>تسجيل تواصل</span>
-              </button>
-            )}
-          </div>
+          )}
         </div>
 
         {/* Honest Loading / Offline / Sync Error Notices */}
@@ -1228,7 +1256,19 @@ export const TodayView: React.FC<TodayViewProps> = ({
                       >
                         فتح ملف العميل 360
                       </button>
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        {onOpenCommunicationComposer && (
+                          <button
+                            type="button"
+                            data-testid={`today-followup-compose-${entry.client.id}`}
+                            onClick={() =>
+                              onOpenCommunicationComposer({ clientId: entry.client.id })
+                            }
+                            className="px-2.5 py-1 rounded-lg border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-[11px] font-medium text-indigo-900"
+                          >
+                            مراسلة ذكية
+                          </button>
+                        )}
                         {onLogInteraction && (
                           <button
                             type="button"

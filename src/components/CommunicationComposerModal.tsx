@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import type {
   Client,
-  ClientContact,
   CommunicationChannel,
   CommunicationInteraction,
   CommunicationTemplate,
@@ -10,6 +9,7 @@ import type {
   Meeting,
   CommunicationOutreachTone,
   CommunicationOutreachGranularity,
+  CommunicationOutcome,
 } from '../types/index.ts';
 import {
   SYSTEM_COMMUNICATION_TEMPLATES,
@@ -17,6 +17,7 @@ import {
   interpolateTemplate,
   buildWhatsAppOutreachUrl,
   buildEmailOutreachUrl,
+  sanitizeCommunicationTemplateForSave,
 } from '../utils/communicationComposerEngine.ts';
 import {
   COMMUNICATION_CHANNEL_META,
@@ -24,7 +25,23 @@ import {
   COMMUNICATION_OUTCOME_META,
   EXTERNAL_COMMUNICATION_DISCLOSURE_AR,
 } from '../utils/communications.ts';
-import { Sparkles, MessageCircle, Mail, Copy, Check, Send, ShieldCheck, X, FileText, Plus, HelpCircle } from 'lucide-react';
+import { requestCommunicationDraft } from '../services/communicationAi.ts';
+import {
+  Sparkles,
+  MessageCircle,
+  Mail,
+  Copy,
+  Check,
+  Send,
+  ShieldCheck,
+  X,
+  FileText,
+  Plus,
+  Trash2,
+  Edit3,
+  AlertTriangle,
+  Lock,
+} from 'lucide-react';
 
 interface CommunicationComposerModalProps {
   isOpen: boolean;
@@ -35,6 +52,7 @@ interface CommunicationComposerModalProps {
   meetings?: Meeting[];
   customTemplates?: CommunicationTemplate[];
   onSaveTemplate?: (template: CommunicationTemplate) => void;
+  onDeleteTemplate?: (templateId: string) => void;
   onLogInteraction: (interaction: CommunicationInteraction) => void;
   initialChannel?: CommunicationChannel;
   initialOpportunityId?: string;
@@ -49,6 +67,7 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
   meetings = [],
   customTemplates = [],
   onSaveTemplate,
+  onDeleteTemplate,
   onLogInteraction,
   initialChannel = 'whatsapp',
   initialOpportunityId,
@@ -66,21 +85,34 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
   const [subject, setSubject] = useState<string>('');
   const [body, setBody] = useState<string>('');
   const [copied, setCopied] = useState<boolean>(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  // AI Draft State
+  // Manual Variable Overrides for missing context
+  const [manualOverrides, setManualOverrides] = useState<Record<string, string>>({});
+
+  // AI Consent & Draft Modal State
   const [showAiModal, setShowAiModal] = useState<boolean>(false);
-  const [aiTone, setAiTone] = useState<CommunicationOutreachTone>('professional' as any);
+  const [showAiConsentModal, setShowAiConsentModal] = useState<boolean>(false);
+  const [aiConsentGranted, setAiConsentGranted] = useState<boolean>(false);
+  const [aiTone, setAiTone] = useState<CommunicationOutreachTone>('formal');
   const [aiGranularity, setAiGranularity] = useState<CommunicationOutreachGranularity>('medium');
   const [aiCustomPrompt, setAiCustomPrompt] = useState<string>('');
   const [isGeneratingAi, setIsGeneratingAi] = useState<boolean>(false);
   const [aiError, setAiError] = useState<string | null>(null);
 
-  // Post-Send Logging State
+  // Custom Template Editor State
+  const [showTemplateEditor, setShowTemplateEditor] = useState<boolean>(false);
+  const [editingTemplate, setEditingTemplate] = useState<Partial<CommunicationTemplate> | null>(null);
+  const [templateError, setTemplateError] = useState<string | null>(null);
+
+  // Post-Send Human Confirmation & Logging State
   const [showLogSection, setShowLogSection] = useState<boolean>(false);
-  const [logOutcome, setLogOutcome] = useState<any>('message_sent');
-  const [logSummary, setLogSummary] = useState<string>('');
+  const [logOutcome, setLogOutcome] = useState<CommunicationOutcome>('message_sent');
+  const [dispatchConfirmed, setDispatchConfirmed] = useState<boolean>(false);
+  const [storeBodyInSummary, setStoreBodyInSummary] = useState<boolean>(true);
   const [logNextStep, setLogNextStep] = useState<string>('');
   const [logNextDate, setLogNextDate] = useState<string>('');
+  const [isSubmittingLog, setIsSubmittingLog] = useState<boolean>(false);
 
   const allTemplates = [...SYSTEM_COMMUNICATION_TEMPLATES, ...customTemplates];
   const filteredTemplates = allTemplates.filter(
@@ -91,31 +123,41 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
   const activeOpportunity = opportunities.find((o) => o.id === selectedOpportunityId);
   const activeMeeting = meetings.find((m) => m.id === selectedMeetingId);
 
-  // Update body/subject when template changes
-  useEffect(() => {
-    const tmpl = allTemplates.find((t) => t.id === selectedTemplateId);
-    if (tmpl) {
-      const interp = interpolateTemplate(tmpl.bodyTemplate, {
-        client,
-        contact: activeContact,
-        opportunity: activeOpportunity,
-        meeting: activeMeeting,
-      });
-      setBody(interp.result);
+  // Interpolation result
+  const currentTemplate = allTemplates.find((t) => t.id === selectedTemplateId);
+  const interpolation = interpolateTemplate(
+    currentTemplate?.bodyTemplate || body,
+    {
+      client,
+      contact: activeContact,
+      opportunity: activeOpportunity,
+      meeting: activeMeeting,
+      userCompanyName: 'مُرافق',
+    },
+    manualOverrides
+  );
 
-      if (tmpl.subjectTemplate) {
-        const subInterp = interpolateTemplate(tmpl.subjectTemplate, {
-          client,
-          contact: activeContact,
-          opportunity: activeOpportunity,
-          meeting: activeMeeting,
-        });
+  // Update body and subject when template or overrides change
+  useEffect(() => {
+    if (currentTemplate) {
+      setBody(interpolation.result);
+      if (currentTemplate.subjectTemplate) {
+        const subInterp = interpolateTemplate(
+          currentTemplate.subjectTemplate,
+          {
+            client,
+            contact: activeContact,
+            opportunity: activeOpportunity,
+            meeting: activeMeeting,
+          },
+          manualOverrides
+        );
         setSubject(subInterp.result);
       } else {
         setSubject('');
       }
     }
-  }, [selectedTemplateId, selectedContactId, selectedOpportunityId, selectedMeetingId]);
+  }, [selectedTemplateId, selectedContactId, selectedOpportunityId, selectedMeetingId, manualOverrides]);
 
   if (!isOpen) return null;
 
@@ -126,18 +168,19 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
       setCopied(true);
       setTimeout(() => setCopied(false), 2500);
     } catch {
-      // fallback
+      setActionError('تعذر نسخ النص إلى الحافظة.');
     }
   };
 
   const handleOpenExternal = () => {
+    setActionError(null);
     if (selectedChannel === 'whatsapp') {
       const phone = activeContact?.phone || client.phone;
       const url = buildWhatsAppOutreachUrl(phone, body);
       if (url) {
         window.open(url, '_blank', 'noopener,noreferrer');
       } else {
-        alert('رقم الهاتف غير متوفر أو غير صالح لرابط واتساب.');
+        setActionError('رقم الهاتف غير متوفر أو غير صالح لرابط واتساب.');
       }
     } else if (selectedChannel === 'email') {
       const email = activeContact?.email || client.email;
@@ -145,63 +188,110 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
       if (url) {
         window.open(url, '_blank', 'noopener,noreferrer');
       } else {
-        alert('البريد الإلكتروني غير متوفر أو غير صالح.');
+        setActionError('البريد الإلكتروني غير متوفر أو غير صالح للإرسال.');
       }
     } else {
       handleCopyText();
     }
   };
 
+  const handleInitiateAiFlow = () => {
+    setAiError(null);
+    if (!aiConsentGranted) {
+      setShowAiConsentModal(true);
+    } else {
+      setShowAiModal(true);
+    }
+  };
+
+  const handleConsentGranted = () => {
+    setAiConsentGranted(true);
+    setShowAiConsentModal(false);
+    setShowAiModal(true);
+  };
+
   const handleGenerateAiDraft = async () => {
     setIsGeneratingAi(true);
     setAiError(null);
     try {
-      const res = await fetch('/api/ai/communication-draft', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
+      const draft = await requestCommunicationDraft({
+        request: {
+          channel: selectedChannel,
+          clientId: client.id,
+          contactId: selectedContactId || undefined,
+          opportunityId: selectedOpportunityId || undefined,
+          meetingId: selectedMeetingId || undefined,
+          tone: aiTone,
+          granularity: aiGranularity,
+          customPrompt: aiCustomPrompt,
         },
-        body: JSON.stringify({
-          request: {
-            channel: selectedChannel,
-            clientId: client.id,
-            contactId: selectedContactId,
-            opportunityId: selectedOpportunityId,
-            meetingId: selectedMeetingId,
-            tone: aiTone,
-            granularity: aiGranularity,
-            customPrompt: aiCustomPrompt,
-          },
-          contextData: {
-            clientName: client.name,
-            companyName: client.company,
-            contactName: activeContact?.name,
-            opportunityTitle: activeOpportunity?.title,
-            opportunityValue:
-              activeOpportunity?.estimatedValue && activeOpportunity?.currency
-                ? `${activeOpportunity.estimatedValue.toLocaleString()} ${activeOpportunity.currency}`
-                : undefined,
-            nextAction: activeOpportunity?.nextAction,
-          },
-        }),
+        contextData: {
+          clientName: client.name,
+          companyName: client.company,
+          contactName: activeContact?.name,
+          opportunityTitle: activeOpportunity?.title,
+          opportunityValue:
+            activeOpportunity?.estimatedValue && activeOpportunity?.currency
+              ? `${activeOpportunity.estimatedValue.toLocaleString()} ${activeOpportunity.currency}`
+              : undefined,
+          nextAction: activeOpportunity?.nextAction,
+        },
       });
 
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.messageArabic || 'تعذر توليد المسودة الذكية.');
-      }
-
-      if (data.subject) setSubject(data.subject);
-      if (data.body) setBody(data.body);
+      if (draft.subject) setSubject(draft.subject);
+      if (draft.body) setBody(draft.body);
       setShowAiModal(false);
-    } catch (err: any) {
-      setAiError(err.message || 'حدث خطأ أثناء الاتصال بخدمة الصياغة الذكية.');
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : 'حدث خطأ أثناء الاتصال بخدمة الصياغة الذكية.';
+      setAiError(errMsg);
     } finally {
       setIsGeneratingAi(false);
     }
   };
 
+  const handleSaveCustomTemplate = () => {
+    setTemplateError(null);
+    if (!onSaveTemplate || !editingTemplate) return;
+    try {
+      const sanitized = sanitizeCommunicationTemplateForSave(
+        editingTemplate as CommunicationTemplate,
+        client.userId || 'user-local'
+      );
+      onSaveTemplate(sanitized);
+      setShowTemplateEditor(false);
+      setEditingTemplate(null);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'تعذر حفظ القالب.';
+      setTemplateError(msg);
+    }
+  };
+
+  const handleCloneSystemTemplate = (sysTmpl: CommunicationTemplate) => {
+    if (!onSaveTemplate) return;
+    const cloned: CommunicationTemplate = {
+      ...sysTmpl,
+      id: `tmpl-clone-${Date.now()}`,
+      title: `${sysTmpl.title} (نسخة مخصصة)`,
+      isSystemTemplate: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    onSaveTemplate(cloned);
+    setSelectedTemplateId(cloned.id);
+  };
+
   const handleFinalSubmitLog = () => {
+    if (!dispatchConfirmed) {
+      setActionError('يرجى تأكيد أنك قمت بإرسال الرسالة فعلاً عبر القناة الخارجية قبل تسجيلها في السجل.');
+      return;
+    }
+    setIsSubmittingLog(true);
+    setActionError(null);
+
+    const summaryText = storeBodyInSummary
+      ? body.slice(0, 1500)
+      : `مراسلة عبر ${COMMUNICATION_CHANNEL_META[selectedChannel]?.labelAr || selectedChannel} (بدون حفظ النص الكامل بناءً على تفضيل الخصوصية).`;
+
     const interaction: CommunicationInteraction = {
       id: `comm-${Date.now()}`,
       clientId: client.id,
@@ -213,7 +303,7 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
       direction: 'outbound',
       occurredAt: new Date().toISOString(),
       subject: subject ? `${subject} - ${client.name}` : `مراسلة عبر ${COMMUNICATION_CHANNEL_META[selectedChannel]?.labelAr || selectedChannel}`,
-      summary: body.slice(0, 1500),
+      summary: summaryText,
       outcome: logOutcome,
       nextStep: logNextStep.trim() || undefined,
       nextFollowUpDate: logNextDate || undefined,
@@ -221,8 +311,15 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
       updatedAt: new Date().toISOString(),
     };
 
-    onLogInteraction(interaction);
-    onClose();
+    try {
+      onLogInteraction(interaction);
+      onClose();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'تعذر حفظ سجل النشاط.';
+      setActionError(msg);
+    } finally {
+      setIsSubmittingLog(false);
+    }
   };
 
   return (
@@ -236,7 +333,7 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
               <Sparkles className="w-6 h-6 text-indigo-300" />
             </div>
             <div>
-              <h2 className="text-lg font-bold">مساعد المراسلات الذكي والقوالب</h2>
+              <h2 className="text-lg font-bold">مساعد المراسلات الذكي وقوالب التواصل</h2>
               <p className="text-xs text-slate-300">
                 إرسال وتجهيز المراسلات للعميل: <span className="font-semibold text-white">{client.name}</span> {client.company ? `(${client.company})` : ''}
               </p>
@@ -252,6 +349,13 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
 
         {/* Modal Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
+
+          {actionError && (
+            <div className="p-3 bg-rose-50 text-rose-800 text-xs rounded-xl border border-rose-200 flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>{actionError}</span>
+            </div>
+          )}
           
           {/* Row 1: Channel & Recipient Selection */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -305,17 +409,17 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
             </div>
           </div>
 
-          {/* Row 2: Template Picker */}
+          {/* Row 2: Template Picker & Creator */}
           <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold text-slate-800 flex items-center gap-2">
                 <FileText className="w-4 h-4 text-indigo-600" />
-                اختر قالباً جاهزاً أو أنشئ مسودة
+                اختر قالباً جاهزاً أو أنشئ قالبك المخصص
               </h3>
               <div className="flex items-center gap-2">
                 <select
                   value={categoryFilter}
-                  onChange={(e) => setCategoryFilter(e.target.value as any)}
+                  onChange={(e) => setCategoryFilter(e.target.value as CommunicationTemplateCategory | 'all')}
                   className="rounded-lg border border-slate-200 px-2 py-1 text-xs bg-white text-slate-700"
                 >
                   <option value="all">جميع التصنيفات</option>
@@ -326,16 +430,36 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
                   <option value="opportunity_check_in">استفسارات فرص</option>
                   <option value="payment_reminder">تذكير مالي</option>
                   <option value="reactivation">إعادة تواصل</option>
+                  <option value="custom">مخصص</option>
                 </select>
+
+                <button
+                  onClick={() => {
+                    setEditingTemplate({
+                      id: `tmpl-custom-${Date.now()}`,
+                      title: '',
+                      category: 'custom',
+                      channel: 'any',
+                      bodyTemplate: '',
+                      variables: [],
+                      isSystemTemplate: false,
+                    });
+                    setShowTemplateEditor(true);
+                  }}
+                  className="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg transition flex items-center gap-1.5"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  قالب مخصص جديد
+                </button>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-40 overflow-y-auto p-1">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-44 overflow-y-auto p-1">
               {filteredTemplates.map((tmpl) => (
                 <div
                   key={tmpl.id}
                   onClick={() => setSelectedTemplateId(tmpl.id)}
-                  className={`p-3 rounded-xl border text-right cursor-pointer transition ${
+                  className={`p-3 rounded-xl border text-right cursor-pointer transition relative group ${
                     selectedTemplateId === tmpl.id
                       ? 'bg-indigo-50 border-indigo-300 shadow-sm'
                       : 'bg-white border-slate-200 hover:border-slate-300'
@@ -343,15 +467,71 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
                 >
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-xs font-bold text-slate-900 truncate">{tmpl.title}</span>
-                    <span className="text-[10px] px-2 py-0.5 rounded bg-slate-100 text-slate-600 font-medium">
-                      {tmpl.isSystemTemplate ? 'جاهز' : 'مخصص'}
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-slate-100 text-slate-600 font-medium">
+                        {tmpl.isSystemTemplate ? 'جاهز' : 'مخصص'}
+                      </span>
+                      {tmpl.isSystemTemplate && onSaveTemplate && (
+                        <button
+                          title="استنساخ وتعديل"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleCloneSystemTemplate(tmpl);
+                          }}
+                          className="p-1 text-slate-400 hover:text-indigo-600 transition"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                      {!tmpl.isSystemTemplate && onDeleteTemplate && (
+                        <button
+                          title="حذف القالب"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (window.confirm('هل أنت متأكد من حذف هذا القالب المخصص؟')) {
+                              onDeleteTemplate(tmpl.id);
+                            }
+                          }}
+                          className="p-1 text-slate-400 hover:text-rose-600 transition"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
                   </div>
                   <p className="text-[11px] text-slate-500 line-clamp-1">{tmpl.bodyTemplate}</p>
                 </div>
               ))}
             </div>
           </div>
+
+          {/* Missing Variables Warning & Manual Completion Banner */}
+          {interpolation.missingVariables.length > 0 && (
+            <div className="bg-amber-50 p-4 rounded-xl border border-amber-200 space-y-3">
+              <div className="flex items-center gap-2 text-amber-900 text-xs font-bold">
+                قالب يتطلب استكمال بيانات مفقودة: {interpolation.missingVariables.join(', ')}
+              </div>
+              <p className="text-[11px] text-amber-700">
+                لتجنب إرسال نصوص ناقصة أو افتراضات غير دقيقة، يُرجى إدخال القيم الفورية أدناه:
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {interpolation.missingVariables.map((vKey) => (
+                  <div key={vKey} className="flex items-center gap-2">
+                    <span className="text-[11px] font-semibold text-slate-700 w-28 truncate">{vKey}:</span>
+                    <input
+                      type="text"
+                      placeholder={`أدخل قيمة ${vKey}...`}
+                      value={manualOverrides[vKey] || ''}
+                      onChange={(e) =>
+                        setManualOverrides({ ...manualOverrides, [vKey]: e.target.value })
+                      }
+                      className="flex-1 rounded-lg border border-amber-300 px-2 py-1 text-xs bg-white text-slate-800"
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Row 3: AI Draft Trigger */}
           <div className="flex items-center justify-between bg-indigo-900/5 p-4 rounded-xl border border-indigo-100">
@@ -365,7 +545,7 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
               </div>
             </div>
             <button
-              onClick={() => setShowAiModal(true)}
+              onClick={handleInitiateAiFlow}
               className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-sm transition flex items-center gap-2"
             >
               <Sparkles className="w-4 h-4" />
@@ -444,7 +624,7 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
             </button>
           </div>
 
-          {/* Post-Send Logging Section */}
+          {/* Post-Send Logging Section with Strict Human Confirmation */}
           {showLogSection && (
             <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 space-y-4">
               <h4 className="text-xs font-bold text-slate-900 flex items-center gap-2">
@@ -452,12 +632,33 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
                 تسجيل تفاصيل التواصل في السجل (مطلوب يدوياً بعد الإرسال الخارجي)
               </h4>
 
+              <div className="bg-amber-50/70 p-3 rounded-xl border border-amber-200 space-y-2">
+                <label className="flex items-center gap-2 text-xs font-bold text-amber-900 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={dispatchConfirmed}
+                    onChange={(e) => setDispatchConfirmed(e.target.checked)}
+                    className="rounded text-indigo-600 focus:ring-indigo-500 w-4 h-4"
+                  />
+                  أؤكد بصفتي مستخدماً أنني قمت بإرسال الرسالة فعلاً عبر القناة الخارجية المحددة.
+                </label>
+                <label className="flex items-center gap-2 text-[11px] text-amber-800 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={storeBodyInSummary}
+                    onChange={(e) => setStoreBodyInSummary(e.target.checked)}
+                    className="rounded text-indigo-600 focus:ring-indigo-500 w-3.5 h-3.5"
+                  />
+                  حفظ مقتطف محتوى الرسالة في سجل النشاط (اختياري).
+                </label>
+              </div>
+
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-[11px] font-medium text-slate-700 mb-1">نتيجة التواصل</label>
                   <select
                     value={logOutcome}
-                    onChange={(e) => setLogOutcome(e.target.value)}
+                    onChange={(e) => setLogOutcome(e.target.value as CommunicationOutcome)}
                     className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs bg-white text-slate-800"
                   >
                     {COMMUNICATION_OUTCOMES_ORDER.map((outcome) => (
@@ -493,10 +694,11 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
               <div className="flex justify-end pt-2">
                 <button
                   onClick={handleFinalSubmitLog}
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shadow-sm transition flex items-center gap-2"
+                  disabled={isSubmittingLog || !dispatchConfirmed}
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shadow-sm transition flex items-center gap-2 disabled:opacity-50"
                 >
                   <Check className="w-4 h-4" />
-                  حفظ وتسجيل في السجل
+                  {isSubmittingLog ? 'جاري الحفظ...' : 'حفظ وتسجيل في السجل'}
                 </button>
               </div>
             </div>
@@ -509,6 +711,60 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
 
         </div>
       </div>
+
+      {/* Explicit Gemini Privacy & Consent Modal */}
+      {showAiConsentModal && (
+        <div className="fixed inset-0 z-70 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4" dir="rtl">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-4 border border-indigo-100">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5 text-indigo-600" />
+                موافقة صريحة لاستخدام مساعد الذكاء الاصطناعي (Google Gemini)
+              </h3>
+              <button
+                onClick={() => setShowAiConsentModal(false)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="text-xs text-slate-600 space-y-3 leading-relaxed">
+              <p>
+                أنت على وشك إرسال بيانات سياقية محدودة إلى نموذج <strong>Google Gemini</strong> لتوليد مسودة مراسلة احترافية.
+              </p>
+              <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 space-y-1 text-[11px]">
+                <p className="font-bold text-slate-800">البيانات المرسلة حصراً:</p>
+                <ul className="list-disc list-inside text-slate-600 space-y-0.5">
+                  <li>اسم العميل والشركة: {client.name} {client.company ? `(${client.company})` : ''}</li>
+                  <li>اسم جهة الاتصال: {activeContact?.name || 'غير مشخص'}</li>
+                  <li>عنوان الفرصة التجارية والقيمة: {activeOpportunity?.title || 'بدون'}</li>
+                  <li>قناة التواصل المطلوبة: {selectedChannel} والنبرة المفضلة</li>
+                </ul>
+              </div>
+              <p className="text-[11px] text-amber-800 bg-amber-50 p-2.5 rounded-lg border border-amber-200">
+                ملاحظة أمان: لا يتم إرسال أي ملفات مرفقة، روابط سحابية، رموز مصادقة، أو بيانات عملاء آخرين. الهدف هو إنتاج مسودة للاستعراض البشري والمراجعة قبل أي إرسال.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+              <button
+                onClick={() => setShowAiConsentModal(false)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition"
+              >
+                إلغاء
+              </button>
+              <button
+                onClick={handleConsentGranted}
+                className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-sm transition flex items-center gap-2"
+              >
+                <Check className="w-4 h-4" />
+                أوافق وأرغب بالمتابعة
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* AI Draft Customization Modal */}
       {showAiModal && (
@@ -538,7 +794,7 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
                 <label className="block text-xs font-medium text-slate-700 mb-1">نبرة الخطاب (Tone)</label>
                 <select
                   value={aiTone}
-                  onChange={(e) => setAiTone(e.target.value as any)}
+                  onChange={(e) => setAiTone(e.target.value as CommunicationOutreachTone)}
                   className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs bg-white text-slate-800"
                 >
                   <option value="formal">رسمية مهنية (Formal)</option>
@@ -552,7 +808,7 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
                 <label className="block text-xs font-medium text-slate-700 mb-1">مستوى التفصيل (Granularity)</label>
                 <select
                   value={aiGranularity}
-                  onChange={(e) => setAiGranularity(e.target.value as any)}
+                  onChange={(e) => setAiGranularity(e.target.value as CommunicationOutreachGranularity)}
                   className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs bg-white text-slate-800"
                 >
                   <option value="short">موجزة (Short)</option>
@@ -586,6 +842,148 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
                 className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-sm transition flex items-center gap-2 disabled:opacity-50"
               >
                 {isGeneratingAi ? 'جاري الصياغة...' : 'توليد المسودة الذكية'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Custom Template Editor Modal */}
+      {showTemplateEditor && editingTemplate && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4" dir="rtl">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-xl p-6 space-y-4 border border-slate-100 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <Edit3 className="w-4 h-4 text-indigo-600" />
+                إنشاء أو تعديل قالب تواصل مخصص
+              </h3>
+              <button
+                onClick={() => setShowTemplateEditor(false)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {templateError && (
+              <div className="p-3 bg-rose-50 text-rose-800 text-xs rounded-xl border border-rose-200">
+                {templateError}
+              </div>
+            )}
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">عنوان القالب</label>
+                <input
+                  type="text"
+                  value={editingTemplate.title || ''}
+                  onChange={(e) => setEditingTemplate({ ...editingTemplate, title: e.target.value })}
+                  placeholder="مثال: متابعة عرض السعر الدوري..."
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs bg-white text-slate-800"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">التصنيف</label>
+                  <select
+                    value={editingTemplate.category || 'custom'}
+                    onChange={(e) =>
+                      setEditingTemplate({
+                        ...editingTemplate,
+                        category: e.target.value as CommunicationTemplateCategory,
+                      })
+                    }
+                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs bg-white text-slate-800"
+                  >
+                    <option value="custom">مخصص (Custom)</option>
+                    <option value="intro_lead">تعارف وبداية</option>
+                    <option value="proposal_send">عروض أسعار</option>
+                    <option value="meeting_invite">دعوات اجتماعات</option>
+                    <option value="meeting_follow_up">متابعة اجتماعات</option>
+                    <option value="opportunity_check_in">استفسارات فرص</option>
+                    <option value="payment_reminder">تذكير مالي</option>
+                    <option value="reactivation">إعادة تواصل</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">القناة المستهدفة</label>
+                  <select
+                    value={editingTemplate.channel || 'any'}
+                    onChange={(e) =>
+                      setEditingTemplate({
+                        ...editingTemplate,
+                        channel: e.target.value as CommunicationChannel | 'any',
+                      })
+                    }
+                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs bg-white text-slate-800"
+                  >
+                    <option value="any">أي قناة (Any)</option>
+                    <option value="whatsapp">واتساب (WhatsApp)</option>
+                    <option value="email">بريد إلكتروني (Email)</option>
+                    <option value="call">مكالمة (Call)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">موضوع البريد (اختياري)</label>
+                <input
+                  type="text"
+                  value={editingTemplate.subjectTemplate || ''}
+                  onChange={(e) => setEditingTemplate({ ...editingTemplate, subjectTemplate: e.target.value })}
+                  placeholder="موضوع البريد مع المتغيرات مثل {{opportunityTitle}}"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs bg-white text-slate-800"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">محتوى القالب (Body)</label>
+                <textarea
+                  rows={6}
+                  value={editingTemplate.bodyTemplate || ''}
+                  onChange={(e) => setEditingTemplate({ ...editingTemplate, bodyTemplate: e.target.value })}
+                  placeholder="اكتب نص القالب مستخدماً المتغيرات المتاحة مثل {{contactName}}, {{companyName}}, {{opportunityTitle}}..."
+                  className="w-full rounded-xl border border-slate-200 p-3 text-xs bg-white text-slate-800 font-sans leading-relaxed"
+                />
+              </div>
+
+              <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 text-[11px] text-slate-600 space-y-1">
+                <p className="font-bold text-slate-800">المتغيرات المدعومة المتاحة للإدراج:</p>
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  {SUPPORTED_COMMUNICATION_VARIABLES.map((v) => (
+                    <button
+                      key={v.key}
+                      type="button"
+                      onClick={() =>
+                        setEditingTemplate({
+                          ...editingTemplate,
+                          bodyTemplate: `${editingTemplate.bodyTemplate || ''}{{${v.key}}}`,
+                        })
+                      }
+                      className="px-2 py-0.5 bg-white border border-slate-200 hover:border-indigo-400 rounded text-indigo-700 font-mono text-[10px] transition"
+                    >
+                      {`{{${v.key}}}`}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+              <button
+                onClick={() => setShowTemplateEditor(false)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition"
+              >
+                إلغاء
+              </button>
+              <button
+                onClick={handleSaveCustomTemplate}
+                className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-sm transition flex items-center gap-2"
+              >
+                <Check className="w-4 h-4" />
+                حفظ القالب المخصص
               </button>
             </div>
           </div>

@@ -62,18 +62,13 @@ test('2. Pure variable interpolation replaces allowlisted variables correctly', 
   assert.strictEqual(variablesUsed.opportunityTitle, 'مشروع التحول الرقمي');
 });
 
-test('3. Interpolation leaves unknown variables unreplaced safely without throwing', () => {
-  const templateStr = 'اختبار {{unknownVar}} و {{clientName}}.';
-  const { result } = interpolateTemplate(templateStr, {
-    client: {
-      id: 'c1',
-      name: 'شركة اختبار',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    },
-  });
+test('3. Interpolation leaves unknown or missing variables flagged safely without fabrication', () => {
+  const templateStr = 'اختبار {{contactName}} وموعد الاستحقاق {{daysOverdue}}.';
+  const { result, missingVariables } = interpolateTemplate(templateStr, {});
 
-  assert.strictEqual(result, 'اختبار {{unknownVar}} و شركة اختبار.');
+  assert.ok(missingVariables.includes('contactName'));
+  assert.ok(missingVariables.includes('daysOverdue'));
+  assert.ok(result.includes('contactName مفقود'));
 });
 
 test('4. buildWhatsAppOutreachUrl constructs correct wa.me link with encoded text', () => {
@@ -84,12 +79,15 @@ test('4. buildWhatsAppOutreachUrl constructs correct wa.me link with encoded tex
   assert.strictEqual(invalid, null);
 });
 
-test('5. buildEmailOutreachUrl constructs correct mailto link with encoded subject and body', () => {
+test('5. buildEmailOutreachUrl constructs correct mailto link with encoded subject and body and rejects header injection', () => {
   const link = buildEmailOutreachUrl('test@example.com', 'عرض سعر', 'محتوى الرسالة');
   assert.strictEqual(
     link,
     'mailto:test@example.com?subject=%D8%B9%D8%B1%D8%B6%20%D8%B3%D8%B9%D8%B1&body=%D9%85%D8%AD%D8%AA%D9%88%D9%89%20%D8%A7%D9%84%D8%B1%D8%B3%D8%A7%D9%84%D8%A9'
   );
+
+  const injectionAttempt = buildEmailOutreachUrl('test@example.com\r\nBcc: attacker@example.com', 'sub', 'body');
+  assert.strictEqual(injectionAttempt, null);
 
   const invalid = buildEmailOutreachUrl('notanemail', 'sub', 'body');
   assert.strictEqual(invalid, null);
@@ -99,11 +97,11 @@ test('6. sanitizeCommunicationTemplateForSave enforces system template protectio
   const raw = {
     id: 'custom-1',
     title: 'قالب مخصص جديد',
-    category: 'custom' as any,
-    channel: 'whatsapp' as any,
+    category: 'custom' as const,
+    channel: 'whatsapp' as const,
     bodyTemplate: 'مرحباً {{clientName}}',
     variables: [],
-    isSystemTemplate: true, // should be forced to false
+    isSystemTemplate: true,
     createdAt: '',
     updatedAt: '',
   };

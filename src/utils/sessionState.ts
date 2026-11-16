@@ -110,6 +110,7 @@ export function classifyWriteError(
     interaction: 'سجل التواصل',
     playbookTemplate: 'قالب خطة المتابعة',
     playbookRun: 'خطة المتابعة',
+    communicationTemplate: 'قالب التواصل',
   };
   const entityName = names[entityType];
   const actionVerb = isDelete ? 'حذف' : 'حفظ';
@@ -354,6 +355,7 @@ export function getArabicSaveErrorMessage(entityType: EntityType, isDelete: bool
     interaction: 'سجل التواصل',
     playbookTemplate: 'قالب خطة المتابعة',
     playbookRun: 'خطة المتابعة',
+    communicationTemplate: 'قالب التواصل',
   };
 
   const entityName = names[entityType];

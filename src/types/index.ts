@@ -199,7 +199,8 @@ export type EntityType =
   | 'opportunityStageEvent'
   | 'interaction'
   | 'playbookTemplate'
-  | 'playbookRun';
+  | 'playbookRun'
+  | 'communicationTemplate';
 
 export type ResolutionChoice = 'keep_local' | 'keep_remote' | 'merge';
 
@@ -266,7 +267,8 @@ export interface RejectedWriteRecord {
     | OpportunityStageEvent
     | CommunicationInteraction
     | PlaybookTemplate
-    | PlaybookRun;
+    | PlaybookRun
+    | CommunicationTemplate;
   occurredAt: string;
 }
 

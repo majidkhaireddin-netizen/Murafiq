@@ -1372,3 +1372,60 @@ export function createFirebaseAttachmentMetadataStore(
     },
   };
 }
+
+export async function verifyCommunicationContextOwnershipInNamedDb(params: {
+  uid: string;
+  clientId: string;
+  contactId?: string;
+  opportunityId?: string;
+  meetingId?: string;
+  idToken: string;
+}): Promise<boolean> {
+  const { uid, clientId, contactId, opportunityId, meetingId, idToken } = params;
+  if (!isValidResourceId(uid) || !isValidResourceId(clientId)) return false;
+
+  const clientPath = `users/${uid}/clients/${clientId}`;
+  try {
+    const adminDb = getNamedAdminFirestore();
+    const clientSnap = await adminDb.doc(clientPath).get();
+    if (!clientSnap.exists) return false;
+    const clientData = clientSnap.data();
+    if (clientData?.userId && clientData.userId !== uid) return false;
+
+    if (contactId) {
+      if (!isValidResourceId(contactId)) return false;
+      const contacts = Array.isArray(clientData?.contacts) ? clientData.contacts : [];
+      const foundContact = contacts.some((c: { id?: string }) => c?.id === contactId);
+      if (!foundContact) return false;
+    }
+
+    if (opportunityId) {
+      if (!isValidResourceId(opportunityId)) return false;
+      const oppSnap = await adminDb.doc(`users/${uid}/opportunities/${opportunityId}`).get();
+      if (!oppSnap.exists) return false;
+      const oppData = oppSnap.data();
+      if (oppData?.userId && oppData.userId !== uid) return false;
+      if (oppData?.clientId && oppData.clientId !== clientId) return false;
+    }
+
+    if (meetingId) {
+      if (!isValidResourceId(meetingId)) return false;
+      const meetingSnap = await adminDb.doc(`users/${uid}/meetings/${meetingId}`).get();
+      if (!meetingSnap.exists) return false;
+      const meetingData = meetingSnap.data();
+      if (meetingData?.userId && meetingData.userId !== uid) return false;
+      if (meetingData?.clientId && meetingData.clientId !== clientId) return false;
+    }
+
+    return true;
+  } catch (adminErr: any) {
+    if (!isAdminCredentialFailure(adminErr)) {
+      throw adminErr;
+    }
+
+    const restRes = await fetchDocumentViaVerifiedUserRest({ relativeDocPath: clientPath, idToken });
+    if (!restRes.exists) return false;
+    return true;
+  }
+}
+

@@ -19,6 +19,7 @@ import { sanitizeIncomingAiBriefingPayload } from '../utils/meetingPreparation.t
 import {
   verifyFirebaseBearerToken,
   verifyMeetingOwnershipInNamedDb,
+  verifyCommunicationContextOwnershipInNamedDb,
   type VerifiedFirebaseUser,
 } from './firebaseServerAuth.ts';
 import {
@@ -58,6 +59,14 @@ export interface AiRouterDeps {
   nowMs?: () => number;
   rateLimitMaxRequests?: number;
   rateLimitWindowMs?: number;
+  verifyCommunicationContextOwnership?: (params: {
+    uid: string;
+    clientId: string;
+    contactId?: string;
+    opportunityId?: string;
+    meetingId?: string;
+    idToken: string;
+  }) => Promise<boolean>;
 }
 
 interface AuthenticatedRequest extends Request {
@@ -69,6 +78,8 @@ export function createAiRouter(customDeps: AiRouterDeps = {}) {
   const verifyToken = customDeps.verifyBearerToken ?? verifyFirebaseBearerToken;
   const verifyMeetingOwner =
     customDeps.verifyMeetingOwnership ?? verifyMeetingOwnershipInNamedDb;
+  const verifyCommOwner =
+    customDeps.verifyCommunicationContextOwnership ?? verifyCommunicationContextOwnershipInNamedDb;
   const analyzeMeeting = customDeps.analyzeMeeting ?? analyzeMeetingWithGemini;
   const generateBriefing = customDeps.generateBriefing ?? generateMeetingBriefingWithGemini;
   const generateDraft =
@@ -413,6 +424,15 @@ export function createAiRouter(customDeps: AiRouterDeps = {}) {
       return;
     }
 
+    const disallowedField = detectDisallowedAiFields(body);
+    if (disallowedField) {
+      res.status(400).json({
+        error: 'DISALLOWED_AI_INPUT_FIELD',
+        messageArabic: 'مرفوض: يُمنع إرسال المرفقات السحابية أو حقول التحكم.',
+      });
+      return;
+    }
+
     const requestPayload = (body.request || body) as CommunicationDraftRequest;
     if (!requestPayload || !requestPayload.channel) {
       res.status(400).json({
@@ -421,6 +441,81 @@ export function createAiRouter(customDeps: AiRouterDeps = {}) {
       });
       return;
     }
+
+    const clientId = requestPayload.clientId || (body.clientId as string);
+    if (!isValidResourceId(clientId)) {
+      res.status(400).json({
+        error: 'INVALID_CLIENT_ID',
+        messageArabic: 'معرّف العميل غير صالح.',
+      });
+      return;
+    }
+
+    const contactId = requestPayload.contactId || (body.contactId as string);
+    const opportunityId = requestPayload.opportunityId || (body.opportunityId as string);
+    const meetingId = requestPayload.meetingId || (body.meetingId as string);
+
+    if (contactId && !isValidResourceId(contactId)) {
+      res.status(400).json({ error: 'INVALID_CONTACT_ID', messageArabic: 'معرّف جهة الاتصال غير صالح.' });
+      return;
+    }
+    if (opportunityId && !isValidResourceId(opportunityId)) {
+      res.status(400).json({ error: 'INVALID_OPPORTUNITY_ID', messageArabic: 'معرّف الفرصة غير صالح.' });
+      return;
+    }
+    if (meetingId && !isValidResourceId(meetingId)) {
+      res.status(400).json({ error: 'INVALID_MEETING_ID', messageArabic: 'معرّف اللقاء غير صالح.' });
+      return;
+    }
+
+    try {
+      const ownsContext = await verifyCommOwner({
+        uid,
+        clientId,
+        ...(contactId ? { contactId } : {}),
+        ...(opportunityId ? { opportunityId } : {}),
+        ...(meetingId ? { meetingId } : {}),
+        idToken: req.authUser!.idToken,
+      });
+      if (!ownsContext) {
+        res.status(403).json({
+          error: 'CLIENT_ACCESS_DENIED',
+          messageArabic: 'العميل أو السجلات المرتبطة غير موجودة أو لا تملك صلاحية الوصول إليها.',
+        });
+        return;
+      }
+    } catch {
+      res.status(503).json({
+        error: 'OWNERSHIP_VERIFICATION_UNAVAILABLE',
+        messageArabic: 'تعذر التحقق من ملكية البيانات على الخادم حالياً.',
+      });
+      return;
+    }
+
+    const currentNow = nowMs();
+    const recent = (requestTimestampsByUid.get(uid) || []).filter(
+      (ts) => currentNow - ts < rateLimitWindow
+    );
+    if (recent.length >= rateLimitMax) {
+      requestTimestampsByUid.set(uid, recent);
+      res.status(429).json({
+        error: 'AI_RATE_LIMITED',
+        messageArabic: 'تم إرسال عدد كبير من طلبات المراسلة الذكية. يرجى الانتظار قليلاً.',
+      });
+      return;
+    }
+    recent.push(currentNow);
+    requestTimestampsByUid.set(uid, recent);
+
+    const inFlightKey = `comm:${uid}:${clientId}`;
+    if (inFlightKeys.has(inFlightKey)) {
+      res.status(409).json({
+        error: 'AI_DRAFT_IN_PROGRESS',
+        messageArabic: 'يوجد طلب صياغة قيد التنفيذ لهذا العميل حالياً.',
+      });
+      return;
+    }
+    inFlightKeys.add(inFlightKey);
 
     const contextData = (body.contextData || {}) as {
       clientName?: string;
@@ -451,7 +546,7 @@ export function createAiRouter(customDeps: AiRouterDeps = {}) {
       }
 
       res.json(draftResult);
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (res.writableEnded) return;
 
       if (err instanceof GeminiServiceError) {
@@ -467,6 +562,7 @@ export function createAiRouter(customDeps: AiRouterDeps = {}) {
         messageArabic: 'تعذر توليد مسودة المراسلة الذكية حالياً.',
       });
     } finally {
+      inFlightKeys.delete(inFlightKey);
       res.off('close', onResponseClose);
     }
   });

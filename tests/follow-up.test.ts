@@ -748,6 +748,7 @@ test('12. computeDetailedSyncSummary honestly reports pending and failed states 
     preferences: { ...syncedStatus },
     playbookTemplates: { ...syncedStatus },
     playbookRuns: { ...syncedStatus },
+    communicationTemplates: { ...syncedStatus },
   };
 
   const pendingSummary = computeDetailedSyncSummary({

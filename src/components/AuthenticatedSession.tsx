@@ -22,6 +22,7 @@ import {
   PlaybookRun,
   PlaybookRunStep,
   PlaybookRescheduleSuggestion,
+  CommunicationTemplate,
 } from '../types';
 import { categorizeTasks } from '../utils/logic';
 import {
@@ -64,6 +65,7 @@ import { SettingsModal } from './SettingsModal';
 import { ConflictResolutionModal } from './ConflictResolutionModal';
 import { PlaybookStartModal } from './PlaybookStartModal';
 import { PlaybookTemplateEditorModal } from './PlaybookTemplateEditorModal';
+import { CommunicationComposerModal } from './CommunicationComposerModal';
 import {
   AtomicStepTaskCreationOutcome,
   PlaybookOfflineSyncQueue,
@@ -73,6 +75,7 @@ import {
   sanitizePlaybookRunForSave,
   sanitizePlaybookTemplateForSave,
 } from '../utils/playbookEngine';
+import { sanitizeCommunicationTemplateForSave } from '../utils/communicationComposerEngine';
 import {
   computeCommunicationCenterSummary,
   unlinkInteractionReferencesOnDelete,
@@ -134,6 +137,9 @@ import {
   PlaybookRevisionConflictError,
   deletePlaybookRun as fbDeletePlaybookRun,
   firestorePlaybookAtomicAdapter,
+  subscribeCommunicationTemplates,
+  saveCommunicationTemplate as fbSaveCommunicationTemplate,
+  deleteCommunicationTemplate as fbDeleteCommunicationTemplate,
 } from '../services/firebase';
 import { AlertTriangle, WifiOff, RefreshCw, X, Download, Copy, Check } from 'lucide-react';
 import {
@@ -175,6 +181,9 @@ export function AuthenticatedSession({
   }));
   const [playbookTemplates, setPlaybookTemplates] = useState<PlaybookTemplate[]>([]);
   const [playbookRuns, setPlaybookRuns] = useState<PlaybookRun[]>([]);
+  const [communicationTemplates, setCommunicationTemplates] = useState<CommunicationTemplate[]>([]);
+  const communicationTemplatesRef = useRef<CommunicationTemplate[]>(communicationTemplates);
+  communicationTemplatesRef.current = communicationTemplates;
 
   // Live clock referenceDate so day rollovers, overdue transitions, imminent meetings, and snooze wake-ups update dynamically
   const [referenceDate, setReferenceDate] = useState<Date>(() => new Date());
@@ -219,6 +228,7 @@ export function AuthenticatedSession({
   const followUpPrefOpsRef = useRef(new OperationCoordinator<FollowUpPreferences>());
   const playbookTemplateOpsRef = useRef(new OperationCoordinator<PlaybookTemplate>());
   const playbookRunOpsRef = useRef(new OperationCoordinator<PlaybookRun>());
+  const communicationTemplateOpsRef = useRef(new OperationCoordinator<CommunicationTemplate>());
 
   // Track active in-flight deletes per collection so pending counts stay accurate when docs leave local snapshots
   const pendingDeleteIdsRef = useRef<Record<CollectionKey, Set<string>>>({
@@ -233,6 +243,7 @@ export function AuthenticatedSession({
     preferences: new Set(),
     playbookTemplates: new Set(),
     playbookRuns: new Set(),
+    communicationTemplates: new Set(),
   });
 
   // Connectivity & Cache Runtime Status
@@ -255,6 +266,7 @@ export function AuthenticatedSession({
     preferences: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
     playbookTemplates: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
     playbookRuns: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
+    communicationTemplates: { loaded: false, hasPendingWrites: false, fromCache: true, hasError: false, pendingDocIds: [], pendingDeletesCount: 0 },
   });
 
   // Preserved rejected writes (stored ONLY in React session memory — never auto-saved to localStorage)
@@ -692,6 +704,33 @@ export function AuthenticatedSession({
       }
     );
 
+    const unsubCommunicationTemplates = subscribeCommunicationTemplates(
+      (data, meta) => {
+        if (!isSubscribed) return;
+        communicationTemplatesRef.current = data;
+        setCommunicationTemplates(data);
+        setCollectionSync((prev) => ({
+          ...prev,
+          communicationTemplates: {
+            loaded: true,
+            hasPendingWrites: meta.hasPendingWrites,
+            fromCache: meta.fromCache,
+            hasError: false,
+            pendingDocIds: meta.pendingDocIds,
+            pendingDeletesCount: pendingDeleteIdsRef.current.communicationTemplates.size,
+          },
+        }));
+      },
+      (err) => {
+        if (!isSubscribed) return;
+        console.warn(`[User ${sessionUid}] CommunicationTemplates subscription warning:`, err);
+        setCollectionSync((prev) => ({
+          ...prev,
+          communicationTemplates: { ...prev.communicationTemplates, hasError: true },
+        }));
+      }
+    );
+
     const unsubPlaybookRuns = subscribePlaybookRuns(
       (data, meta) => {
         if (!isSubscribed) return;
@@ -786,6 +825,7 @@ export function AuthenticatedSession({
       unsubFollowUpPrefs();
       unsubPlaybookTemplates();
       unsubPlaybookRuns();
+      unsubCommunicationTemplates();
     };
   }, [user.uid]);
 
@@ -824,7 +864,8 @@ export function AuthenticatedSession({
       | ReminderStateRecord
       | FollowUpPreferences
       | PlaybookTemplate
-      | PlaybookRun;
+      | PlaybookRun
+      | CommunicationTemplate;
     wasSuperseded?: boolean;
   }) => {
     if (params.wasSuperseded) return;
@@ -2158,6 +2199,120 @@ export function AuthenticatedSession({
     });
   };
 
+  const handleSaveCommunicationTemplate = (template: CommunicationTemplate): void => {
+    const clean = sanitizeCommunicationTemplateForSave(
+      { ...template, userId: user.uid, isSystemTemplate: false },
+      user.uid
+    );
+    const prevEntity = communicationTemplatesRef.current.find((t) => t.id === clean.id);
+    const applyUpsert = (prev: CommunicationTemplate[]) => {
+      const idx = prev.findIndex((t) => t.id === clean.id);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = clean;
+        return next;
+      }
+      return [clean, ...prev];
+    };
+    communicationTemplatesRef.current = applyUpsert(communicationTemplatesRef.current);
+
+    communicationTemplateOpsRef.current.runScopedMutation({
+      entityId: clean.id,
+      entityType: 'communicationTemplate',
+      previousEntity: prevEntity,
+      setState: setCommunicationTemplates,
+      applyOptimistic: applyUpsert,
+      dispatchWrite: () => fbSaveCommunicationTemplate(clean),
+      onServerConfirmed: ({ wasSuperseded }) => {
+        clearRejectedForEntity('communicationTemplate', clean.id, wasSuperseded);
+      },
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+        console.warn('Save communicationTemplate rejected by server:', error);
+        recordRejectedWrite({
+          opId,
+          entityType: 'communicationTemplate',
+          entityId: clean.id,
+          entityTitle: clean.title,
+          operation: 'save',
+          classification,
+          error,
+          payload: clean,
+          wasSuperseded,
+        });
+      },
+    });
+  };
+
+  const handleDeleteCommunicationTemplate = (templateId: string): void => {
+    const prevEntity = communicationTemplatesRef.current.find((t) => t.id === templateId);
+    const applyDelete = (prev: CommunicationTemplate[]) => prev.filter((t) => t.id !== templateId);
+    communicationTemplatesRef.current = applyDelete(communicationTemplatesRef.current);
+    markDeleteInFlight('communicationTemplates', templateId, true);
+
+    communicationTemplateOpsRef.current.runScopedMutation({
+      entityId: templateId,
+      entityType: 'communicationTemplate',
+      isDelete: true,
+      previousEntity: prevEntity,
+      setState: setCommunicationTemplates,
+      applyOptimistic: applyDelete,
+      dispatchWrite: () => fbDeleteCommunicationTemplate(templateId),
+      onServerConfirmed: ({ wasSuperseded }) => {
+        markDeleteInFlight('communicationTemplates', templateId, false);
+        clearRejectedForEntity('communicationTemplate', templateId, wasSuperseded);
+      },
+      onServerRejected: ({ opId, error, classification, wasSuperseded }) => {
+        markDeleteInFlight('communicationTemplates', templateId, false);
+        console.warn('Delete communicationTemplate rejected by server:', error);
+        recordRejectedWrite({
+          opId,
+          entityType: 'communicationTemplate',
+          entityId: templateId,
+          entityTitle: prevEntity?.title || templateId,
+          operation: 'delete',
+          classification,
+          error,
+          payload: prevEntity,
+          wasSuperseded,
+        });
+      },
+    });
+  };
+
+  const [isCommunicationComposerOpen, setIsCommunicationComposerOpen] = useState<boolean>(false);
+  const [composerContext, setComposerContext] = useState<{
+    clientId: string;
+    contactId?: string;
+    opportunityId?: string;
+    meetingId?: string;
+    channel?: CommunicationChannel;
+  }>({ clientId: '' });
+
+  const openCommunicationComposer = (params: {
+    clientId: string;
+    contactId?: string;
+    opportunityId?: string;
+    meetingId?: string;
+    channel?: CommunicationChannel;
+  }) => {
+    const clientRecord = clients.find((c) => c.id === params.clientId);
+    if (!clientRecord) {
+      if (clients.length > 0) {
+        setComposerContext({ ...params, clientId: params.clientId || clients[0]!.id });
+        setIsCommunicationComposerOpen(true);
+      }
+      return;
+    }
+    setComposerContext({
+      clientId: params.clientId,
+      contactId: params.contactId,
+      opportunityId: params.opportunityId,
+      meetingId: params.meetingId,
+      channel: params.channel || 'whatsapp',
+    });
+    setIsCommunicationComposerOpen(true);
+  };
+
   const syncPlaybookQueueMetadata = () => {
     const queuedPendingIds = playbookOfflineQueueRef.current.getPendingRunIds();
     const combinedPendingIds = Array.from(
@@ -3179,6 +3334,7 @@ export function AuthenticatedSession({
               onOpenWeeklyPlanner={() =>
                 handleNavigateToCalendar({ mode: 'planner', clientId: '' })
               }
+              onOpenCommunicationComposer={openCommunicationComposer}
             />
           )}
 
@@ -3799,6 +3955,26 @@ export function AuthenticatedSession({
             </div>
           </div>
         </div>
+      )}
+
+      {isCommunicationComposerOpen && (
+        <CommunicationComposerModal
+          isOpen={isCommunicationComposerOpen}
+          onClose={() => setIsCommunicationComposerOpen(false)}
+          client={clients.find((c) => c.id === composerContext.clientId) || clients[0] || { id: 'default', name: 'العميل', createdAt: new Date().toISOString() }}
+          clients={clients}
+          opportunities={opportunities}
+          meetings={meetings}
+          customTemplates={communicationTemplates}
+          onSaveTemplate={handleSaveCommunicationTemplate}
+          onDeleteTemplate={handleDeleteCommunicationTemplate}
+          onLogInteraction={(interaction) => {
+            void handleSaveInteraction(interaction);
+          }}
+          initialChannel={composerContext.channel || 'whatsapp'}
+          initialOpportunityId={composerContext.opportunityId}
+          initialMeetingId={composerContext.meetingId}
+        />
       )}
     </>
   );

@@ -368,6 +368,26 @@ service cloud.firestore {
         && data.updatedAt is string && data.updatedAt.size() > 0 && data.updatedAt.size() <= 50;
     }
 
+    // Communication Template Validation (Task 015: Smart Outreach Templates)
+    function isValidCommunicationTemplate(data, userId) {
+      return data.keys().hasOnly([
+          'id', 'userId', 'title', 'category', 'channel', 'subjectTemplate',
+          'bodyTemplate', 'variables', 'isSystemTemplate', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasAll(['id', 'title', 'category', 'channel', 'bodyTemplate', 'variables', 'isSystemTemplate', 'createdAt', 'updatedAt'])
+        && data.id is string && isValidId(data.id)
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 160
+        && data.category in ['intro_lead', 'proposal_send', 'meeting_invite', 'meeting_follow_up', 'opportunity_check_in', 'payment_reminder', 'reactivation', 'custom']
+        && data.channel in ['whatsapp', 'email', 'phone_call', 'in_person_visit', 'video_call', 'sms', 'other', 'call', 'any']
+        && data.isSystemTemplate == false
+        && data.bodyTemplate is string && data.bodyTemplate.size() > 0 && data.bodyTemplate.size() <= 5000
+        && data.variables is list && data.variables.size() <= 20
+        && (!('userId' in data) || (data.userId is string && data.userId == userId))
+        && (!('subjectTemplate' in data) || (data.subjectTemplate is string && data.subjectTemplate.size() <= 200))
+        && data.createdAt is string && data.createdAt.size() > 0 && data.createdAt.size() <= 50
+        && data.updatedAt is string && data.updatedAt.size() > 0 && data.updatedAt.size() <= 50;
+    }
+
     // Playbook Template Validation (Task 013: User-created Relationship Playbook Templates)
     function isValidPlaybookTemplate(data, userId) {
       return data.keys().hasOnly([
@@ -638,6 +658,24 @@ service cloud.firestore {
           && isValidPlaybookRun(incoming(), userId)
           && isValidPlaybookRunRevisionAdvance(existing(), incoming());
         allow delete: if isOwner(userId) && isValidId(runId);
+      }
+
+      // Scoped Subcollection: Communication Templates (Task 015)
+      match /communicationTemplates/{templateId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && isValidId(templateId)
+          && incoming().id == templateId
+          && (!('userId' in incoming()) || incoming().userId == userId)
+          && isValidCommunicationTemplate(incoming(), userId);
+        allow update: if isOwner(userId)
+          && isValidId(templateId)
+          && incoming().id == templateId
+          && incoming().id == existing().id
+          && incoming().createdAt == existing().createdAt
+          && (!('userId' in existing()) || incoming().userId == existing().userId)
+          && isValidCommunicationTemplate(incoming(), userId);
+        allow delete: if isOwner(userId) && isValidId(templateId);
       }
     }
   }

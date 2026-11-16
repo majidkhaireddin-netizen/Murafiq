@@ -51,8 +51,8 @@ export function buildCommunicationAiPrompt(
     nextAction?: string;
   }
 ): string {
-  const tone = request.tone || 'professional';
-  const granularity = request.granularity || 'medium';
+  const tone: CommunicationOutreachTone = request.tone || 'formal';
+  const granularity: CommunicationOutreachGranularity = request.granularity || 'medium';
   const channel = request.channel;
   const customPrompt = request.customPrompt?.trim() || '';
 
@@ -130,7 +130,7 @@ export async function generateCommunicationDraftWithGemini(
     );
   }
 
-  const model = deps.model ?? 'gemini-2.5-flash';
+  const model = deps.model ?? 'gemini-4-hydrogen';
   const timeoutMs = deps.timeoutMs ?? 20000;
   const generateJson = deps.generateStructuredJson ?? defaultGenerateStructuredJson;
 
@@ -187,9 +187,9 @@ export async function generateCommunicationDraftWithGemini(
       abortPromise,
     ]);
 
-    let parsed: any;
+    let parsed: Record<string, unknown>;
     try {
-      parsed = JSON.parse(rawText);
+      parsed = JSON.parse(rawText) as Record<string, unknown>;
     } catch {
       throw new GeminiServiceError(
         'INVALID_AI_RESPONSE',
@@ -198,7 +198,7 @@ export async function generateCommunicationDraftWithGemini(
       );
     }
 
-    const body = String(parsed?.body || '').trim();
+    const body = String(parsed.body || '').trim();
     if (!body) {
       throw new GeminiServiceError(
         'INVALID_AI_RESPONSE',
@@ -207,9 +207,10 @@ export async function generateCommunicationDraftWithGemini(
       );
     }
 
-    const subject = parsed?.subject ? String(parsed.subject).trim() : undefined;
-    const warningsArabic = Array.isArray(parsed?.warningsArabic)
-      ? parsed.warningsArabic.map((w: any) => String(w))
+    const subject = parsed.subject ? String(parsed.subject).trim() : undefined;
+    const rawWarnings = parsed.warningsArabic;
+    const warningsArabic = Array.isArray(rawWarnings)
+      ? rawWarnings.map((w) => String(w))
       : [];
 
     return {
@@ -225,7 +226,7 @@ export async function generateCommunicationDraftWithGemini(
       },
       warningsArabic,
     };
-  } catch (err) {
+  } catch (err: unknown) {
     if (timedOut) {
       throw new GeminiServiceError(
         'GEMINI_REQUEST_TIMEOUT',

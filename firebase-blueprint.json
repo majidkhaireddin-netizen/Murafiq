@@ -398,6 +398,25 @@
         "revision": { "type": "number" }
       },
       "required": ["id", "templateName", "clientId", "status", "steps", "startedAt", "updatedAt"]
+    },
+    "CommunicationTemplate": {
+      "title": "CommunicationTemplate",
+      "description": "Stores user-isolated smart outreach and communication templates.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 160 },
+        "category": { "type": "string", "enum": ["intro_lead", "proposal_send", "meeting_invite", "meeting_follow_up", "opportunity_check_in", "payment_reminder", "reactivation", "custom"] },
+        "channel": { "type": "string", "enum": ["whatsapp", "email", "call", "any"] },
+        "subjectTemplate": { "type": "string", "maxLength": 200 },
+        "bodyTemplate": { "type": "string", "maxLength": 5000 },
+        "variables": { "type": "array" },
+        "isSystemTemplate": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "title", "category", "channel", "bodyTemplate", "variables", "isSystemTemplate", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -452,6 +471,10 @@
     "/users/{userId}/playbookRuns/{runId}": {
       "schema": { "$ref": "entities/PlaybookRun" },
       "description": "Stores user-isolated relationship playbook runs and progress snapshots"
+    },
+    "/users/{userId}/communicationTemplates/{templateId}": {
+      "schema": { "$ref": "entities/CommunicationTemplate" },
+      "description": "Stores user-isolated smart communication and outreach templates"
     }
   }
 }

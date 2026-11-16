@@ -32,9 +32,9 @@ export const SYSTEM_COMMUNICATION_TEMPLATES: CommunicationTemplate[] = [
 الأستاذ/ة {{contactName}}،
 مرحباً بك، بصفتي ممثلاً عن {{userCompanyName}}، أود التواصل معك لبحث سبل التعاون المشترك مع {{companyName}}.
 لقد تابعنا بإعجاب نشاطكم المتميز، ونعتقد أن هناك فرصًا واعدة لتقديم قيمة مضافة تدعم أهدافكم الاستراتيجية.
-هل تسنح لكم فرصة لعقد لقاء تعريفيمقتضب خلال الأسبوع الحالي لتبادل الأفكار؟
+هل تسنح لكم فرصة لعقد لقاء تعريفي مقتضب خلال الأسبوع الحالي لتبادل الأفكار؟
 
-مع خالص التحقدير،
+مع خالص التقدير،
 {{userCompanyName}}`,
     variables: ['contactName', 'companyName', 'userCompanyName'],
     isSystemTemplate: true,
@@ -116,7 +116,7 @@ export const SYSTEM_COMMUNICATION_TEMPLATES: CommunicationTemplate[] = [
     channel: 'whatsapp',
     subjectTemplate: 'تذكير ودي بخصوص استحقاق مالي معلق لـ {{companyName}}',
     bodyTemplate: `السلام عليكم أ. {{contactName}}،
-نتواصل معكم بخصوص الاستحقاق المالي المعلق المرتبط بـ "{{opportunityTitle}}" (متأخر منذ {{daysOverdue}} أيام).
+نتواصل معكم بخصوص الاستحقاق المالي المعلق المرتبط بـ "{{opportunityTitle}}" (تاريخ الاستحقاق أو التأخير: {{daysOverdue}}).
 نرجو منكم التكرم بمراجعة الأمر وترتيب عملية السداد في أقرب وقت ممكن لاستمرار سير العمل بسلاسة.
 شاكرين ومقدرين حسن تعاونكم الدائم معنا.`,
     variables: ['contactName', 'companyName', 'opportunityTitle', 'daysOverdue'],
@@ -149,22 +149,37 @@ export interface InterpolationContext {
   contact?: ClientContact;
   opportunity?: Opportunity;
   meeting?: Meeting;
-  daysOverdue?: number;
+  daysOverdue?: number | string;
   userCompanyName?: string;
 }
 
+export interface InterpolationResult {
+  result: string;
+  variablesUsed: Record<string, string>;
+  missingVariables: string[];
+  warningsArabic: string[];
+  usedRealData: boolean;
+}
+
+const SUPPORTED_KEYS_SET = new Set<string>(SUPPORTED_COMMUNICATION_VARIABLES.map((v) => v.key));
+
 /**
- * Pure variable interpolation engine with strict security guards.
- * Replaces {{variableName}} tokens with corresponding context values.
- * Unsupported or missing variables are left intact or replaced with empty string safely without throwing.
+ * Pure variable interpolation engine with strict anti-fabrication guards.
+ * Forbids inventing unregistered names, dues, or dates. Missing variables are flagged.
  */
 export function interpolateTemplate(
   templateStr: string,
   context: InterpolationContext,
   fallbackMap: Record<string, string> = {}
-): { result: string; variablesUsed: Record<string, string> } {
+): InterpolationResult {
   if (!templateStr || typeof templateStr !== 'string') {
-    return { result: '', variablesUsed: {} };
+    return {
+      result: '',
+      variablesUsed: {},
+      missingVariables: [],
+      warningsArabic: [],
+      usedRealData: false,
+    };
   }
 
   const client = context.client;
@@ -172,48 +187,89 @@ export function interpolateTemplate(
   const opportunity = context.opportunity;
   const meeting = context.meeting;
 
-  const rawValues: Record<string, string> = {
-    clientName: client?.name || fallbackMap.clientName || 'العميل الكريم',
-    companyName: client?.company || client?.name || fallbackMap.companyName || 'الشركة',
-    contactName: contact?.name || fallbackMap.contactName || 'الأستاذ/ة الكريم/ة',
-    contactTitle: contact?.title || fallbackMap.contactTitle || 'المسؤول',
-    opportunityTitle: opportunity?.title || fallbackMap.opportunityTitle || 'الفرصة التجارية',
+  let hasRealData = false;
+  const rawValues: Record<string, string | undefined> = {
+    clientName: client?.name,
+    companyName: client?.company || client?.name,
+    contactName: contact?.name,
+    contactTitle: contact?.title,
+    opportunityTitle: opportunity?.title,
     opportunityValue:
       opportunity?.estimatedValue !== undefined && opportunity?.currency
         ? `${opportunity.estimatedValue.toLocaleString()} ${opportunity.currency}`
-        : fallbackMap.opportunityValue || 'المقترح المالي',
-    nextAction: opportunity?.nextAction || fallbackMap.nextAction || 'متابعة الخطوة القادمة',
-    meetingTitle: meeting?.title || fallbackMap.meetingTitle || 'اللقاء التنسيقي',
-    daysOverdue: String(context.daysOverdue ?? fallbackMap.daysOverdue ?? '7'),
-    userCompanyName: context.userCompanyName || fallbackMap.userCompanyName || 'مُرافق',
+        : undefined,
+    nextAction: opportunity?.nextAction,
+    meetingTitle: meeting?.title,
+    daysOverdue: context.daysOverdue !== undefined ? String(context.daysOverdue) : undefined,
+    userCompanyName: context.userCompanyName || 'مُرافق',
   };
 
+  if (client || contact || opportunity || meeting) {
+    hasRealData = true;
+  }
+
   const variablesUsed: Record<string, string> = {};
+  const missingSet = new Set<string>();
+
+  // Extract variables present in the template string
+  const matches = templateStr.matchAll(/\{\{([a-zA-Z0-9_]+)\}\}/g);
+  for (const match of matches) {
+    const varName = match[1];
+    if (!varName) continue;
+
+    if (!SUPPORTED_KEYS_SET.has(varName)) {
+      missingSet.add(varName);
+      continue;
+    }
+
+    const val = rawValues[varName];
+    if (val !== undefined && val !== null && String(val).trim() !== '') {
+      variablesUsed[varName] = String(val).trim();
+    } else {
+      // Check fallbackMap ONLY if key is supported and explicitly provided
+      const fallbackVal = fallbackMap[varName];
+      if (fallbackVal !== undefined && fallbackVal !== null && String(fallbackVal).trim() !== '') {
+        variablesUsed[varName] = String(fallbackVal).trim();
+      } else {
+        missingSet.add(varName);
+      }
+    }
+  }
 
   const result = templateStr.replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (match, varName) => {
-    if (Object.prototype.hasOwnProperty.call(rawValues, varName)) {
-      const val = rawValues[varName];
-      variablesUsed[varName] = val;
-      return val;
+    if (Object.prototype.hasOwnProperty.call(variablesUsed, varName)) {
+      return variablesUsed[varName]!;
     }
-    if (Object.prototype.hasOwnProperty.call(fallbackMap, varName)) {
-      const val = fallbackMap[varName];
-      variablesUsed[varName] = val;
-      return val;
-    }
-    return match; // Leave unknown variables unreplaced securely
+    // Return placeholder indicator for unresolvable variables rather than fabricated guesses
+    return `[${varName} مفقود]`;
   });
 
-  return { result, variablesUsed };
+  const missingVariables = Array.from(missingSet);
+  const warningsArabic: string[] = [];
+  if (missingVariables.length > 0) {
+    warningsArabic.push(
+      `تنبيه: المتغيرات التالية غير متوفرة في بيانات العميل أو السياق المحدد وتم إظهار مؤشرات لها: ${missingVariables.join(
+        '، '
+      )}. يُرجى استكمالها يدويًا قبل الإرسال.`
+    );
+  }
+
+  return {
+    result,
+    variablesUsed,
+    missingVariables,
+    warningsArabic,
+    usedRealData: hasRealData && missingVariables.length === 0,
+  };
 }
 
 /**
- * Builds a secure WhatsApp external link (wa.me) with strict phone sanitization and body encoding.
+ * Builds a secure WhatsApp external link (wa.me) with strict phone normalization and encoding.
  */
 export function buildWhatsAppOutreachUrl(phone?: string, body?: string): string | null {
   if (!phone || typeof phone !== 'string') return null;
   const digits = phone.replace(/[^\d]/g, '');
-  if (digits.length < 7) return null;
+  if (digits.length < 7 || digits.length > 20) return null;
   const normalized = digits.startsWith('00') ? digits.slice(2) : digits;
   const baseUrl = `https://wa.me/${normalized}`;
   if (!body || !body.trim()) {
@@ -223,22 +279,45 @@ export function buildWhatsAppOutreachUrl(phone?: string, body?: string): string 
   return `${baseUrl}?text=${encodedText}`;
 }
 
+const EMAIL_STRICT_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+
 /**
- * Builds a secure Email mailto link with strict subject and body encoding.
+ * Builds a secure Email mailto link with strict email validation and header injection prevention.
  */
-export function buildEmailOutreachUrl(email?: string, subject?: string, body?: string): string | null {
-  if (!email || typeof email !== 'string' || !email.includes('@')) return null;
+export function buildEmailOutreachUrl(
+  email?: string,
+  subject?: string,
+  body?: string
+): string | null {
+  if (!email || typeof email !== 'string') return null;
   const cleanEmail = email.trim();
-  const params: string[] = [];
-  if (subject && subject.trim()) {
-    params.push(`subject=${encodeURIComponent(subject.trim())}`);
+  // Prevent CRLF and header injection characters
+  if (/[\r\n\t,;?]/.test(cleanEmail) || !EMAIL_STRICT_REGEX.test(cleanEmail)) {
+    return null;
   }
-  if (body && body.trim()) {
+
+  const params: string[] = [];
+  if (subject && typeof subject === 'string' && subject.trim()) {
+    const cleanSubj = subject.replace(/[\r\n]/g, ' ').trim();
+    params.push(`subject=${encodeURIComponent(cleanSubj)}`);
+  }
+  if (body && typeof body === 'string' && body.trim()) {
     params.push(`body=${encodeURIComponent(body.trim())}`);
   }
   const queryString = params.length > 0 ? `?${params.join('&')}` : '';
   return `mailto:${cleanEmail}${queryString}`;
 }
+
+const COMMUNICATION_TEMPLATE_CATEGORIES: CommunicationTemplateCategory[] = [
+  'intro_lead',
+  'proposal_send',
+  'meeting_invite',
+  'meeting_follow_up',
+  'opportunity_check_in',
+  'payment_reminder',
+  'reactivation',
+  'custom',
+];
 
 /**
  * Validates and sanitizes a custom communication template before saving.
@@ -253,8 +332,20 @@ export function sanitizeCommunicationTemplateForSave(
     throw new Error('يرجى إدخال عنوان القالب.');
   }
 
-  const category: CommunicationTemplateCategory = template.category || 'custom';
-  const channel = template.channel || 'any';
+  const category = COMMUNICATION_TEMPLATE_CATEGORIES.includes(template.category)
+    ? template.category
+    : 'custom';
+  const channel: CommunicationChannel | 'any' =
+    template.channel === 'whatsapp' ||
+    template.channel === 'email' ||
+    template.channel === 'phone_call' ||
+    template.channel === 'in_person_visit' ||
+    template.channel === 'video_call' ||
+    template.channel === 'other' ||
+    template.channel === 'any'
+      ? template.channel
+      : 'any';
+
   const subjectTemplate = template.subjectTemplate?.trim()
     ? template.subjectTemplate.trim().slice(0, 200)
     : undefined;
@@ -273,7 +364,6 @@ export function sanitizeCommunicationTemplateForSave(
       ? template.createdAt
       : nowIso;
 
-  // Extract variables present in body or subject
   const combinedText = `${subjectTemplate || ''} ${bodyTemplate}`;
   const foundVars: string[] = [];
   const matches = combinedText.matchAll(/\{\{([a-zA-Z0-9_]+)\}\}/g);

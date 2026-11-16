@@ -20,7 +20,8 @@ export type CollectionKey =
   | 'opportunityStageEvents'
   | 'interactions'
   | 'playbookTemplates'
-  | 'playbookRuns';
+  | 'playbookRuns'
+  | 'communicationTemplates';
 
 export interface DetailedSyncSummary {
   syncState: SyncState;
