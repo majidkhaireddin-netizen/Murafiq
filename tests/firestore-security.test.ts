@@ -1045,7 +1045,7 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
             id: 'ctpl_custom_1',
             userId: USER_A_UID,
             title: 'قالب متابعة عرض مالي',
-            category: 'proposal_followup',
+            category: 'proposal_send',
             channel: 'whatsapp',
             bodyTemplate: 'مرحباً {{contactName}}، نود متابعة العرض المالي المقدم لشركة {{companyName}}.',
             variables: ['contactName', 'companyName'],
@@ -1088,6 +1088,20 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
             bodyTemplate: 'نص القالب',
             variables: [],
             isSystemTemplate: true,
+            createdAt: '2026-11-16T10:00:00.000Z',
+            updatedAt: '2026-11-16T10:00:00.000Z',
+          })
+        );
+        await assertFails(
+          setDoc(doc(aliceDb, `users/${USER_A_UID}/communicationTemplates/ctpl_bad_category`), {
+            id: 'ctpl_bad_category',
+            userId: USER_A_UID,
+            title: 'قالب تصنيف غير صالح',
+            category: 'proposal_followup',
+            channel: 'whatsapp',
+            bodyTemplate: 'نص القالب',
+            variables: [],
+            isSystemTemplate: false,
             createdAt: '2026-11-16T10:00:00.000Z',
             updatedAt: '2026-11-16T10:00:00.000Z',
           })
