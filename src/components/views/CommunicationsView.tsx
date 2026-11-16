@@ -126,6 +126,18 @@ interface CommunicationsViewProps {
     step: PlaybookRunStep;
     suggestedChannel?: CommunicationChannel;
   }) => void;
+  onComposeCommunicationForPlaybookStep?: (params: {
+    run: PlaybookRun;
+    step: PlaybookRunStep;
+    suggestedChannel?: CommunicationChannel;
+  }) => void;
+  onOpenCommunicationComposer?: (params: {
+    clientId: string;
+    contactId?: string;
+    opportunityId?: string;
+    meetingId?: string;
+    channel?: CommunicationChannel;
+  }) => void;
 }
 
 const DATE_PRESET_LABELS: Record<CommunicationDatePreset, { ar: string; en: string }> = {
@@ -172,6 +184,8 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
   onAtomicConvertStepToTask,
   onApprovePlaybookRescheduleSuggestion,
   onLogCommunicationForPlaybookStep,
+  onComposeCommunicationForPlaybookStep,
+  onOpenCommunicationComposer,
 }) => {
   const [internalSubTab, setInternalSubTab] = useState<CommunicationsSubTab>('interactions');
   const activeSubTab = controlledSubTab ?? internalSubTab;
@@ -384,6 +398,10 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
           onLogCommunicationForStep={(params) =>
             onLogCommunicationForPlaybookStep?.(params)
           }
+          onComposeCommunicationForStep={(params) =>
+            onComposeCommunicationForPlaybookStep?.(params)
+          }
+          onOpenCommunicationComposer={onOpenCommunicationComposer}
           onSelectClient={onSelectClient}
           onSelectOpportunity={(opp) => onSelectOpportunity?.(opp)}
           onOpenTask={(t) => onOpenTask?.(t)}
@@ -439,6 +457,30 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
           </div>
 
           <div className="flex items-center flex-wrap gap-2 shrink-0">
+            {onOpenCommunicationComposer && (
+              <button
+                type="button"
+                data-testid="comm-center-open-composer-btn"
+                onClick={() => {
+                  const targetClientId =
+                    filters.clientId !== 'all'
+                      ? filters.clientId
+                      : staleClients[0]?.client.id || clients[0]?.id || '';
+                  onOpenCommunicationComposer({
+                    clientId: targetClientId,
+                    contactId:
+                      filters.clientId !== 'all' && filters.contactId !== 'all'
+                        ? filters.contactId
+                        : undefined,
+                    channel: filters.channel !== 'all' ? filters.channel : 'whatsapp',
+                  });
+                }}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-teal-50 hover:bg-teal-100 border border-teal-200 text-teal-900 font-bold text-xs shadow-2xs transition-colors"
+              >
+                <Sparkles className="w-4 h-4 text-teal-700" />
+                <span>{language === 'ar' ? 'مساعد المراسلات الذكي' : 'Smart Composer'}</span>
+              </button>
+            )}
             <button
               type="button"
               data-testid="open-new-interaction-btn"
@@ -693,6 +735,22 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
                     </div>
 
                     <div className="flex items-center gap-1">
+                      {onOpenCommunicationComposer && (
+                        <button
+                          type="button"
+                          data-testid={`compose-stale-client-btn-${client.id}`}
+                          onClick={() =>
+                            onOpenCommunicationComposer({
+                              clientId: client.id,
+                              channel: 'whatsapp',
+                            })
+                          }
+                          className="px-2.5 py-1 rounded-lg bg-teal-50 hover:bg-teal-100 border border-teal-200 text-teal-900 text-[11px] font-bold inline-flex items-center gap-1"
+                        >
+                          <Sparkles className="w-3 h-3 text-teal-700" />
+                          <span>مراسلة ذكية</span>
+                        </button>
+                      )}
                       <button
                         type="button"
                         data-testid={`log-stale-client-btn-${client.id}`}
@@ -1179,6 +1237,24 @@ export const CommunicationsView: React.FC<CommunicationsViewProps> = ({
                           <Mail className="w-3 h-3 text-sky-700" />
                           <span className="hidden sm:inline">بريد</span>
                         </a>
+                      )}
+                      {onOpenCommunicationComposer && client && (
+                        <button
+                          type="button"
+                          data-testid={`compose-interaction-btn-${interaction.id}`}
+                          onClick={() =>
+                            onOpenCommunicationComposer({
+                              clientId: interaction.clientId,
+                              contactId: resolvedContact ? interaction.contactId : undefined,
+                              opportunityId: opportunity ? interaction.opportunityId : undefined,
+                              channel: interaction.channel,
+                            })
+                          }
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-teal-50 hover:bg-teal-100 border border-teal-200 text-teal-900 text-[11px] font-bold"
+                        >
+                          <Sparkles className="w-3 h-3 text-teal-700" />
+                          <span>مراسلة ذكية</span>
+                        </button>
                       )}
                     </div>
                   </div>

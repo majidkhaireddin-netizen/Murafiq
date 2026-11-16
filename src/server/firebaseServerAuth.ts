@@ -320,16 +320,45 @@ function parseFirestoreRestIntegerField(
   return undefined;
 }
 
+interface FirestoreRestFieldValue {
+  stringValue?: string;
+  integerValue?: string;
+  doubleValue?: number;
+  arrayValue?: {
+    values?: Array<{
+      mapValue?: {
+        fields?: Record<string, FirestoreRestFieldValue>;
+      };
+    }>;
+  };
+}
+
+export interface VerifiedRestDocData {
+  id?: string;
+  userId?: string;
+  clientId?: string;
+  meetingId?: string;
+  fileName?: string;
+  contentType?: string;
+  sizeBytes?: number;
+  storageKey?: string;
+  uploadStatus?: string;
+  deleteStatus?: string;
+  contacts?: Array<{ id?: string }>;
+}
+
 async function fetchDocumentViaVerifiedUserRest(params: {
   relativeDocPath: string;
   idToken: string;
-}): Promise<{ exists: boolean; data?: Record<string, any> }> {
+  fetchFn?: typeof fetch;
+}): Promise<{ exists: boolean; data?: VerifiedRestDocData }> {
   const { projectId, firestoreDatabaseId } = getFirebaseServerConfig();
   const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
     projectId
   )}/databases/${encodeURIComponent(firestoreDatabaseId)}/documents/${params.relativeDocPath}`;
 
-  const res = await fetch(url, {
+  const fetchImpl = params.fetchFn ?? fetch;
+  const res = await fetchImpl(url, {
     method: 'GET',
     headers: {
       Authorization: `Bearer ${params.idToken}`,
@@ -346,13 +375,23 @@ async function fetchDocumentViaVerifiedUserRest(params: {
     throw new Error(`FIRESTORE_ERROR: تعذر التحقق من ملكية السجل (${res.status}).`);
   }
 
-  const json = (await res.json()) as { fields?: Record<string, any> };
+  const json = (await res.json()) as { fields?: Record<string, FirestoreRestFieldValue> };
   const fields = json.fields;
+  const rawContacts = fields?.contacts?.arrayValue?.values;
+  const contacts: Array<{ id?: string }> = Array.isArray(rawContacts)
+    ? rawContacts
+        .map((v) => ({
+          id: parseFirestoreRestStringField(v?.mapValue?.fields, 'id'),
+        }))
+        .filter((c) => Boolean(c.id))
+    : [];
+
   return {
     exists: true,
     data: {
       id: parseFirestoreRestStringField(fields, 'id'),
       userId: parseFirestoreRestStringField(fields, 'userId'),
+      clientId: parseFirestoreRestStringField(fields, 'clientId'),
       meetingId: parseFirestoreRestStringField(fields, 'meetingId'),
       fileName: parseFirestoreRestStringField(fields, 'fileName'),
       contentType: parseFirestoreRestStringField(fields, 'contentType'),
@@ -360,6 +399,7 @@ async function fetchDocumentViaVerifiedUserRest(params: {
       storageKey: parseFirestoreRestStringField(fields, 'storageKey'),
       uploadStatus: parseFirestoreRestStringField(fields, 'uploadStatus'),
       deleteStatus: parseFirestoreRestStringField(fields, 'deleteStatus'),
+      contacts,
     },
   };
 }
@@ -1373,58 +1413,111 @@ export function createFirebaseAttachmentMetadataStore(
   };
 }
 
-export async function verifyCommunicationContextOwnershipInNamedDb(params: {
-  uid: string;
-  clientId: string;
-  contactId?: string;
-  opportunityId?: string;
-  meetingId?: string;
-  idToken: string;
-}): Promise<boolean> {
+export interface CommunicationOwnershipVerificationDeps {
+  getAdminDb?: () => {
+    doc: (path: string) => {
+      get: () => Promise<{
+        exists: boolean;
+        data: () => Record<string, unknown> | undefined;
+      }>;
+    };
+  };
+  fetchDocRest?: (params: {
+    relativeDocPath: string;
+    idToken: string;
+  }) => Promise<{ exists: boolean; data?: VerifiedRestDocData }>;
+}
+
+export async function verifyCommunicationContextOwnershipInNamedDb(
+  params: {
+    uid: string;
+    clientId: string;
+    contactId?: string;
+    opportunityId?: string;
+    meetingId?: string;
+    idToken: string;
+  },
+  deps?: CommunicationOwnershipVerificationDeps
+): Promise<boolean> {
   const { uid, clientId, contactId, opportunityId, meetingId, idToken } = params;
   if (!isValidResourceId(uid) || !isValidResourceId(clientId)) return false;
+  if (contactId !== undefined && !isValidResourceId(contactId)) return false;
+  if (opportunityId !== undefined && !isValidResourceId(opportunityId)) return false;
+  if (meetingId !== undefined && !isValidResourceId(meetingId)) return false;
+  if (!idToken || typeof idToken !== 'string' || !idToken.trim()) return false;
 
   const clientPath = `users/${uid}/clients/${clientId}`;
+  const getAdminDb = deps?.getAdminDb ?? getNamedAdminFirestore;
+  const fetchDocRest = deps?.fetchDocRest ?? fetchDocumentViaVerifiedUserRest;
+
   try {
-    const adminDb = getNamedAdminFirestore();
+    const adminDb = getAdminDb();
     const clientSnap = await adminDb.doc(clientPath).get();
     if (!clientSnap.exists) return false;
     const clientData = clientSnap.data();
     if (clientData?.userId && clientData.userId !== uid) return false;
 
     if (contactId) {
-      if (!isValidResourceId(contactId)) return false;
-      const contacts = Array.isArray(clientData?.contacts) ? clientData.contacts : [];
-      const foundContact = contacts.some((c: { id?: string }) => c?.id === contactId);
+      const contacts = Array.isArray(clientData?.contacts)
+        ? (clientData.contacts as Array<{ id?: string }>)
+        : [];
+      const foundContact = contacts.some((c) => c?.id === contactId);
       if (!foundContact) return false;
     }
 
     if (opportunityId) {
-      if (!isValidResourceId(opportunityId)) return false;
       const oppSnap = await adminDb.doc(`users/${uid}/opportunities/${opportunityId}`).get();
       if (!oppSnap.exists) return false;
       const oppData = oppSnap.data();
       if (oppData?.userId && oppData.userId !== uid) return false;
-      if (oppData?.clientId && oppData.clientId !== clientId) return false;
+      if (oppData?.clientId !== clientId) return false;
     }
 
     if (meetingId) {
-      if (!isValidResourceId(meetingId)) return false;
       const meetingSnap = await adminDb.doc(`users/${uid}/meetings/${meetingId}`).get();
       if (!meetingSnap.exists) return false;
       const meetingData = meetingSnap.data();
       if (meetingData?.userId && meetingData.userId !== uid) return false;
-      if (meetingData?.clientId && meetingData.clientId !== clientId) return false;
+      if (meetingData?.clientId !== clientId) return false;
     }
 
     return true;
-  } catch (adminErr: any) {
+  } catch (adminErr: unknown) {
     if (!isAdminCredentialFailure(adminErr)) {
       throw adminErr;
     }
 
-    const restRes = await fetchDocumentViaVerifiedUserRest({ relativeDocPath: clientPath, idToken });
-    if (!restRes.exists) return false;
+    // Verified Firestore REST fallback against the named database ONLY (fail-closed)
+    const restClient = await fetchDocRest({ relativeDocPath: clientPath, idToken });
+    if (!restClient.exists) return false;
+    if (restClient.data?.userId && restClient.data.userId !== uid) return false;
+
+    if (contactId) {
+      const contacts = Array.isArray(restClient.data?.contacts) ? restClient.data.contacts : [];
+      const foundContact = contacts.some((c) => c?.id === contactId);
+      if (!foundContact) return false;
+    }
+
+    if (opportunityId) {
+      const restOpp = await fetchDocRest({
+        relativeDocPath: `users/${uid}/opportunities/${opportunityId}`,
+        idToken,
+      });
+      if (!restOpp.exists) return false;
+      if (restOpp.data?.userId && restOpp.data.userId !== uid) return false;
+      if (restOpp.data?.clientId !== clientId) return false;
+    }
+
+    if (meetingId) {
+      const restMeeting = await fetchDocRest({
+        relativeDocPath: `users/${uid}/meetings/${meetingId}`,
+        idToken,
+      });
+      if (!restMeeting.exists) return false;
+      if (restMeeting.data?.userId && restMeeting.data.userId !== uid) return false;
+      if (restMeeting.data?.clientId !== clientId) return false;
+    }
+
     return true;
   }
 }

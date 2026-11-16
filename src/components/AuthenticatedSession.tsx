@@ -75,7 +75,12 @@ import {
   sanitizePlaybookRunForSave,
   sanitizePlaybookTemplateForSave,
 } from '../utils/playbookEngine';
-import { sanitizeCommunicationTemplateForSave } from '../utils/communicationComposerEngine';
+import {
+  executeConfirmedInteractionSave,
+  sanitizeCommunicationTemplateForSave,
+  validateAndResolveComposerContext,
+  type ComposerOpenParams,
+} from '../utils/communicationComposerEngine';
 import {
   computeCommunicationCenterSummary,
   unlinkInteractionReferencesOnDelete,
@@ -1877,6 +1882,55 @@ export function AuthenticatedSession({
     }
   };
 
+  // Cloud-Confirmed Interaction Save for CommunicationComposerModal (Task 015-Fix-02)
+  const handleSaveInteractionConfirmed = async (
+    interaction: CommunicationInteraction
+  ): Promise<void> => {
+    await executeConfirmedInteractionSave({
+      interaction,
+      userId: user.uid,
+      isOnline,
+      coordinator: interactionOpsRef.current,
+      currentInteractions: interactionsRef.current,
+      setState: setInteractions,
+      dispatchWrite: fbSaveInteraction,
+      onConfirmed: ({ wasSuperseded, record }) => {
+        clearRejectedForEntity('interaction', record.id, wasSuperseded);
+      },
+      onRejected: ({ opId, error, classification, wasSuperseded, record }) => {
+        recordRejectedWrite({
+          opId,
+          entityType: 'interaction',
+          entityId: record.id,
+          entityTitle: record.subject || 'تواصل مع عميل',
+          operation: 'save',
+          classification,
+          error,
+          payload: record,
+          wasSuperseded,
+        });
+      },
+    });
+
+    if (pendingInteractionStepContext) {
+      const targetRun = playbookRunsRef.current.find(
+        (r) => r.id === pendingInteractionStepContext.runId
+      );
+      if (targetRun && targetRun.clientId === interaction.clientId) {
+        const linkedRes = linkCommunicationToPlaybookStep({
+          run: targetRun,
+          stepId: pendingInteractionStepContext.stepId,
+          interaction: { ...interaction, userId: user.uid },
+          currentUserId: user.uid,
+        });
+        if (linkedRes.ok && linkedRes.run) {
+          void handleSavePlaybookRun(linkedRes.run);
+        }
+      }
+      setPendingInteractionStepContext(null);
+    }
+  };
+
   const handleDeleteInteraction = async (interactionId: string): Promise<void> => {
     // Unlink any tasks referencing this interaction while preserving the tasks themselves
     const linkedTasks = tasksRef.current.filter((t) => t.interactionId === interactionId);
@@ -2280,6 +2334,7 @@ export function AuthenticatedSession({
   };
 
   const [isCommunicationComposerOpen, setIsCommunicationComposerOpen] = useState<boolean>(false);
+  const [composerOpenErrorArabic, setComposerOpenErrorArabic] = useState<string | null>(null);
   const [composerContext, setComposerContext] = useState<{
     clientId: string;
     contactId?: string;
@@ -2288,28 +2343,21 @@ export function AuthenticatedSession({
     channel?: CommunicationChannel;
   }>({ clientId: '' });
 
-  const openCommunicationComposer = (params: {
-    clientId: string;
-    contactId?: string;
-    opportunityId?: string;
-    meetingId?: string;
-    channel?: CommunicationChannel;
-  }) => {
-    const clientRecord = clients.find((c) => c.id === params.clientId);
-    if (!clientRecord) {
-      if (clients.length > 0) {
-        setComposerContext({ ...params, clientId: params.clientId || clients[0]!.id });
-        setIsCommunicationComposerOpen(true);
-      }
+  const openCommunicationComposer = (params: ComposerOpenParams) => {
+    const validation = validateAndResolveComposerContext(params, {
+      clients: clientsRef.current,
+      opportunities: opportunitiesRef.current,
+      meetings: meetingsRef.current,
+    });
+
+    if (!validation.ok) {
+      setIsCommunicationComposerOpen(false);
+      setComposerOpenErrorArabic(validation.messageArabic);
       return;
     }
-    setComposerContext({
-      clientId: params.clientId,
-      contactId: params.contactId,
-      opportunityId: params.opportunityId,
-      meetingId: params.meetingId,
-      channel: params.channel || 'whatsapp',
-    });
+
+    setComposerOpenErrorArabic(null);
+    setComposerContext(validation.context);
     setIsCommunicationComposerOpen(true);
   };
 
@@ -3132,6 +3180,27 @@ export function AuthenticatedSession({
             </div>
           )}
 
+          {/* Communication Composer Context Validation Error Banner */}
+          {composerOpenErrorArabic && (
+            <div
+              data-testid="composer-open-error-banner"
+              className="mb-3 p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 text-xs flex items-start justify-between gap-2"
+            >
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                <span className="font-semibold">{composerOpenErrorArabic}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setComposerOpenErrorArabic(null)}
+                className="text-rose-600 hover:text-rose-900 p-1"
+                aria-label="إغلاق تنبيه مساعد المراسلات"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
           {/* Preserved Rejected Writes Recovery Banner (Post-reconnect or permission errors) */}
           {rejectedWrites.length > 0 && (
             <div
@@ -3440,6 +3509,7 @@ export function AuthenticatedSession({
                 handleOpenStartPlaybook({ clientId })
               }
               onLogInteraction={handleOpenNewInteraction}
+              onOpenCommunicationComposer={openCommunicationComposer}
               onEditInteraction={handleEditInteraction}
               onDeleteInteraction={handleDeleteInteraction}
               onConvertInteractionToTask={handleConvertInteractionToTask}
@@ -3498,6 +3568,7 @@ export function AuthenticatedSession({
               staleThresholdDays={followUpPreferences.staleClientDays}
               language={language}
               onOpenNewInteraction={handleOpenNewInteraction}
+              onOpenCommunicationComposer={openCommunicationComposer}
               onEditInteraction={handleEditInteraction}
               onDeleteInteraction={(id: string) => {
                 void handleDeleteInteraction(id);
@@ -3538,6 +3609,15 @@ export function AuthenticatedSession({
                   channel: suggestedChannel || step.suggestedChannel,
                 });
               }}
+              onComposeCommunicationForPlaybookStep={({ run, step, suggestedChannel }) => {
+                setPendingInteractionStepContext({ runId: run.id, stepId: step.id });
+                openCommunicationComposer({
+                  clientId: run.clientId,
+                  opportunityId: run.opportunityId,
+                  channel: suggestedChannel || step.suggestedChannel,
+                  sourceWorkspace: 'playbook',
+                });
+              }}
             />
           )}
 
@@ -3570,6 +3650,7 @@ export function AuthenticatedSession({
                 handleOpenNewTask(opp.clientId, opp.id)
               }
               onLogInteraction={handleOpenNewInteraction}
+              onOpenCommunicationComposer={openCommunicationComposer}
               onEditInteraction={handleEditInteraction}
               onOpenClient={(clientId: string) => {
                 setSelectedClientId(clientId);
@@ -3957,25 +4038,33 @@ export function AuthenticatedSession({
         </div>
       )}
 
-      {isCommunicationComposerOpen && (
-        <CommunicationComposerModal
-          isOpen={isCommunicationComposerOpen}
-          onClose={() => setIsCommunicationComposerOpen(false)}
-          client={clients.find((c) => c.id === composerContext.clientId) || clients[0] || { id: 'default', name: 'العميل', createdAt: new Date().toISOString() }}
-          clients={clients}
-          opportunities={opportunities}
-          meetings={meetings}
-          customTemplates={communicationTemplates}
-          onSaveTemplate={handleSaveCommunicationTemplate}
-          onDeleteTemplate={handleDeleteCommunicationTemplate}
-          onLogInteraction={(interaction) => {
-            void handleSaveInteraction(interaction);
-          }}
-          initialChannel={composerContext.channel || 'whatsapp'}
-          initialOpportunityId={composerContext.opportunityId}
-          initialMeetingId={composerContext.meetingId}
-        />
-      )}
+      {(() => {
+        if (!isCommunicationComposerOpen) return null;
+        const activeComposerClient = clients.find((c) => c.id === composerContext.clientId);
+        if (!activeComposerClient) return null;
+        return (
+          <CommunicationComposerModal
+            isOpen={isCommunicationComposerOpen}
+            onClose={() => {
+              setIsCommunicationComposerOpen(false);
+              setPendingInteractionStepContext(null);
+            }}
+            client={activeComposerClient}
+            clients={clients}
+            opportunities={opportunities}
+            meetings={meetings}
+            customTemplates={communicationTemplates}
+            onSaveTemplate={handleSaveCommunicationTemplate}
+            onDeleteTemplate={handleDeleteCommunicationTemplate}
+            onLogInteraction={handleSaveInteractionConfirmed}
+            initialChannel={composerContext.channel || 'whatsapp'}
+            initialContactId={composerContext.contactId}
+            initialOpportunityId={composerContext.opportunityId}
+            initialMeetingId={composerContext.meetingId}
+            isOnline={isOnline}
+          />
+        );
+      })()}
     </>
   );
 }

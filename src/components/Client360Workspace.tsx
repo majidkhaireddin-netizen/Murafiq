@@ -143,6 +143,13 @@ interface Client360WorkspaceProps {
     opportunityId?: string;
     channel?: CommunicationChannel;
   }) => void;
+  onOpenCommunicationComposer?: (params: {
+    clientId: string;
+    contactId?: string;
+    opportunityId?: string;
+    meetingId?: string;
+    channel?: CommunicationChannel;
+  }) => void;
   onEditInteraction?: (interaction: CommunicationInteraction) => void;
   onDeleteInteraction?: (interactionId: string) => Promise<void> | void;
   onConvertInteractionToTask?: (
@@ -183,6 +190,7 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
   onOpenPlaybookRun,
   onStartPlaybookForClient,
   onLogInteraction,
+  onOpenCommunicationComposer,
   onEditInteraction,
   onDeleteInteraction,
   onConvertInteractionToTask,
@@ -653,6 +661,24 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
 
           {/* Direct Quick Actions Row */}
           <div className="pt-3 border-t border-stone-100 flex items-center gap-2 flex-wrap">
+            {onOpenCommunicationComposer && (
+              <button
+                type="button"
+                data-testid="client-360-open-composer-btn"
+                onClick={() =>
+                  onOpenCommunicationComposer({
+                    clientId: client.id,
+                    contactId: primaryContact?.id,
+                    channel: 'whatsapp',
+                  })
+                }
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-teal-50 hover:bg-teal-100 border border-teal-200 text-teal-900 text-xs font-bold shadow-2xs transition-colors"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-teal-700" />
+                <span>مراسلة ذكية</span>
+              </button>
+            )}
+
             {onLogInteraction && (
               <button
                 type="button"
@@ -1977,6 +2003,23 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                     </div>
 
                     <div className="flex items-center gap-2 pt-2 border-t border-stone-100 flex-wrap text-[11px]">
+                      {onOpenCommunicationComposer && (
+                        <button
+                          type="button"
+                          data-testid={`contact-open-composer-${c.id}`}
+                          onClick={() =>
+                            onOpenCommunicationComposer({
+                              clientId: client.id,
+                              contactId: c.id,
+                              channel: 'whatsapp',
+                            })
+                          }
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-teal-50 hover:bg-teal-100 border border-teal-200 text-teal-900 font-bold"
+                        >
+                          <Sparkles className="w-3 h-3 text-teal-700" />
+                          <span>مراسلة ذكية</span>
+                        </button>
+                      )}
                       {onLogInteraction && (
                         <button
                           type="button"
@@ -2373,17 +2416,36 @@ export const Client360Workspace: React.FC<Client360WorkspaceProps> = ({
                 توثيق المكالمات والرسائل والزيارات وجهات الاتصال والموضوعات التي نوقشت والخطوات التالية
               </p>
             </div>
-            {onLogInteraction && (
-              <button
-                type="button"
-                data-testid="client-360-section-log-interaction-btn"
-                onClick={() => onLogInteraction({ clientId: client.id })}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>تسجيل تواصل جديد</span>
-              </button>
-            )}
+            <div className="flex items-center gap-2 flex-wrap">
+              {onOpenCommunicationComposer && (
+                <button
+                  type="button"
+                  data-testid="client-360-section-open-composer-btn"
+                  onClick={() =>
+                    onOpenCommunicationComposer({
+                      clientId: client.id,
+                      contactId: primaryContact?.id,
+                      channel: 'whatsapp',
+                    })
+                  }
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-teal-50 hover:bg-teal-100 border border-teal-200 text-teal-900 text-xs font-bold"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-teal-700" />
+                  <span>مساعد المراسلات الذكي</span>
+                </button>
+              )}
+              {onLogInteraction && (
+                <button
+                  type="button"
+                  data-testid="client-360-section-log-interaction-btn"
+                  onClick={() => onLogInteraction({ clientId: client.id })}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>تسجيل تواصل جديد</span>
+                </button>
+              )}
+            </div>
           </div>
 
           {/* Summary KPIs */}

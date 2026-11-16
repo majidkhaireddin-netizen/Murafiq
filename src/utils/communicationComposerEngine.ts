@@ -2,11 +2,16 @@ import type {
   Client,
   ClientContact,
   CommunicationChannel,
+  CommunicationInteraction,
   CommunicationTemplate,
   CommunicationTemplateCategory,
   Opportunity,
   Meeting,
 } from '../types/index.ts';
+import type {
+  OperationCoordinator,
+  WriteErrorClassification,
+} from './sessionState.ts';
 
 export const SUPPORTED_COMMUNICATION_VARIABLES = [
   { key: 'clientName', labelAr: 'اسم العميل / الشركة', description: 'اسم العميل أو الجهة الرئيسية' },
@@ -387,3 +392,391 @@ export function sanitizeCommunicationTemplateForSave(
     updatedAt: nowIso,
   };
 }
+
+export type ComposerSourceWorkspace =
+  | 'communications'
+  | 'client360'
+  | 'opportunity'
+  | 'today'
+  | 'playbook';
+
+export interface ComposerOpenParams {
+  clientId: string;
+  contactId?: string;
+  opportunityId?: string;
+  meetingId?: string;
+  channel?: CommunicationChannel;
+  sourceWorkspace?: ComposerSourceWorkspace;
+}
+
+export type ComposerOpenValidationResult =
+  | {
+      ok: true;
+      client: Client;
+      context: {
+        clientId: string;
+        contactId?: string;
+        opportunityId?: string;
+        meetingId?: string;
+        channel: CommunicationChannel;
+        sourceWorkspace?: ComposerSourceWorkspace;
+      };
+    }
+  | {
+      ok: false;
+      errorCode:
+        | 'CLIENT_NOT_FOUND'
+        | 'CONTACT_CLIENT_MISMATCH'
+        | 'OPPORTUNITY_CLIENT_MISMATCH'
+        | 'MEETING_CLIENT_MISMATCH';
+      messageArabic: string;
+    };
+
+/**
+ * Validates and resolves the context for opening CommunicationComposerModal across all 5 workspaces.
+ * - Never substitutes an invalid/missing clientId with clients[0] or a fake client.
+ * - Rejects any contactId, opportunityId, or meetingId that does not belong to the specified client.
+ */
+export function validateAndResolveComposerContext(
+  params: ComposerOpenParams,
+  records: {
+    clients: Client[];
+    opportunities: Opportunity[];
+    meetings: Meeting[];
+  }
+): ComposerOpenValidationResult {
+  const cleanClientId = typeof params.clientId === 'string' ? params.clientId.trim() : '';
+  const client = records.clients.find((c) => c.id === cleanClientId);
+  if (!cleanClientId || !client) {
+    return {
+      ok: false,
+      errorCode: 'CLIENT_NOT_FOUND',
+      messageArabic: 'تعذر فتح مساعد المراسلات: العميل المحدد غير موجود في السجلات.',
+    };
+  }
+
+  let resolvedContactId: string | undefined;
+  if (params.contactId && params.contactId.trim()) {
+    const cleanContactId = params.contactId.trim();
+    const matchedContact = (client.contacts || []).find((c) => c.id === cleanContactId);
+    if (!matchedContact) {
+      return {
+        ok: false,
+        errorCode: 'CONTACT_CLIENT_MISMATCH',
+        messageArabic: 'تعذر فتح مساعد المراسلات: جهة الاتصال المحددة لا تتبع هذا العميل.',
+      };
+    }
+    resolvedContactId = matchedContact.id;
+  } else {
+    resolvedContactId =
+      client.contacts?.find((c) => c.isPrimary)?.id || client.contacts?.[0]?.id || undefined;
+  }
+
+  let resolvedOpportunityId: string | undefined;
+  if (params.opportunityId && params.opportunityId.trim()) {
+    const cleanOppId = params.opportunityId.trim();
+    const matchedOpp = records.opportunities.find((o) => o.id === cleanOppId);
+    if (!matchedOpp || matchedOpp.clientId !== client.id) {
+      return {
+        ok: false,
+        errorCode: 'OPPORTUNITY_CLIENT_MISMATCH',
+        messageArabic: 'تعذر فتح مساعد المراسلات: الفرصة التجارية المحددة لا تتبع هذا العميل.',
+      };
+    }
+    resolvedOpportunityId = matchedOpp.id;
+  }
+
+  let resolvedMeetingId: string | undefined;
+  if (params.meetingId && params.meetingId.trim()) {
+    const cleanMtgId = params.meetingId.trim();
+    const matchedMtg = records.meetings.find((m) => m.id === cleanMtgId);
+    if (!matchedMtg || matchedMtg.clientId !== client.id) {
+      return {
+        ok: false,
+        errorCode: 'MEETING_CLIENT_MISMATCH',
+        messageArabic: 'تعذر فتح مساعد المراسلات: الاجتماع المحدد لا يتبع هذا العميل.',
+      };
+    }
+    resolvedMeetingId = matchedMtg.id;
+  }
+
+  return {
+    ok: true,
+    client,
+    context: {
+      clientId: client.id,
+      ...(resolvedContactId ? { contactId: resolvedContactId } : {}),
+      ...(resolvedOpportunityId ? { opportunityId: resolvedOpportunityId } : {}),
+      ...(resolvedMeetingId ? { meetingId: resolvedMeetingId } : {}),
+      channel: params.channel || 'whatsapp',
+      ...(params.sourceWorkspace ? { sourceWorkspace: params.sourceWorkspace } : {}),
+    },
+  };
+}
+
+/**
+ * Executes a cloud-confirmed save of a CommunicationInteraction through OperationCoordinator.
+ * - Rejects immediately if offline so no fake cloud confirmation occurs.
+ * - Awaits the underlying Firestore serverPromise.
+ * - Propagates server rejections (e.g. PERMISSION_DENIED) as thrown errors after rolling back optimistic state.
+ */
+export async function executeConfirmedInteractionSave(params: {
+  interaction: CommunicationInteraction;
+  userId: string;
+  isOnline: boolean;
+  coordinator: OperationCoordinator<CommunicationInteraction>;
+  currentInteractions: CommunicationInteraction[];
+  setState: (
+    updater: (prev: CommunicationInteraction[]) => CommunicationInteraction[]
+  ) => void;
+  dispatchWrite: (record: CommunicationInteraction) => { serverPromise: Promise<void> };
+  onConfirmed?: (info: {
+    opId: string;
+    opSeq: number;
+    wasSuperseded: boolean;
+    record: CommunicationInteraction;
+  }) => void;
+  onRejected?: (info: {
+    opId: string;
+    opSeq: number;
+    error: Error;
+    classification: WriteErrorClassification;
+    wasSuperseded: boolean;
+    record: CommunicationInteraction;
+  }) => void;
+}): Promise<{ status: 'synced'; record: CommunicationInteraction }> {
+  if (!params.isOnline) {
+    throw new Error(
+      'أنت في وضع عدم الاتصال بالإنترنت: لا يمكن تأكيد حفظ سجل التواصل سحابياً الآن. ستبقى المسودة مفتوحة ومحفوظة حتى عودة الاتصال.'
+    );
+  }
+
+  const withOwner: CommunicationInteraction = {
+    ...params.interaction,
+    userId: params.userId,
+  };
+
+  const prevEntity = params.currentInteractions.find((i) => i.id === withOwner.id);
+  const applyUpsert = (prev: CommunicationInteraction[]) => {
+    const idx = prev.findIndex((i) => i.id === withOwner.id);
+    if (idx >= 0) {
+      const next = [...prev];
+      next[idx] = withOwner;
+      return next;
+    }
+    return [withOwner, ...prev];
+  };
+
+  let serverConfirmed = false;
+  let serverRejection: { error: Error; classification: WriteErrorClassification } | null = null;
+
+  const handle = params.coordinator.runScopedMutation({
+    entityId: withOwner.id,
+    entityType: 'interaction',
+    previousEntity: prevEntity,
+    setState: params.setState,
+    applyOptimistic: applyUpsert,
+    dispatchWrite: () => params.dispatchWrite(withOwner),
+    onServerConfirmed: ({ opId, opSeq, wasSuperseded }) => {
+      serverConfirmed = true;
+      params.onConfirmed?.({ opId, opSeq, wasSuperseded, record: withOwner });
+    },
+    onServerRejected: ({ opId, opSeq, error, classification, wasSuperseded }) => {
+      serverRejection = { error, classification };
+      params.onRejected?.({
+        opId,
+        opSeq,
+        error,
+        classification,
+        wasSuperseded,
+        record: withOwner,
+      });
+    },
+  });
+
+  await handle.serverPromise;
+
+  if (serverRejection) {
+    const rej = serverRejection as { error: Error; classification: WriteErrorClassification };
+    throw new Error(rej.classification.messageArabic || rej.error.message);
+  }
+
+  if (!serverConfirmed) {
+    throw new Error('تعذر تأكيد حفظ سجل التواصل على الخادم السحابي.');
+  }
+
+  return {
+    status: 'synced',
+    record: withOwner,
+  };
+}
+
+export interface ComposerDraftSnapshot {
+  subject: string;
+  body: string;
+  channel: CommunicationChannel;
+  contactId?: string;
+  opportunityId?: string;
+  meetingId?: string;
+  outcome: CommunicationInteraction['outcome'];
+  nextStep?: string;
+  nextFollowUpDate?: string;
+  storeBodyInSummary: boolean;
+}
+
+export type ComposerSubmissionOutcome =
+  | {
+      status: 'ignored_in_flight';
+      isOpen: true;
+      syncState: 'saving';
+      draft: ComposerDraftSnapshot;
+    }
+  | {
+      status: 'synced';
+      isOpen: false;
+      syncState: 'synced';
+      interaction: CommunicationInteraction;
+      draft: ComposerDraftSnapshot;
+    }
+  | {
+      status: 'failed';
+      isOpen: true;
+      syncState: 'failed';
+      errorArabic: string;
+      draft: ComposerDraftSnapshot;
+    };
+
+/**
+ * Single-flight submission controller for CommunicationComposerModal interaction logging.
+ * Guarantees:
+ * - Double-clicks while saving are ignored without creating duplicate records.
+ * - Never reports 'synced' or closes the modal before onLogInteraction resolves.
+ * - Preserves the full draft and keeps the modal open when the server rejects.
+ */
+export function createComposerSubmissionController(params: {
+  client: Client;
+  contacts?: ClientContact[];
+  onLogInteraction: (interaction: CommunicationInteraction) => Promise<void>;
+  onStateChange?: (state: {
+    isSubmitting: boolean;
+    syncState: 'idle' | 'saving' | 'synced' | 'failed';
+    isOpen: boolean;
+    errorArabic: string | null;
+  }) => void;
+}) {
+  let inFlight = false;
+  let stableInteractionId: string | null = null;
+
+  return {
+    isInFlight: () => inFlight,
+    getStableInteractionId: () => stableInteractionId,
+    async submit(
+      draft: ComposerDraftSnapshot,
+      dispatchConfirmed: boolean
+    ): Promise<ComposerSubmissionOutcome> {
+      if (inFlight) {
+        return {
+          status: 'ignored_in_flight',
+          isOpen: true,
+          syncState: 'saving',
+          draft,
+        };
+      }
+
+      if (!dispatchConfirmed) {
+        const msg =
+          'يرجى تأكيد أنك قمت بإرسال الرسالة فعلاً عبر القناة الخارجية قبل تسجيلها في السجل.';
+        params.onStateChange?.({
+          isSubmitting: false,
+          syncState: 'failed',
+          isOpen: true,
+          errorArabic: msg,
+        });
+        return {
+          status: 'failed',
+          isOpen: true,
+          syncState: 'failed',
+          errorArabic: msg,
+          draft,
+        };
+      }
+
+      inFlight = true;
+      if (!stableInteractionId) {
+        stableInteractionId = `comm-${Date.now()}`;
+      }
+
+      params.onStateChange?.({
+        isSubmitting: true,
+        syncState: 'saving',
+        isOpen: true,
+        errorArabic: null,
+      });
+
+      const activeContact = (params.contacts || params.client.contacts || []).find(
+        (c) => c.id === draft.contactId
+      );
+      const summaryText = draft.storeBodyInSummary
+        ? draft.body.slice(0, 1500)
+        : `مراسلة عبر ${draft.channel} (بدون حفظ النص الكامل بناءً على تفضيل الخصوصية).`;
+
+      const nowIso = new Date().toISOString();
+      const interaction: CommunicationInteraction = {
+        id: stableInteractionId,
+        clientId: params.client.id,
+        ...(draft.contactId ? { contactId: draft.contactId } : {}),
+        ...(activeContact?.name ? { contactName: activeContact.name } : {}),
+        ...(draft.opportunityId ? { opportunityId: draft.opportunityId } : {}),
+        ...(draft.meetingId ? { meetingId: draft.meetingId } : {}),
+        channel: draft.channel,
+        direction: 'outbound',
+        occurredAt: nowIso,
+        subject: draft.subject
+          ? `${draft.subject} - ${params.client.name}`
+          : `مراسلة مع ${params.client.name}`,
+        summary: summaryText,
+        outcome: draft.outcome,
+        ...(draft.nextStep?.trim() ? { nextStep: draft.nextStep.trim() } : {}),
+        ...(draft.nextFollowUpDate ? { nextFollowUpDate: draft.nextFollowUpDate } : {}),
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+
+      try {
+        await params.onLogInteraction(interaction);
+        inFlight = false;
+        stableInteractionId = null;
+        params.onStateChange?.({
+          isSubmitting: false,
+          syncState: 'synced',
+          isOpen: false,
+          errorArabic: null,
+        });
+        return {
+          status: 'synced',
+          isOpen: false,
+          syncState: 'synced',
+          interaction,
+          draft,
+        };
+      } catch (err: unknown) {
+        inFlight = false;
+        const msg = err instanceof Error ? err.message : 'تعذر حفظ سجل النشاط على الخادم.';
+        params.onStateChange?.({
+          isSubmitting: false,
+          syncState: 'failed',
+          isOpen: true,
+          errorArabic: msg,
+        });
+        return {
+          status: 'failed',
+          isOpen: true,
+          syncState: 'failed',
+          errorArabic: msg,
+          draft,
+        };
+      }
+    },
+  };
+}
+

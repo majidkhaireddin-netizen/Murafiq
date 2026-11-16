@@ -1029,6 +1029,101 @@ test('Firestore Security Rules Integration Suite (@firebase/rules-unit-testing)'
         await assertSucceeds(deleteDoc(runRef));
         await assertSucceeds(deleteDoc(tplRef));
       });
+
+      // 8e. Task 015: Communication Templates Security Rules (/users/{uid}/communicationTemplates/{templateId})
+      await st.test(`8e. Enforces owner isolation, system template protection, and schema validation for communicationTemplates on ${dbId}`, async () => {
+        const aliceCtx = testEnv.authenticatedContext(USER_A_UID);
+        const aliceDb = getDbInstance(aliceCtx, dbId);
+        const bobCtx = testEnv.authenticatedContext(USER_B_UID);
+        const bobDb = getDbInstance(bobCtx, dbId);
+        const unauthCtx = testEnv.unauthenticatedContext();
+        const unauthDb = getDbInstance(unauthCtx, dbId);
+
+        const commTplRef = doc(aliceDb, `users/${USER_A_UID}/communicationTemplates/ctpl_custom_1`);
+        await assertSucceeds(
+          setDoc(commTplRef, {
+            id: 'ctpl_custom_1',
+            userId: USER_A_UID,
+            title: 'قالب متابعة عرض مالي',
+            category: 'proposal_followup',
+            channel: 'whatsapp',
+            bodyTemplate: 'مرحباً {{contactName}}، نود متابعة العرض المالي المقدم لشركة {{companyName}}.',
+            variables: ['contactName', 'companyName'],
+            isSystemTemplate: false,
+            createdAt: '2026-11-16T10:00:00.000Z',
+            updatedAt: '2026-11-16T10:00:00.000Z',
+          })
+        );
+
+        // Owner Alice can read, list, and update her custom template
+        await assertSucceeds(getDoc(commTplRef));
+        await assertSucceeds(getDocs(collection(aliceDb, `users/${USER_A_UID}/communicationTemplates`)));
+        await assertSucceeds(
+          updateDoc(commTplRef, {
+            title: 'قالب متابعة عرض مالي محدث',
+            updatedAt: '2026-11-16T11:00:00.000Z',
+          })
+        );
+
+        // Reject mutating createdAt or setting isSystemTemplate: true
+        await assertFails(
+          updateDoc(commTplRef, {
+            createdAt: '2020-01-01T00:00:00.000Z',
+          })
+        );
+        await assertFails(
+          updateDoc(commTplRef, {
+            isSystemTemplate: true,
+          })
+        );
+
+        // Reject creating a spoofed system template or invalid channel/category
+        await assertFails(
+          setDoc(doc(aliceDb, `users/${USER_A_UID}/communicationTemplates/ctpl_sys_spoof`), {
+            id: 'ctpl_sys_spoof',
+            userId: USER_A_UID,
+            title: 'قالب نظام مزيف',
+            category: 'custom',
+            channel: 'whatsapp',
+            bodyTemplate: 'نص القالب',
+            variables: [],
+            isSystemTemplate: true,
+            createdAt: '2026-11-16T10:00:00.000Z',
+            updatedAt: '2026-11-16T10:00:00.000Z',
+          })
+        );
+        await assertFails(
+          setDoc(doc(aliceDb, `users/${USER_A_UID}/communicationTemplates/ctpl_bad_channel`), {
+            id: 'ctpl_bad_channel',
+            userId: USER_A_UID,
+            title: 'قالب قناة غير صالحة',
+            category: 'custom',
+            channel: 'telegram_bot',
+            bodyTemplate: 'نص القالب',
+            variables: [],
+            isSystemTemplate: false,
+            createdAt: '2026-11-16T10:00:00.000Z',
+            updatedAt: '2026-11-16T10:00:00.000Z',
+          })
+        );
+
+        // Cross-user Bob and unauthenticated user cannot read, list, update, or delete Alice's template
+        await assertFails(getDoc(doc(bobDb, `users/${USER_A_UID}/communicationTemplates/ctpl_custom_1`)));
+        await assertFails(getDocs(collection(bobDb, `users/${USER_A_UID}/communicationTemplates`)));
+        await assertFails(
+          updateDoc(doc(bobDb, `users/${USER_A_UID}/communicationTemplates/ctpl_custom_1`), {
+            title: 'اختراق',
+          })
+        );
+        await assertFails(deleteDoc(doc(bobDb, `users/${USER_A_UID}/communicationTemplates/ctpl_custom_1`)));
+        await assertFails(getDoc(doc(unauthDb, `users/${USER_A_UID}/communicationTemplates/ctpl_custom_1`)));
+
+        // Legacy root /communicationTemplates is denied
+        await assertFails(getDoc(doc(aliceDb, 'communicationTemplates/ctpl_custom_1')));
+
+        // Owner Alice can delete her custom template
+        await assertSucceeds(deleteDoc(commTplRef));
+      });
     });
   }
 

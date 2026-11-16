@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActionItem,
   Client,
+  CommunicationChannel,
   CommunicationInteraction,
   Meeting,
   Opportunity,
@@ -65,6 +66,13 @@ interface OpportunitiesViewProps {
   onCreateLinkedMeeting: (opportunity: Opportunity) => void;
   onCreateLinkedTask: (opportunity: Opportunity) => void;
   onLogInteraction?: (defaults: { clientId: string; opportunityId: string }) => void;
+  onOpenCommunicationComposer?: (params: {
+    clientId: string;
+    contactId?: string;
+    opportunityId?: string;
+    meetingId?: string;
+    channel?: CommunicationChannel;
+  }) => void;
   onEditInteraction?: (interaction: CommunicationInteraction) => void;
   onOpenClient: (clientId: string) => void;
   onOpenMeeting: (meetingId: string) => void;
@@ -99,6 +107,7 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
   onCreateLinkedMeeting,
   onCreateLinkedTask,
   onLogInteraction,
+  onOpenCommunicationComposer,
   onEditInteraction,
   onOpenClient,
   onOpenMeeting,
@@ -245,6 +254,7 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
           onCreateLinkedMeeting={onCreateLinkedMeeting}
           onCreateLinkedTask={onCreateLinkedTask}
           onLogInteraction={onLogInteraction}
+          onOpenCommunicationComposer={onOpenCommunicationComposer}
           onEditInteraction={onEditInteraction}
           onOpenClient={onOpenClient}
           onOpenMeeting={onOpenMeeting}

@@ -76,7 +76,8 @@ export async function createMurafiqServerApp() {
       createViteServer({
         server: {
           middlewareMode: true,
-          ...(disableHmr ? { hmr: false, watch: null } : {}),
+          hmr: false,
+          ...(disableHmr ? { watch: null } : {}),
         },
         appType: 'spa',
       })

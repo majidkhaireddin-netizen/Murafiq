@@ -101,9 +101,10 @@ export function createAiRouter(customDeps: AiRouterDeps = {}) {
       const user = await verifyToken(req.headers.authorization);
       req.authUser = user;
       next();
-    } catch (err: any) {
-      const code = String(err?.code || '');
-      const msg = String(err?.message || '');
+    } catch (err: unknown) {
+      const errObj = err as { code?: string; message?: string } | null;
+      const code = String(errObj?.code || '');
+      const msg = String(errObj?.message || '');
       const isAuthFailure =
         msg.startsWith('UNAUTHENTICATED:') ||
         (code.startsWith('auth/') && code !== 'auth/internal-error');
@@ -177,15 +178,15 @@ export function createAiRouter(customDeps: AiRouterDeps = {}) {
         meetingId,
         idToken: req.authUser!.idToken,
       });
-      if (!ownsMeeting) {
+      if (ownsMeeting === false) {
         res.status(403).json({
           error: 'MEETING_ACCESS_DENIED',
           messageArabic: 'اللقاء غير موجود أو لا تملك صلاحية الوصول إليه.',
         });
         return;
       }
-    } catch (ownerErr: any) {
-      const msg = String(ownerErr?.message || '');
+    } catch (ownerErr: unknown) {
+      const msg = ownerErr instanceof Error ? ownerErr.message : String(ownerErr || '');
       if (msg.startsWith('FORBIDDEN:')) {
         res.status(403).json({
           error: 'FORBIDDEN',
@@ -247,7 +248,7 @@ export function createAiRouter(customDeps: AiRouterDeps = {}) {
       }
 
       res.json(analysis);
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (res.writableEnded) return;
 
       if (err instanceof GeminiServiceError) {
@@ -327,8 +328,8 @@ export function createAiRouter(customDeps: AiRouterDeps = {}) {
         });
         return;
       }
-    } catch (ownerErr: any) {
-      const msg = String(ownerErr?.message || '');
+    } catch (ownerErr: unknown) {
+      const msg = ownerErr instanceof Error ? ownerErr.message : String(ownerErr || '');
       if (msg.startsWith('FORBIDDEN:')) {
         res.status(403).json({
           error: 'FORBIDDEN',
@@ -390,7 +391,7 @@ export function createAiRouter(customDeps: AiRouterDeps = {}) {
       }
 
       res.json(briefing);
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (res.writableEnded) return;
 
       if (err instanceof GeminiServiceError) {
@@ -410,6 +411,27 @@ export function createAiRouter(customDeps: AiRouterDeps = {}) {
       res.off('close', onResponseClose);
     }
   });
+
+  const ALLOWED_COMM_CHANNELS = new Set([
+    'phone_call',
+    'whatsapp',
+    'email',
+    'in_person_visit',
+    'video_call',
+    'other',
+  ]);
+  const ALLOWED_COMM_TONES = new Set(['formal', 'friendly', 'concise', 'executive']);
+  const ALLOWED_COMM_GRANULARITIES = new Set(['short', 'detailed', 'bullet_points']);
+  const ALLOWED_COMM_CONTEXT_KEYS = new Set([
+    'clientName',
+    'companyName',
+    'contactName',
+    'contactTitle',
+    'opportunityTitle',
+    'opportunityValue',
+    'nextAction',
+    'meetingTitle',
+  ]);
 
   router.post('/communication-draft', async (req: AuthenticatedRequest, res: Response) => {
     const uid = req.authUser!.uid;
@@ -433,11 +455,99 @@ export function createAiRouter(customDeps: AiRouterDeps = {}) {
       return;
     }
 
+    if (body.request && typeof body.request === 'object') {
+      const nestedDisallowed = detectDisallowedAiFields(body.request as Record<string, unknown>);
+      if (nestedDisallowed) {
+        res.status(400).json({
+          error: 'DISALLOWED_AI_INPUT_FIELD',
+          messageArabic: 'مرفوض: يُمنع إرسال المرفقات السحابية أو حقول التحكم.',
+        });
+        return;
+      }
+    }
+
+    if (body.contextData !== undefined) {
+      if (
+        typeof body.contextData !== 'object' ||
+        body.contextData === null ||
+        Array.isArray(body.contextData)
+      ) {
+        res.status(400).json({
+          error: 'INVALID_CONTEXT_DATA',
+          messageArabic: 'بيانات السياق المرفقة غير صالحة.',
+        });
+        return;
+      }
+      const ctxRecord = body.contextData as Record<string, unknown>;
+      const nestedCtxDisallowed = detectDisallowedAiFields(ctxRecord);
+      if (nestedCtxDisallowed) {
+        res.status(400).json({
+          error: 'DISALLOWED_AI_INPUT_FIELD',
+          messageArabic: 'مرفوض: يُمنع إرسال المرفقات السحابية أو حقول التحكم.',
+        });
+        return;
+      }
+      for (const [k, v] of Object.entries(ctxRecord)) {
+        if (!ALLOWED_COMM_CONTEXT_KEYS.has(k)) {
+          res.status(400).json({
+            error: 'DISALLOWED_CONTEXT_DATA_FIELD',
+            messageArabic: 'يحتوي طلب الصياغة على حقول سياق غير مسموح بها.',
+          });
+          return;
+        }
+        if (v !== undefined && (typeof v !== 'string' || v.length > 300)) {
+          res.status(400).json({
+            error: 'INVALID_CONTEXT_DATA_VALUE',
+            messageArabic: 'أحد حقول السياق يتجاوز الطول المسموح به أو ليس نصاً صالحاً.',
+          });
+          return;
+        }
+      }
+    }
+
     const requestPayload = (body.request || body) as CommunicationDraftRequest;
-    if (!requestPayload || !requestPayload.channel) {
+    if (
+      !requestPayload ||
+      typeof requestPayload.channel !== 'string' ||
+      !ALLOWED_COMM_CHANNELS.has(requestPayload.channel)
+    ) {
       res.status(400).json({
         error: 'INVALID_COMMUNICATION_DRAFT_REQUEST',
         messageArabic: 'بيانات طلب الصياغة غير صالحة أو قناة التواصل غير مشخصة.',
+      });
+      return;
+    }
+
+    if (
+      requestPayload.tone !== undefined &&
+      (typeof requestPayload.tone !== 'string' || !ALLOWED_COMM_TONES.has(requestPayload.tone))
+    ) {
+      res.status(400).json({
+        error: 'INVALID_COMMUNICATION_DRAFT_TONE',
+        messageArabic: 'نبرة الرسالة المحددة غير صالحة.',
+      });
+      return;
+    }
+
+    if (
+      requestPayload.granularity !== undefined &&
+      (typeof requestPayload.granularity !== 'string' ||
+        !ALLOWED_COMM_GRANULARITIES.has(requestPayload.granularity))
+    ) {
+      res.status(400).json({
+        error: 'INVALID_COMMUNICATION_DRAFT_GRANULARITY',
+        messageArabic: 'مستوى تفصيل الرسالة غير صالح.',
+      });
+      return;
+    }
+
+    if (
+      requestPayload.customPrompt !== undefined &&
+      (typeof requestPayload.customPrompt !== 'string' || requestPayload.customPrompt.length > 500)
+    ) {
+      res.status(400).json({
+        error: 'INVALID_CUSTOM_PROMPT',
+        messageArabic: 'التوجيه الإضافي غير صالح أو يتجاوز الحد المسموح (500 حرف).',
       });
       return;
     }
@@ -451,9 +561,9 @@ export function createAiRouter(customDeps: AiRouterDeps = {}) {
       return;
     }
 
-    const contactId = requestPayload.contactId || (body.contactId as string);
-    const opportunityId = requestPayload.opportunityId || (body.opportunityId as string);
-    const meetingId = requestPayload.meetingId || (body.meetingId as string);
+    const contactId = requestPayload.contactId || (body.contactId as string | undefined);
+    const opportunityId = requestPayload.opportunityId || (body.opportunityId as string | undefined);
+    const meetingId = requestPayload.meetingId || (body.meetingId as string | undefined);
 
     if (contactId && !isValidResourceId(contactId)) {
       res.status(400).json({ error: 'INVALID_CONTACT_ID', messageArabic: 'معرّف جهة الاتصال غير صالح.' });
@@ -484,7 +594,15 @@ export function createAiRouter(customDeps: AiRouterDeps = {}) {
         });
         return;
       }
-    } catch {
+    } catch (ownerErr: unknown) {
+      const msg = ownerErr instanceof Error ? ownerErr.message : String(ownerErr || '');
+      if (msg.startsWith('FORBIDDEN:')) {
+        res.status(403).json({
+          error: 'FORBIDDEN',
+          messageArabic: 'تم رفض الوصول إلى سجل العميل أو السجلات المرتبطة.',
+        });
+        return;
+      }
       res.status(503).json({
         error: 'OWNERSHIP_VERIFICATION_UNAVAILABLE',
         messageArabic: 'تعذر التحقق من ملكية البيانات على الخادم حالياً.',
@@ -517,13 +635,25 @@ export function createAiRouter(customDeps: AiRouterDeps = {}) {
     }
     inFlightKeys.add(inFlightKey);
 
-    const contextData = (body.contextData || {}) as {
+    const rawContext = (body.contextData || {}) as Record<string, string | undefined>;
+    const contextData: {
       clientName?: string;
       companyName?: string;
       contactName?: string;
       opportunityTitle?: string;
       opportunityValue?: string;
       nextAction?: string;
+    } = {
+      ...(rawContext.clientName ? { clientName: rawContext.clientName.trim().slice(0, 200) } : {}),
+      ...(rawContext.companyName ? { companyName: rawContext.companyName.trim().slice(0, 200) } : {}),
+      ...(rawContext.contactName ? { contactName: rawContext.contactName.trim().slice(0, 200) } : {}),
+      ...(rawContext.opportunityTitle
+        ? { opportunityTitle: rawContext.opportunityTitle.trim().slice(0, 200) }
+        : {}),
+      ...(rawContext.opportunityValue
+        ? { opportunityValue: rawContext.opportunityValue.trim().slice(0, 120) }
+        : {}),
+      ...(rawContext.nextAction ? { nextAction: rawContext.nextAction.trim().slice(0, 300) } : {}),
     };
 
     const requestAbortController = new AbortController();

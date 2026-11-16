@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActionItem,
   Client,
+  CommunicationChannel,
   CommunicationInteraction,
   Meeting,
   Opportunity,
@@ -44,6 +45,7 @@ import {
   ListChecks,
   PhoneCall,
   Plus,
+  Sparkles,
   Trash2,
   Unlink,
   User,
@@ -72,6 +74,13 @@ interface OpportunityDetailWorkspaceProps {
   onCreateLinkedMeeting: (opportunity: Opportunity) => void;
   onCreateLinkedTask: (opportunity: Opportunity) => void;
   onLogInteraction?: (defaults: { clientId: string; opportunityId: string }) => void;
+  onOpenCommunicationComposer?: (params: {
+    clientId: string;
+    contactId?: string;
+    opportunityId?: string;
+    meetingId?: string;
+    channel?: CommunicationChannel;
+  }) => void;
   onEditInteraction?: (interaction: CommunicationInteraction) => void;
   onOpenClient: (clientId: string) => void;
   onOpenMeeting: (meetingId: string) => void;
@@ -103,6 +112,7 @@ export const OpportunityDetailWorkspace: React.FC<OpportunityDetailWorkspaceProp
   onCreateLinkedMeeting,
   onCreateLinkedTask,
   onLogInteraction,
+  onOpenCommunicationComposer,
   onEditInteraction,
   onOpenClient,
   onOpenMeeting,
@@ -272,7 +282,24 @@ export const OpportunityDetailWorkspace: React.FC<OpportunityDetailWorkspaceProp
           <span>{language === 'ar' ? 'العودة إلى فرص الأعمال' : 'Back to Pipeline'}</span>
         </button>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          {onOpenCommunicationComposer && client && (
+            <button
+              type="button"
+              data-testid="opp-open-composer-btn"
+              onClick={() =>
+                onOpenCommunicationComposer({
+                  clientId: opportunity.clientId,
+                  opportunityId: opportunity.id,
+                  channel: 'whatsapp',
+                })
+              }
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-teal-50 border border-teal-200 text-xs font-bold text-teal-900 hover:bg-teal-100 transition-colors"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-teal-700" />
+              <span>{language === 'ar' ? 'مراسلة ذكية للفرصة' : 'Smart Composer'}</span>
+            </button>
+          )}
           <button
             type="button"
             data-testid="opp-detail-edit-btn"
@@ -875,22 +902,41 @@ export const OpportunityDetailWorkspace: React.FC<OpportunityDetailWorkspaceProp
                 : `Linked Communications (${linkedInteractions.length})`}
             </h3>
           </div>
-          {onLogInteraction && (
-            <button
-              type="button"
-              data-testid="opp-new-linked-interaction-btn"
-              onClick={() =>
-                onLogInteraction({
-                  clientId: opportunity.clientId,
-                  opportunityId: opportunity.id,
-                })
-              }
-              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200 text-[11px] font-bold hover:bg-emerald-100"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>{language === 'ar' ? 'تسجيل تواصل مرتبط' : 'Log Communication'}</span>
-            </button>
-          )}
+          <div className="flex items-center gap-2 flex-wrap">
+            {onOpenCommunicationComposer && client && (
+              <button
+                type="button"
+                data-testid="opp-section-open-composer-btn"
+                onClick={() =>
+                  onOpenCommunicationComposer({
+                    clientId: opportunity.clientId,
+                    opportunityId: opportunity.id,
+                    channel: 'whatsapp',
+                  })
+                }
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-teal-50 text-teal-900 border border-teal-200 text-[11px] font-bold hover:bg-teal-100"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-teal-700" />
+                <span>{language === 'ar' ? 'مساعد المراسلات الذكي' : 'Smart Composer'}</span>
+              </button>
+            )}
+            {onLogInteraction && (
+              <button
+                type="button"
+                data-testid="opp-new-linked-interaction-btn"
+                onClick={() =>
+                  onLogInteraction({
+                    clientId: opportunity.clientId,
+                    opportunityId: opportunity.id,
+                  })
+                }
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200 text-[11px] font-bold hover:bg-emerald-100"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>{language === 'ar' ? 'تسجيل تواصل مرتبط' : 'Log Communication'}</span>
+              </button>
+            )}
+          </div>
         </div>
 
         {linkedInteractions.length === 0 ? (

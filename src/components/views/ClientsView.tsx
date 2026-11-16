@@ -78,6 +78,13 @@ interface ClientsViewProps {
     opportunityId?: string;
     channel?: CommunicationChannel;
   }) => void;
+  onOpenCommunicationComposer?: (params: {
+    clientId: string;
+    contactId?: string;
+    opportunityId?: string;
+    meetingId?: string;
+    channel?: CommunicationChannel;
+  }) => void;
   onEditInteraction?: (interaction: CommunicationInteraction) => void;
   onDeleteInteraction?: (interactionId: string) => Promise<void> | void;
   onConvertInteractionToTask?: (
@@ -129,6 +136,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
   onOpenPlaybookRun,
   onStartPlaybookForClient,
   onLogInteraction,
+  onOpenCommunicationComposer,
   onEditInteraction,
   onDeleteInteraction,
   onConvertInteractionToTask,
@@ -396,6 +404,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
           onOpenPlaybookRun={onOpenPlaybookRun}
           onStartPlaybookForClient={onStartPlaybookForClient}
           onLogInteraction={onLogInteraction}
+          onOpenCommunicationComposer={onOpenCommunicationComposer}
           onEditInteraction={onEditInteraction}
           onDeleteInteraction={onDeleteInteraction}
           onConvertInteractionToTask={onConvertInteractionToTask}

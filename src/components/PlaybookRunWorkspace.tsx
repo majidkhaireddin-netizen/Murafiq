@@ -55,6 +55,7 @@ import {
   ExternalLink,
   Info,
   RefreshCw,
+  Sparkles,
 } from 'lucide-react';
 
 interface PlaybookRunWorkspaceProps {
@@ -83,6 +84,18 @@ interface PlaybookRunWorkspaceProps {
     step: PlaybookRunStep;
     suggestedChannel?: CommunicationChannel;
   }) => void;
+  onComposeCommunicationForStep?: (params: {
+    run: PlaybookRun;
+    step: PlaybookRunStep;
+    suggestedChannel?: CommunicationChannel;
+  }) => void;
+  onOpenCommunicationComposer?: (params: {
+    clientId: string;
+    contactId?: string;
+    opportunityId?: string;
+    meetingId?: string;
+    channel?: CommunicationChannel;
+  }) => void;
   onSelectClient: (client: Client) => void;
   onSelectOpportunity: (opportunity: Opportunity) => void;
   onOpenTask: (task: ActionItem) => void;
@@ -104,6 +117,8 @@ export const PlaybookRunWorkspace: React.FC<PlaybookRunWorkspaceProps> = ({
   onAtomicConvertStepToTask,
   onApproveRescheduleSuggestion,
   onLogCommunicationForStep,
+  onComposeCommunicationForStep,
+  onOpenCommunicationComposer,
   onSelectClient,
   onSelectOpportunity,
   onOpenTask,
@@ -451,6 +466,23 @@ export const PlaybookRunWorkspace: React.FC<PlaybookRunWorkspaceProps> = ({
 
           {/* Lifecycle Buttons */}
           <div className="flex items-center flex-wrap gap-2 shrink-0 text-xs">
+            {onOpenCommunicationComposer && client && (
+              <button
+                type="button"
+                data-testid="playbook-run-open-composer-btn"
+                onClick={() =>
+                  onOpenCommunicationComposer({
+                    clientId: run.clientId,
+                    opportunityId: opportunity ? run.opportunityId : undefined,
+                    channel: pointers.currentStep?.suggestedChannel || 'whatsapp',
+                  })
+                }
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-teal-200 bg-teal-50 hover:bg-teal-100 text-teal-900 font-bold transition-colors"
+              >
+                <Sparkles className="w-4 h-4 text-teal-700" />
+                <span>مراسلة ذكية للعميل</span>
+              </button>
+            )}
             {run.status === 'active' && (
               <>
                 <button
@@ -1086,6 +1118,32 @@ export const PlaybookRunWorkspace: React.FC<PlaybookRunWorkspaceProps> = ({
                         <Phone className="w-3.5 h-3.5" />
                         <span>تسجيل تواصل</span>
                       </button>
+
+                      {(onComposeCommunicationForStep || onOpenCommunicationComposer) && client && (
+                        <button
+                          type="button"
+                          data-testid={`compose-comm-for-step-btn-${step.id}`}
+                          onClick={() => {
+                            if (onComposeCommunicationForStep) {
+                              onComposeCommunicationForStep({
+                                run,
+                                step,
+                                suggestedChannel: step.suggestedChannel,
+                              });
+                            } else if (onOpenCommunicationComposer) {
+                              onOpenCommunicationComposer({
+                                clientId: run.clientId,
+                                opportunityId: opportunity ? run.opportunityId : undefined,
+                                channel: step.suggestedChannel || 'whatsapp',
+                              });
+                            }
+                          }}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-teal-200 bg-teal-50 hover:bg-teal-100 text-teal-900 font-bold"
+                        >
+                          <Sparkles className="w-3.5 h-3.5 text-teal-700" />
+                          <span>مراسلة ذكية للخطوة</span>
+                        </button>
+                      )}
 
                       {clientInteractions.length > 0 && (
                         <button

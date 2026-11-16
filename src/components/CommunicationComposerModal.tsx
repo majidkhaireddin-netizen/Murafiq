@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import type {
   Client,
   CommunicationChannel,
@@ -53,10 +53,12 @@ interface CommunicationComposerModalProps {
   customTemplates?: CommunicationTemplate[];
   onSaveTemplate?: (template: CommunicationTemplate) => void;
   onDeleteTemplate?: (templateId: string) => void;
-  onLogInteraction: (interaction: CommunicationInteraction) => void;
+  onLogInteraction: (interaction: CommunicationInteraction) => Promise<void>;
   initialChannel?: CommunicationChannel;
+  initialContactId?: string;
   initialOpportunityId?: string;
   initialMeetingId?: string;
+  isOnline?: boolean;
 }
 
 export const CommunicationComposerModal: React.FC<CommunicationComposerModalProps> = ({
@@ -70,15 +72,45 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
   onDeleteTemplate,
   onLogInteraction,
   initialChannel = 'whatsapp',
+  initialContactId,
   initialOpportunityId,
   initialMeetingId,
+  isOnline = true,
 }) => {
+  const clientOpportunities = opportunities.filter((o) => o.clientId === client.id);
+  const clientMeetings = meetings.filter((m) => m.clientId === client.id);
+
+  const resolveValidContactId = (candidateId?: string): string => {
+    if (candidateId && (client.contacts || []).some((c) => c.id === candidateId)) {
+      return candidateId;
+    }
+    return client.contacts?.find((c) => c.isPrimary)?.id || client.contacts?.[0]?.id || '';
+  };
+
+  const resolveValidOpportunityId = (candidateId?: string): string => {
+    if (candidateId && clientOpportunities.some((o) => o.id === candidateId)) {
+      return candidateId;
+    }
+    return '';
+  };
+
+  const resolveValidMeetingId = (candidateId?: string): string => {
+    if (candidateId && clientMeetings.some((m) => m.id === candidateId)) {
+      return candidateId;
+    }
+    return '';
+  };
+
   const [selectedChannel, setSelectedChannel] = useState<CommunicationChannel>(initialChannel);
-  const [selectedContactId, setSelectedContactId] = useState<string>(
-    client.contacts?.find((c) => c.isPrimary)?.id || client.contacts?.[0]?.id || ''
+  const [selectedContactId, setSelectedContactId] = useState<string>(() =>
+    resolveValidContactId(initialContactId)
   );
-  const [selectedOpportunityId, setSelectedOpportunityId] = useState<string>(initialOpportunityId || '');
-  const [selectedMeetingId, setSelectedMeetingId] = useState<string>(initialMeetingId || '');
+  const [selectedOpportunityId, setSelectedOpportunityId] = useState<string>(() =>
+    resolveValidOpportunityId(initialOpportunityId)
+  );
+  const [selectedMeetingId, setSelectedMeetingId] = useState<string>(() =>
+    resolveValidMeetingId(initialMeetingId)
+  );
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('sys-tmpl-intro-lead');
   const [categoryFilter, setCategoryFilter] = useState<CommunicationTemplateCategory | 'all'>('all');
 
@@ -109,10 +141,24 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
   const [showLogSection, setShowLogSection] = useState<boolean>(false);
   const [logOutcome, setLogOutcome] = useState<CommunicationOutcome>('message_sent');
   const [dispatchConfirmed, setDispatchConfirmed] = useState<boolean>(false);
-  const [storeBodyInSummary, setStoreBodyInSummary] = useState<boolean>(true);
+  const [storeBodyInSummary, setStoreBodyInSummary] = useState<boolean>(false);
   const [logNextStep, setLogNextStep] = useState<string>('');
   const [logNextDate, setLogNextDate] = useState<string>('');
   const [isSubmittingLog, setIsSubmittingLog] = useState<boolean>(false);
+  const inFlightSubmitRef = useRef<boolean>(false);
+  const stableDraftInteractionIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setSelectedChannel(initialChannel);
+      setSelectedContactId(resolveValidContactId(initialContactId));
+      setSelectedOpportunityId(resolveValidOpportunityId(initialOpportunityId));
+      setSelectedMeetingId(resolveValidMeetingId(initialMeetingId));
+      setActionError(null);
+      stableDraftInteractionIdRef.current = null;
+      inFlightSubmitRef.current = false;
+    }
+  }, [isOpen, client.id, initialChannel, initialContactId, initialOpportunityId, initialMeetingId]);
 
   const allTemplates = [...SYSTEM_COMMUNICATION_TEMPLATES, ...customTemplates];
   const filteredTemplates = allTemplates.filter(
@@ -120,8 +166,8 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
   );
 
   const activeContact = client.contacts?.find((c) => c.id === selectedContactId);
-  const activeOpportunity = opportunities.find((o) => o.id === selectedOpportunityId);
-  const activeMeeting = meetings.find((m) => m.id === selectedMeetingId);
+  const activeOpportunity = clientOpportunities.find((o) => o.id === selectedOpportunityId);
+  const activeMeeting = clientMeetings.find((m) => m.id === selectedMeetingId);
 
   // Interpolation result
   const currentTemplate = allTemplates.find((t) => t.id === selectedTemplateId);
@@ -280,44 +326,64 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
     setSelectedTemplateId(cloned.id);
   };
 
-  const handleFinalSubmitLog = () => {
+  const handleFinalSubmitLog = async () => {
+    if (inFlightSubmitRef.current || isSubmittingLog) {
+      return;
+    }
     if (!dispatchConfirmed) {
       setActionError('يرجى تأكيد أنك قمت بإرسال الرسالة فعلاً عبر القناة الخارجية قبل تسجيلها في السجل.');
       return;
     }
+    if (!isOnline) {
+      setActionError(
+        'أنت في وضع عدم الاتصال بالإنترنت: لا يمكن تأكيد حفظ سجل التواصل سحابياً الآن. ستبقى المسودة مفتوحة ومحفوظة حتى عودة الاتصال.'
+      );
+      return;
+    }
+
+    inFlightSubmitRef.current = true;
     setIsSubmittingLog(true);
     setActionError(null);
+
+    if (!stableDraftInteractionIdRef.current) {
+      stableDraftInteractionIdRef.current = `comm-${Date.now()}`;
+    }
 
     const summaryText = storeBodyInSummary
       ? body.slice(0, 1500)
       : `مراسلة عبر ${COMMUNICATION_CHANNEL_META[selectedChannel]?.labelAr || selectedChannel} (بدون حفظ النص الكامل بناءً على تفضيل الخصوصية).`;
 
+    const nowIso = new Date().toISOString();
     const interaction: CommunicationInteraction = {
-      id: `comm-${Date.now()}`,
+      id: stableDraftInteractionIdRef.current,
       clientId: client.id,
-      contactId: selectedContactId || undefined,
+      contactId: activeContact ? activeContact.id : undefined,
       contactName: activeContact?.name || undefined,
-      opportunityId: selectedOpportunityId || undefined,
-      meetingId: selectedMeetingId || undefined,
+      opportunityId: activeOpportunity ? activeOpportunity.id : undefined,
+      meetingId: activeMeeting ? activeMeeting.id : undefined,
       channel: selectedChannel,
       direction: 'outbound',
-      occurredAt: new Date().toISOString(),
-      subject: subject ? `${subject} - ${client.name}` : `مراسلة عبر ${COMMUNICATION_CHANNEL_META[selectedChannel]?.labelAr || selectedChannel}`,
+      occurredAt: nowIso,
+      subject: subject
+        ? `${subject} - ${client.name}`
+        : `مراسلة عبر ${COMMUNICATION_CHANNEL_META[selectedChannel]?.labelAr || selectedChannel}`,
       summary: summaryText,
       outcome: logOutcome,
       nextStep: logNextStep.trim() || undefined,
       nextFollowUpDate: logNextDate || undefined,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      createdAt: nowIso,
+      updatedAt: nowIso,
     };
 
     try {
-      onLogInteraction(interaction);
+      await onLogInteraction(interaction);
+      stableDraftInteractionIdRef.current = null;
       onClose();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'تعذر حفظ سجل النشاط.';
+      const msg = err instanceof Error ? err.message : 'تعذر حفظ سجل النشاط على الخادم.';
       setActionError(msg);
     } finally {
+      inFlightSubmitRef.current = false;
       setIsSubmittingLog(false);
     }
   };
@@ -691,14 +757,36 @@ export const CommunicationComposerModal: React.FC<CommunicationComposerModalProp
                 </div>
               </div>
 
-              <div className="flex justify-end pt-2">
+              {!isOnline && (
+                <div
+                  data-testid="composer-offline-save-warning"
+                  className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-[11px] text-amber-900 font-medium"
+                >
+                  أنت في وضع عدم الاتصال بالإنترنت: تم تعطيل الاعتماد السحابي المؤكد مؤقتاً مع الاحتفاظ بكامل مسودتك حتى عودة الاتصال.
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                {actionError && (
+                  <button
+                    type="button"
+                    data-testid="composer-retry-save-btn"
+                    onClick={() => void handleFinalSubmitLog()}
+                    disabled={isSubmittingLog || !dispatchConfirmed || !isOnline}
+                    className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-xl shadow-sm transition flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    <span>إعادة المحاولة</span>
+                  </button>
+                )}
                 <button
-                  onClick={handleFinalSubmitLog}
-                  disabled={isSubmittingLog || !dispatchConfirmed}
+                  type="button"
+                  data-testid="composer-confirm-save-btn"
+                  onClick={() => void handleFinalSubmitLog()}
+                  disabled={isSubmittingLog || !dispatchConfirmed || !isOnline}
                   className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shadow-sm transition flex items-center gap-2 disabled:opacity-50"
                 >
                   <Check className="w-4 h-4" />
-                  {isSubmittingLog ? 'جاري الحفظ...' : 'حفظ وتسجيل في السجل'}
+                  {isSubmittingLog ? 'جاري التأكيد السحابي...' : 'حفظ وتسجيل في السجل'}
                 </button>
               </div>
             </div>
